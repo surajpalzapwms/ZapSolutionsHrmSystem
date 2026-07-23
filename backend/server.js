@@ -75,6 +75,19 @@ app.use("/api/hrm/staff-basic-payrolls", staffBasicPayrollRoutes);
 app.use("/api/hrm/expense-categories", expenseCategoryRoutes);
 app.use("/api/hrm/office-expenses", officeExpenseRoutes);
 
+// Root route - simple confirmation that the API is up.
+// Without this, hitting the base URL in a browser shows Express's default
+// "Cannot GET /" message, which looks like the server is down even when it's
+// running fine (it's just that "/" itself has no route handler).
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "hrm-backend",
+    message:
+      "HRM backend API is running. See /health for a health check, and /api/... for endpoints.",
+  });
+});
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({
@@ -106,7 +119,10 @@ async function startServer(retries = 3, delayMs = 3000) {
       });
       return;
     } catch (err) {
-      console.error(`❌ MongoDB connection attempt ${attempt} failed:`, err.message);
+      console.error(
+        `❌ MongoDB connection attempt ${attempt} failed:`,
+        err.message,
+      );
       if (attempt === retries) {
         console.error("❌ Failed to start server after all retries:", err);
         process.exit(1);

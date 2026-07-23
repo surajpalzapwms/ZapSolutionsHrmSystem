@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .fade-in {
+    animation: fadeIn 0.7s ease-out forwards;
+  }
+
+  @keyframes fadeIn {
+    0% {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Auth / Login — only the bits Tailwind utility classes can't express
+   inline: the SVG line-draw animation and the card entrance animation.
+   Everything else now lives directly in login.jsx as Tailwind classes.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.auth-pulse-line {
+  stroke-dasharray: 900;
+  stroke-dashoffset: 900;
+  animation:
+    auth-draw 2.2s ease-out forwards,
+    auth-glow 3.5s ease-in-out 2.2s infinite;
+}
+
+@keyframes auth-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes auth-glow {
+  0%, 100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.auth-card {
+  animation: auth-card-in 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes auth-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-pulse-line,
+  .auth-card {
+    animation: none;
+  }
+}

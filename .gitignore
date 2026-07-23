@@ -1,16 +1,16 @@
-# Node modules
+# Node.js
 **/node_modules/
 
-# Environment variables
+# Environment
 **/.env
 
-# Vite
-**/.vite/
+# Build folders
 **/dist/
+**/.vite/
 
 # Logs
 *.log
 
 # OS files
-.DS_Store
 Thumbs.db
+.DS_Store

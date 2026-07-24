@@ -259,7 +259,7 @@ export const getPayrolls = async (req, res) => {
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const payrolls = await Payroll.find(query)
-      .populate("employeeId", "staffName email projectName contactNo")
+      .populate("employeeId", "staffName email projectName contactNo staffId")
       .sort({ period: -1, createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
@@ -291,7 +291,7 @@ export const getPayrolls = async (req, res) => {
 export const getPayroll = async (req, res) => {
   try {
     const payroll = await Payroll.findById(req.params.id)
-      .populate("employeeId", "staffName email projectName")
+      .populate("employeeId", "staffName email projectName staffId")
       .populate("createdBy", "name email");
 
     if (!payroll) {

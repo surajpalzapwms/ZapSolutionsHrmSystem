@@ -2,9 +2,11 @@
 import React, { useState } from "react";
 import { Upload, Wallet, Menu } from "lucide-react";
 import { useStaffBasicPayroll } from "./hooks/useStaffBasicPayroll";
+import { useModal } from "../../hooks/useModal";
 import StaffBasicPayrollList from "./StaffBasicPayrollList";
 import StaffBasicPayrollForm from "./StaffBasicPayrollForm";
 import StaffBasicPayrollImport from "./StaffBasicPayrollImport";
+import PayslipModal from "./PayslipModal";
 import SearchBar from "../common/SearchBar";
 import Button from "../common/Button";
 import Modal from "../common/Modal";
@@ -45,6 +47,7 @@ const StaffBasicPayroll = () => {
   const [editingRecord, setEditingRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const payslipModal = useModal();
 
   React.useEffect(() => {
     const checkMobile = () => setIsMobileView(window.innerWidth < 768);
@@ -56,6 +59,10 @@ const StaffBasicPayroll = () => {
   const handleEdit = (record) => {
     setEditingRecord(record);
     editModal.open();
+  };
+
+  const handlePayslip = (record) => {
+    payslipModal.open(record);
   };
 
   const handleViewHistory = async (record) => {
@@ -183,6 +190,7 @@ const StaffBasicPayroll = () => {
           onEdit={handleEdit}
           onDelete={handleDelete}
           onViewHistory={handleViewHistory}
+          onPayslip={handlePayslip}
           currentPage={currentPage}
           totalPages={totalPages}
           onPageChange={setCurrentPage}
@@ -265,6 +273,12 @@ const StaffBasicPayroll = () => {
           onCancel={importModal.close}
         />
       </Modal>
+
+      <PayslipModal
+        isOpen={payslipModal.isOpen}
+        onClose={payslipModal.close}
+        record={payslipModal.data}
+      />
     </div>
   );
 };

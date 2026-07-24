@@ -257,6 +257,19 @@ export const getPayrolls = async (req, res) => {
       query.employeeId = { $in: staff.map((s) => s._id) };
     }
 
+    // Non-admin callers (staff self-service, e.g. the "My Payslips" screen)
+    // may only ever see their own payroll records — regardless of what
+    // employeeId/search they passed — never another staff member's. Staff
+    // and User are only linked by email (no stored userId), same pattern
+    // used throughout this codebase.
+    if (req.user?.role !== "admin") {
+      const ownStaff = await Staff.findOne({
+        email: req.user?.email?.toLowerCase().trim(),
+      }).select("_id");
+      // No linked Staff profile → no records, not an error.
+      query.employeeId = ownStaff ? ownStaff._id : null;
+    }
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const payrolls = await Payroll.find(query)
       .populate("employeeId", "staffName email projectName contactNo staffId")

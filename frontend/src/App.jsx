@@ -17,6 +17,8 @@ import Payroll from "./components/payroll/index";
 import AddPayroll from "./components/payroll/AddPayrollPage";
 import AddStaffBasicPayroll from "./components/staff-basic-payroll/AddStaffBasicPayrollPage";
 import StaffBasicPayroll from "./components/staff-basic-payroll/index";
+import MyPayslips from "./components/staff-basic-payroll/MyPayslips";
+import MyLeaveRequests from "./components/leave-requests/MyLeaveRequests";
 import AddStaffMember from "./components/staff/AddStaffMemberPage";
 import LeaveAndAttendance from "./components/attendance/index";
 import ProtectedRoute from "./components/layout/ProtectedRoute";
@@ -157,6 +159,10 @@ function App() {
               }
             />
             <Route path="holidays" element={<Holidays />} />
+            {/* Open to any logged-in role — each only ever shows/affects
+                the caller's own records (enforced server-side too). */}
+            <Route path="my-payslips" element={<MyPayslips />} />
+            <Route path="my-leave-requests" element={<MyLeaveRequests />} />
             <Route
               path="leaveattendance"
               element={

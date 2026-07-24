@@ -13,6 +13,7 @@ import {
   deleteStaff,
   deleteManyStaff,
   importStaff,
+  getMyStaffProfile,
 } from "../controllers/staffController.js";
 
 const router = express.Router();
@@ -49,6 +50,9 @@ const staffBodyRules = [
 
 router.get("/", getAllStaff);
 router.get("/teams", getTeams);
+// Must come before "/:id" (which requires a Mongo ObjectId) or "me" would
+// get swallowed by that route and rejected as an invalid id.
+router.get("/me", getMyStaffProfile);
 
 router.get(
   "/:id",

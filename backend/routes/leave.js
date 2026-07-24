@@ -27,6 +27,14 @@ import {
   getOpenAttendanceToday,
   getStaffSummary,
   getStaffCalendar,
+  applyMyLeave,
+  getMyLeaves,
+  getPendingLeaveRequests,
+  getAllLeaveRequests,
+  approveLeaveRequest,
+  rejectLeaveRequest,
+  approveLeaveGroup,
+  rejectLeaveGroup,
 } from "../controllers/leave.js";
 
 const router = express.Router();
@@ -88,6 +96,41 @@ router.post("/", protect, allowAdminOnly, applyLeave);
 router.put("/leave/:id", protect, allowAdminOnly, updateLeave);
 router.delete("/leave/:id", protect, allowAdminOnly, deleteLeave);
 router.post("/leave/import", protect, allowAdminOnly, importLeaves);
+
+// ── Leave requests (staff self-service + admin approval) ───────────────────
+// Staff member: submit a request / view their own requests.
+router.get("/requests/my", protect, getMyLeaves);
+router.post("/requests/my", protect, applyMyLeave);
+// Admin: review + decide on requests. Static paths declared before "/:id"
+// routes so they aren't swallowed by them.
+router.get(
+  "/requests/pending",
+  protect,
+  allowAdminOnly,
+  getPendingLeaveRequests,
+);
+router.get("/requests/all", protect, allowAdminOnly, getAllLeaveRequests);
+// Multi-day ("range") requests: approve/reject every day in the group at once.
+// Declared before "/requests/:id/approve" so "group" is never swallowed as an :id.
+router.put(
+  "/requests/group/:groupId/approve",
+  protect,
+  allowAdminOnly,
+  approveLeaveGroup,
+);
+router.put(
+  "/requests/group/:groupId/reject",
+  protect,
+  allowAdminOnly,
+  rejectLeaveGroup,
+);
+router.put(
+  "/requests/:id/approve",
+  protect,
+  allowAdminOnly,
+  approveLeaveRequest,
+);
+router.put("/requests/:id/reject", protect, allowAdminOnly, rejectLeaveRequest);
 
 // ── Misc ─────────────────────────────────────────────────────────────────────
 router.get("/extra-hours/:userId", getExtraHoursSimple);

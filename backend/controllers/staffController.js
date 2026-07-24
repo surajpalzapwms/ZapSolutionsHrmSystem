@@ -62,6 +62,28 @@ const duplicateKeyMessage = (err) => {
     : `A staff member with this ${label} already exists`;
 };
 
+/**
+ * GET /api/staff/me — the logged-in account's own Staff profile.
+ * Staff and User are only linked by email (no stored userId), same
+ * pattern used everywhere else in this codebase (see services/leave.js).
+ */
+export const getMyStaffProfile = asyncHandler(async (req, res) => {
+  const email = req.user?.email?.toLowerCase().trim();
+  const staff = email
+    ? await Staff.findOne({ email }).select("-password")
+    : null;
+
+  if (!staff) {
+    return res.status(404).json({
+      success: false,
+      message:
+        "No staff profile is linked to your account yet. Contact your admin.",
+    });
+  }
+
+  res.status(200).json({ success: true, data: staff });
+});
+
 /** GET /api/staff — list all staff members */
 export const getAllStaff = asyncHandler(async (req, res) => {
   const { team, enabled, search } = req.query;

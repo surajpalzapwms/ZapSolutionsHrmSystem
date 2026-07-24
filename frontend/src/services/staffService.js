@@ -12,4 +12,7 @@ export const staffService = {
   toggleStatus: (id, isActive) => api.put(`/api/staff/status/${id}`, { isActive }),
   getTeams: () => api.get("/api/staff/teams"),
   getActiveStaff: () => api.get("/api/hrm/advances/staffs-list"),
+  // Logged-in account's own Staff profile (used by "My Payslips" / leave
+  // request screens to resolve which staff record belongs to them).
+  getMyProfile: () => api.get("/api/staff/me"),
 };

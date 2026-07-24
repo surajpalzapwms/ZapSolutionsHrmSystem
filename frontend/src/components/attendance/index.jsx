@@ -11,6 +11,7 @@ import AttendanceModal from "./AttendanceModal";
 import LeaveModal from "./LeaveModal";
 import ConvertExtraHoursModal from "./ConvertExtraHoursModal";
 import ExtraHoursModal from "./ExtraHoursModal";
+import LeaveRequestsPanel from "./LeaveRequestsPanel";
 import Sidebar from "../common/Sidebar";
 import Spinner from "../common/Spinner";
 
@@ -138,6 +139,10 @@ const Attendance = () => {
       </div>
 
       {/* {!selectedStaff && <EarlySignOutPanel />} */}
+
+      {!selectedStaff && (
+        <LeaveRequestsPanel onDecision={refreshAll} />
+      )}
 
       {staffLoading && !staffList.length ? (
         <Spinner />

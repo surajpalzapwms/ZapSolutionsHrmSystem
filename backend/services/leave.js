@@ -67,6 +67,25 @@ export const getDayRange = (dateInput) => {
   };
 };
 
+// ─── Every "YYYY-MM-DD" from start to end, inclusive (no skipping) ──────────
+// Used for multi-day leave requests — the caller decides separately whether
+// Sundays/holidays should be included or blocked; this just enumerates days.
+export const getInclusiveDateStrings = (startStr, endStr) => {
+  const { year: sy, month: sm, day: sd } = parseDateString(startStr);
+  const { year: ey, month: em, day: ed } = parseDateString(endStr);
+  const start = Date.UTC(sy, sm - 1, sd);
+  const end = Date.UTC(ey, em - 1, ed);
+  const dates = [];
+  for (let t = start; t <= end; t += 24 * 60 * 60 * 1000) {
+    const d = new Date(t);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    dates.push(`${yyyy}-${mm}-${dd}`);
+  }
+  return dates;
+};
+
 // ─── Wide UTC range: day-1 00:00 → day+1 23:59 ───────────────────────────────
 const getWideDayRange = (dateStr) => {
   const { year, month, day } = parseDateString(dateStr);

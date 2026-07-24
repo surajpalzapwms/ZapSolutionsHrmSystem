@@ -9,6 +9,8 @@ import {
   Wallet,
   Receipt,
   LayoutDashboard,
+  FileText,
+  CalendarPlus,
 } from "lucide-react";
 import { getCurrentUser, isAdminUser } from "../../utils/authUser";
 
@@ -21,18 +23,26 @@ const NAV_ITEMS = [
   { label: "Staff Basic Payroll", icon: Wallet, path: "/hrmlayout/staffbasicpayroll", adminOnly: true },
   { label: "Advance", icon: Wallet, path: "/hrmlayout/advance", adminOnly: true },
   { label: "Expenses", icon: Receipt, path: "/hrmlayout/expenses", adminOnly: true },
+  // Staff self-service — each screen only ever shows the logged-in
+  // account's own records, so these are irrelevant for admins (who manage
+  // everyone via the Attendance / Staff Basic Payroll pages instead).
+  { label: "My Leave Requests", icon: CalendarPlus, path: "/hrmlayout/my-leave-requests", adminOnly: false, hideForAdmin: true },
+  { label: "My Payslips", icon: FileText, path: "/hrmlayout/my-payslips", adminOnly: false, hideForAdmin: true },
 ];
 
 const Sidebar = ({ isOpen, toggleSidebar, isMobile = false }) => {
   if (isMobile && !isOpen) return null;
 
-  // Non-admin ("user" role) staff only get Dashboard + Holidays — everything
-  // else (Staff list, Attendance, Payroll, Staff Basic Payroll, Advance,
-  // Expenses) is admin-only. Admins keep the full, unchanged nav.
+  // Non-admin ("user" role) staff only get Dashboard + Holidays + their own
+  // self-service screens — everything else (Staff list, Attendance,
+  // Payroll, Staff Basic Payroll, Advance, Expenses) is admin-only. Admins
+  // keep the full, unchanged nav plus the admin-only management screens,
+  // but don't need the self-service ones since those only ever show the
+  // logged-in account's own records.
   const admin = isAdminUser(getCurrentUser());
-  const visibleNavItems = admin
-    ? NAV_ITEMS
-    : NAV_ITEMS.filter((item) => !item.adminOnly);
+  const visibleNavItems = NAV_ITEMS.filter((item) =>
+    admin ? !item.hideForAdmin : !item.adminOnly,
+  );
 
   return (
     <>

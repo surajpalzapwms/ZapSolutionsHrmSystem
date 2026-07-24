@@ -32,4 +32,22 @@ export const attendanceService = {
   getStaffSummary: () => api.get("/api/hrm/leaves/staff-summary"),
   getStaffCalendar: (staffId, params) =>
     api.get(`/api/hrm/leaves/staff-summary/${staffId}/calendar`, { params }),
+
+  // ── Leave requests: staff self-service + admin approval ─────────────────
+  // Staff member: submit a request / see their own requests + status.
+  getMyLeaveRequests: () => api.get("/api/hrm/leaves/requests/my"),
+  submitLeaveRequest: (data) => api.post("/api/hrm/leaves/requests/my", data),
+  // Admin: review pending requests (or all, filtered by status) and decide.
+  getPendingLeaveRequests: () => api.get("/api/hrm/leaves/requests/pending"),
+  getAllLeaveRequests: (params) =>
+    api.get("/api/hrm/leaves/requests/all", { params }),
+  approveLeaveRequest: (id) =>
+    api.put(`/api/hrm/leaves/requests/${id}/approve`),
+  rejectLeaveRequest: (id, remarks) =>
+    api.put(`/api/hrm/leaves/requests/${id}/reject`, { remarks }),
+  // Multi-day ("range") requests: approve/reject every day in one action.
+  approveLeaveGroup: (groupId) =>
+    api.put(`/api/hrm/leaves/requests/group/${groupId}/approve`),
+  rejectLeaveGroup: (groupId, remarks) =>
+    api.put(`/api/hrm/leaves/requests/group/${groupId}/reject`, { remarks }),
 };

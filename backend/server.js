@@ -30,9 +30,22 @@ const app = express();
 // are treated as the same origin (a common source of CORS rejections).
 const stripTrailingSlash = (url) => url.trim().replace(/\/+$/, "");
 
-const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173")
-  .split(",")
-  .map(stripTrailingSlash);
+// Origins from FRONTEND_URL (e.g. your deployed Vercel URL) are always
+// allowed. On top of that, always allow the common local Vite dev server
+// origins too — so switching between local development and production
+// never requires editing .env, and localhost:5173 doesn't get rejected
+// just because FRONTEND_URL is currently pointed at the deployed site.
+const LOCAL_DEV_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+const allowedOrigins = [
+  ...(process.env.FRONTEND_URL || "http://localhost:5173")
+    .split(",")
+    .map(stripTrailingSlash),
+  ...LOCAL_DEV_ORIGINS,
+].filter((origin, index, all) => all.indexOf(origin) === index);
 
 app.use(
   cors({

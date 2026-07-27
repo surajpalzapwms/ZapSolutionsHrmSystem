@@ -22,6 +22,8 @@ export const LEAVE_TYPES = {
   PAID: "paid",
   UNPAID: "unpaid",
   SWAP: "swapleave",
+  SICK: "sick",
+  CASUAL: "casual",
 };
 
 export const ATTENDANCE_TYPES = {

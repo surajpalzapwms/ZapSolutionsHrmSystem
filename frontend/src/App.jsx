@@ -21,6 +21,7 @@ import MyPayslips from "./components/staff-basic-payroll/MyPayslips";
 import MyLeaveRequests from "./components/leave-requests/MyLeaveRequests";
 import AddStaffMember from "./components/staff/AddStaffMemberPage";
 import LeaveAndAttendance from "./components/attendance/index";
+import LeaveManagement from "./components/leave/index";
 import ProtectedRoute from "./components/layout/ProtectedRoute";
 import AdminRoute from "./components/layout/AdminRoute";
 import InstallPWA from "./components/InstallPWA";
@@ -171,6 +172,7 @@ function App() {
                 </AdminRoute>
               }
             />
+            <Route path="leave" element={<LeaveManagement />} />
             <Route path="payroll">
               <Route
                 index

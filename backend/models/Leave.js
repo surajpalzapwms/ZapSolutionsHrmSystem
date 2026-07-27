@@ -11,16 +11,6 @@ const leaveSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
-    // Ties together every day of a multi-day ("range") leave request so the
-    // admin can approve/reject/view them as a single unit, while each day
-    // still keeps its own Leave document (same pattern every other part of
-    // this schema already relies on — one doc per calendar day). Null for
-    // ordinary single-day requests.
-    requestGroupId: {
-      type: String,
-      default: null,
-      index: true,
-    },
     reason: {
       type: String,
       required: true,

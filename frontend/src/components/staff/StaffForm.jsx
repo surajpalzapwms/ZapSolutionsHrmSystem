@@ -29,6 +29,25 @@ const validate = (form, isEdit) => {
   return errors;
 };
 
+// The five employment statuses and, for each, which extra date field the
+// form should reveal. "Joining Date" is common to every status and is
+// always shown, so it is not listed here.
+const STATUS_OPTIONS = [
+  { value: "Probation", dateField: "probationEndDate" },
+  { value: "Project Basic", dateField: "projectEndDate" },
+  { value: "Confirmation", dateField: "confirmationDate" },
+  { value: "Outsource Base", dateField: "projectEndDate" },
+  { value: "Relieving", dateField: "relievingDate" },
+];
+
+// Label shown for each status-specific date field.
+const DATE_FIELD_LABELS = {
+  probationEndDate: "Probation End Date",
+  projectEndDate: "Project End Date",
+  confirmationDate: "Confirmation Date",
+  relievingDate: "Relieving Date",
+};
+
 const StaffForm = ({
   initialData = null,
   onSubmit,
@@ -53,8 +72,11 @@ const StaffForm = ({
       email: "",
       password: "",
       date: "",
-      status: "Trial",
+      status: "Probation",
       relievingDate: "",
+      probationEndDate: "",
+      confirmationDate: "",
+      projectEndDate: "",
     },
     (f) => validate(f, isEdit),
   );
@@ -110,9 +132,18 @@ const StaffForm = ({
         email: initialData.email || "",
         password: "",
         date: initialData.date ? initialData.date.slice(0, 10) : "",
-        status: initialData.status || "Trial",
+        status: initialData.status || "Probation",
         relievingDate: initialData.relievingDate
           ? initialData.relievingDate.slice(0, 10)
+          : "",
+        probationEndDate: initialData.probationEndDate
+          ? initialData.probationEndDate.slice(0, 10)
+          : "",
+        confirmationDate: initialData.confirmationDate
+          ? initialData.confirmationDate.slice(0, 10)
+          : "",
+        projectEndDate: initialData.projectEndDate
+          ? initialData.projectEndDate.slice(0, 10)
           : "",
       });
     }
@@ -161,6 +192,10 @@ const StaffForm = ({
       setIsSubmitting(false);
     }
   };
+
+  // Which extra date field to reveal for the currently-selected status.
+  const activeDateField =
+    STATUS_OPTIONS.find((o) => o.value === form.status)?.dateField || null;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -303,16 +338,24 @@ const StaffForm = ({
             onChange={handleChange}
             className="w-full px-3 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
-            <option value="Trial">Trial</option>
-            <option value="Confirmed">Confirmed</option>
+            {STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.value}
+              </option>
+            ))}
           </select>
         </div>
-        <DatePicker
-          label="Relieving Date (if leaving)"
-          name="relievingDate"
-          value={form.relievingDate}
-          onChange={handleChange}
-        />
+        {/* Only the date field belonging to the selected status is shown;
+            the others stay hidden (and their values are cleared server-side
+            when the status changes). */}
+        {activeDateField && (
+          <DatePicker
+            label={DATE_FIELD_LABELS[activeDateField]}
+            name={activeDateField}
+            value={form[activeDateField]}
+            onChange={handleChange}
+          />
+        )}
       </div>
       <div className="flex justify-end gap-3 pt-2">
         <Button type="button" variant="secondary" onClick={onCancel}>

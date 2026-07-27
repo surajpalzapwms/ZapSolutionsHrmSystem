@@ -14,6 +14,8 @@ import { getTodayDate, getBlockedDayReason } from "../../utils/dateUtils";
 const typeOptions = [
   { value: LEAVE_TYPES.PAID, label: "Paid Leave" },
   { value: LEAVE_TYPES.UNPAID, label: "Unpaid Leave" },
+  { value: LEAVE_TYPES.SICK, label: "Sick Leave" },
+  { value: LEAVE_TYPES.CASUAL, label: "Casual Leave" },
   { value: LEAVE_TYPES.SWAP, label: "Swap Leave" },
 ];
 

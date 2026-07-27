@@ -8,10 +8,8 @@ import StaffList from "./StaffList";
 import StaffCalendarView from "./StaffCalendarView";
 import EarlySignOutPanel from "./EarlySignOutPanel";
 import AttendanceModal from "./AttendanceModal";
-import LeaveModal from "./LeaveModal";
 import ConvertExtraHoursModal from "./ConvertExtraHoursModal";
 import ExtraHoursModal from "./ExtraHoursModal";
-import LeaveRequestsPanel from "./LeaveRequestsPanel";
 import Sidebar from "../common/Sidebar";
 import Spinner from "../common/Spinner";
 
@@ -34,11 +32,9 @@ const Attendance = () => {
   const {
     recordAttendance,
     deleteByDate,
-    applyLeave,
     convertToLeave,
     holidays,
     attendanceModal,
-    leaveModal,
     extraHoursModal,
   } = useAttendance();
 
@@ -73,11 +69,6 @@ const Attendance = () => {
     [staffList],
   );
 
-  const leaveStaffOptions = useMemo(
-    () => staffList.map((mr) => ({ value: mr.staffId, label: mr.staffName })),
-    [staffList],
-  );
-
   const refreshAll = async () => {
     await fetchStaffSummary();
     setCalendarRefreshKey((k) => k + 1);
@@ -85,12 +76,6 @@ const Attendance = () => {
 
   const handleRecordAttendance = async (data) => {
     const ok = await recordAttendance(data);
-    if (ok) await refreshAll();
-    return ok;
-  };
-
-  const handleApplyLeave = async (data) => {
-    const ok = await applyLeave(data);
     if (ok) await refreshAll();
     return ok;
   };
@@ -138,12 +123,6 @@ const Attendance = () => {
         </div>
       </div>
 
-      {/* {!selectedStaff && <EarlySignOutPanel />} */}
-
-      {!selectedStaff && (
-        <LeaveRequestsPanel onDecision={refreshAll} />
-      )}
-
       {staffLoading && !staffList.length ? (
         <Spinner />
       ) : selectedStaff ? (
@@ -167,7 +146,6 @@ const Attendance = () => {
         <StaffList
           staffList={staffList}
           onRecordAttendance={attendanceModal.open}
-          onApplyLeave={leaveModal.open}
           onConvertExtraHours={() => setConvertModalOpen(true)}
           onView={(row) => setSelectedStaff(row)}
           onViewExtraHours={handleViewExtraHours}
@@ -179,14 +157,6 @@ const Attendance = () => {
         onClose={attendanceModal.close}
         onSubmit={handleRecordAttendance}
         staffOptions={attendanceStaffOptions}
-        holidays={holidays}
-      />
-
-      <LeaveModal
-        isOpen={leaveModal.isOpen}
-        onClose={leaveModal.close}
-        onSubmit={handleApplyLeave}
-        staffOptions={leaveStaffOptions}
         holidays={holidays}
       />
 

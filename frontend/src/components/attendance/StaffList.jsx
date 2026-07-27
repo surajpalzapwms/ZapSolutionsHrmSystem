@@ -1,6 +1,6 @@
 // src/components/attendance/MRList.jsx
 import React from "react";
-import { Clock, CalendarPlus, RefreshCcw, Eye } from "lucide-react";
+import { Clock, RefreshCcw, Eye } from "lucide-react";
 import Table from "../common/Table";
 import Button from "../common/Button";
 
@@ -21,7 +21,6 @@ const formatExtraRemaining = (minutes = 0) => {
 const StaffList = ({
   staffList,
   onRecordAttendance,
-  onApplyLeave,
   onConvertExtraHours,
   onView,
   onViewExtraHours,
@@ -125,14 +124,6 @@ const StaffList = ({
       <div className="flex flex-wrap gap-3 mb-4">
         <Button variant="success" size="sm" onClick={onRecordAttendance}>
           <Clock size={16} className="mr-1" /> Record Attendance
-        </Button>
-        <Button
-          variant="warning"
-          size="sm"
-          className="!bg-amber-500 hover:!bg-amber-600"
-          onClick={onApplyLeave}
-        >
-          <CalendarPlus size={16} className="mr-1" /> Apply Leave
         </Button>
         <Button
           size="sm"

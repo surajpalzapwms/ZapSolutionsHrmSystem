@@ -22,6 +22,7 @@ import expenseCategoryRoutes from "./routes/expenseCategoryRoutes.js";
 import officeExpenseRoutes from "./routes/officeExpenseRoutes.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import leaveAttendanceRoutes from "./routes/leave.js";
+import leavePolicyRoutes from "./routes/leavePolicy.js";
 
 const app = express();
 
@@ -82,6 +83,7 @@ app.use("/api/hrm/attendance", attendanceRoutes);
 app.use("/api/hrm/holidays", holidayRoutes);
 app.use("/api/hrm/saturday-holidays", saturdayHolidayRoutes);
 app.use("/api/hrm/leaves", leaveAttendanceRoutes);
+app.use("/api/hrm/leave-policy", leavePolicyRoutes);
 app.use("/api/staff", staffRoutes);
 app.use("/api/hrm/advances", advanceRoutes);
 app.use("/api/hrm/staff-basic-payrolls", staffBasicPayrollRoutes);

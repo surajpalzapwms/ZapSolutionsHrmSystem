@@ -13,6 +13,8 @@ import { showToast } from "../../utils/toast";
 const LEAVE_TYPE_OPTIONS = [
   { value: "unpaid", label: "Unpaid Leave" },
   { value: "paid", label: "Paid Leave" },
+  { value: "sick", label: "Sick Leave" },
+  { value: "casual", label: "Casual Leave" },
   { value: "swapleave", label: "Swap Leave" },
 ];
 

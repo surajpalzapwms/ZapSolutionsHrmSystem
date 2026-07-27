@@ -1,5 +1,4 @@
 import mongoose from "mongoose";
-import { randomUUID } from "crypto";
 import {
   Attendance,
   Leave,
@@ -9,7 +8,6 @@ import {
   formatMinutesToTimeString,
   getAttendanceType,
   getDayRange,
-  getInclusiveDateStrings,
   getLeaveRangeFromDate,
   isHolidayOrSunday,
   enforceExtraHoursConsistency,
@@ -161,10 +159,12 @@ export const updateAttendance = async (req, res) => {
       : previousRecord.logoutTime;
 
     if (logoutDT <= loginDT)
-      return res.status(400).json({
-        success: false,
-        message: "Logout time must be after login time",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Logout time must be after login time",
+        });
 
     const totalMinutesWorked = Math.floor((logoutDT - loginDT) / 60000);
     const h = Math.floor(totalMinutesWorked / 60),
@@ -389,10 +389,12 @@ export const deleteAttendanceByDate = async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(400).json({
-        success: false,
-        message: "Invalid date format. Use YYYY-MM-DD",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Invalid date format. Use YYYY-MM-DD",
+        });
     }
 
     const attendance = await findExistingAttendance(userId, date, session);
@@ -546,14 +548,9 @@ export const listLeaves = async (req, res) => {
 };
 
 // POST / (apply leave)
-// Accepts an optional `endDate` alongside `leaveDate` to apply for a range of
-// days (e.g. leaveDate=2026-07-10, endDate=2026-07-15) in one go — every
-// calendar day in that range gets its own Leave doc (including Sundays/
-// holidays, per how this is meant to be used) sharing one requestGroupId so
-// they can be tracked/approved together.
 export const applyLeave = async (req, res) => {
   try {
-    const { userId, leaveDate, endDate, reason, leaveType, status } = req.body;
+    const { userId, leaveDate, reason, leaveType, status } = req.body;
     if (!userId || !leaveDate || !reason) {
       return res.status(400).json({
         success: false,
@@ -570,81 +567,63 @@ export const applyLeave = async (req, res) => {
     }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(leaveDate)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid leaveDate format. Use YYYY-MM-DD",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Invalid leaveDate format. Use YYYY-MM-DD",
+        });
     }
-    if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid endDate format. Use YYYY-MM-DD",
-      });
-    }
-
-    const isRange = !!endDate && endDate !== leaveDate;
-    if (isRange && endDate < leaveDate) {
-      return res.status(400).json({
-        success: false,
-        message: "endDate cannot be before leaveDate",
-      });
-    }
-
+    // Timezone-safe parse: build the date from its UTC calendar parts instead of
+    // `new Date(leaveDate); .setHours(0,0,0,0)`, which silently shifted the date
+    // back by a day whenever the server's local timezone was ahead of UTC (e.g.
+    // IST) — "2026-07-17" would get stored as 2026-07-16T18:30Z and every screen
+    // that reads it back with getUTCDate() would show it as 16 Jul.
+    const { start: parsedLeaveDate } = getDayRange(leaveDate);
     const todayString = getDateStringIST(new Date());
-    if (leaveDate > todayString || (endDate && endDate > todayString)) {
+    if (leaveDate > todayString) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Cannot apply for leave for future dates",
+        });
+    }
+    if (parsedLeaveDate.getUTCDay() === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Cannot apply for leave on Sunday" });
+    }
+
+    const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
+    if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
       return res.status(400).json({
         success: false,
-        message: "Cannot apply for leave for future dates",
+        message: `Cannot apply for leave on holiday: ${holidayCheck.reason}`,
       });
     }
 
-    const dateStrings = isRange
-      ? getInclusiveDateStrings(leaveDate, endDate)
-      : [leaveDate];
-
-    // Single-day requests keep the original Sunday/holiday block. Range
-    // requests deliberately include every day (Sundays/holidays too) so a
-    // 10th–15th request gives leave for the whole span without gaps.
-    if (!isRange) {
-      const { start: parsedLeaveDate } = getDayRange(leaveDate);
-      if (parsedLeaveDate.getUTCDay() === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Cannot apply for leave on Sunday",
-        });
-      }
-      const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
-      if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot apply for leave on holiday: ${holidayCheck.reason}`,
-        });
-      }
+    const existingAttendance = await findExistingAttendance(
+      userId,
+      parsedLeaveDate,
+    );
+    if (existingAttendance) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot apply for leave on a day with existing attendance",
+      });
     }
 
-    // Validate every day in the (range) request up front so we never leave a
-    // partial set of days applied — a day with existing attendance or an
-    // existing leave record blocks the whole request.
-    for (const dateStr of dateStrings) {
-      const { start: dayStart, end: dayEnd } = getDayRange(dateStr);
-      const existingAttendance = await findExistingAttendance(userId, dayStart);
-      if (existingAttendance) {
-        return res.status(400).json({
+    const { start, end } = getDayRange(parsedLeaveDate);
+    if (
+      await Leave.findOne({ userId, leaveDate: { $gte: start, $lte: end } })
+    ) {
+      return res
+        .status(400)
+        .json({
           success: false,
-          message: `Cannot apply for leave on ${dateStr} — existing attendance on that day`,
+          message: "Leave already exists for this date",
         });
-      }
-      if (
-        await Leave.findOne({
-          userId,
-          leaveDate: { $gte: dayStart, $lte: dayEnd },
-        })
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: `Leave already exists for ${dateStr}`,
-        });
-      }
     }
 
     if (leaveType === "paid") {
@@ -652,58 +631,45 @@ export const applyLeave = async (req, res) => {
       const joinDate =
         staffRecord?.date ?? new Date(Date.UTC(new Date().getFullYear(), 0, 1));
       const available = await getAvailablePaidLeaves(userId, joinDate);
-      if (available < dateStrings.length) {
+      if (available < 1) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient paid leave balance for this calendar year. Requested ${dateStrings.length} day(s), ${available} available.`,
+          message: "Insufficient paid leave balance for this calendar year.",
         });
       }
     }
 
-    const requestGroupId = isRange ? randomUUID() : null;
-    const docs = dateStrings.map((dateStr) => ({
+    const leave = new Leave({
       userId,
-      leaveDate: getDayRange(dateStr).start,
-      requestGroupId,
+      leaveDate: parsedLeaveDate,
       reason,
       leaveType: leaveType || "unpaid",
       status: status || "approved",
-    }));
-    const savedLeaves = await Leave.insertMany(docs);
-
-    const startStr = formatDateForLog(savedLeaves[0].leaveDate);
-    const endStr = formatDateForLog(
-      savedLeaves[savedLeaves.length - 1].leaveDate,
-    );
-    const rangeLabel = isRange ? `${startStr} to ${endStr}` : startStr;
+    });
+    await leave.save();
+    const savedDoc = leave.toObject();
+    const leaveDateStr = formatDateForLog(parsedLeaveDate);
     await logActivity(req, {
       action: "CREATE",
-      actionLabel: `Applied ${toTitleCase(leaveType || "Unpaid")} Leave for User ${userId} (${rangeLabel})`,
+      actionLabel: `Applied ${toTitleCase(leaveType || "Unpaid")} Leave for User ${userId} on ${leaveDateStr}`,
       tableName: "leaves",
       tableLabel: "Leave",
-      recordId: savedLeaves[0]._id,
-      referenceNumber: `${userId}_${startStr}`,
-      newData: isRange
-        ? savedLeaves.map((l) => l.toObject())
-        : savedLeaves[0].toObject(),
-      newSnapshots: savedLeaves.map((l) => ({
-        recordId: String(l._id),
-        refNumber: `${userId}_${formatDateForLog(l.leaveDate)}`,
-        data: l.toObject(),
-      })),
-      description: `${toTitleCase(leaveType || "Unpaid")} leave applied for user ${userId} (${rangeLabel}, ${dateStrings.length} day(s)). Reason: ${reason}`,
+      recordId: leave._id,
+      referenceNumber: `${userId}_${leaveDateStr}`,
+      newData: savedDoc,
+      newSnapshots: [
+        {
+          recordId: String(leave._id),
+          refNumber: `${userId}_${leaveDateStr}`,
+          data: savedDoc,
+        },
+      ],
+      description: `${toTitleCase(leaveType || "Unpaid")} leave applied for user ${userId} on ${leaveDateStr}. Reason: ${reason}`,
       refField: "userId",
     });
-
-    res.status(201).json({
-      success: true,
-      message: isRange
-        ? `Leave applied successfully for ${dateStrings.length} days`
-        : "Leave applied successfully",
-      leave: savedLeaves[0],
-      leaves: savedLeaves,
-      requestGroupId,
-    });
+    res
+      .status(201)
+      .json({ success: true, message: "Leave applied successfully", leave });
   } catch (error) {
     res
       .status(500)
@@ -717,10 +683,6 @@ export const applyLeave = async (req, res) => {
 // stored userId), same pattern used everywhere else in this file.
 
 // POST /requests/my — staff submits a new leave request
-// Also accepts an optional `endDate` for a multi-day request (e.g. 10th to
-// 15th) — every day in the range (Sundays/holidays included, no gaps) gets
-// its own pending Leave doc sharing one requestGroupId, so the admin can
-// approve/reject the whole span in one action.
 export const applyMyLeave = async (req, res) => {
   try {
     const email = req.user?.email?.toLowerCase().trim();
@@ -733,7 +695,7 @@ export const applyMyLeave = async (req, res) => {
       });
     }
     const userId = staff._id;
-    const { leaveDate, endDate, reason, leaveType } = req.body;
+    const { leaveDate, reason, leaveType } = req.body;
 
     if (!leaveDate || !reason) {
       return res.status(400).json({
@@ -745,7 +707,8 @@ export const applyMyLeave = async (req, res) => {
     if (leaveType && !validLeaveTypes.includes(leaveType)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid leave type. Must be 'paid', 'unpaid', or 'swapleave'",
+        message:
+          "Invalid leave type. Must be 'paid', 'unpaid', or 'swapleave'",
       });
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(leaveDate)) {
@@ -754,97 +717,61 @@ export const applyMyLeave = async (req, res) => {
         message: "Invalid leaveDate format. Use YYYY-MM-DD",
       });
     }
-    if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+
+    const { start: parsedLeaveDate, end } = getDayRange(leaveDate);
+
+    if (parsedLeaveDate.getUTCDay() === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Cannot request leave on Sunday" });
+    }
+
+    const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
+    if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
       return res.status(400).json({
         success: false,
-        message: "Invalid endDate format. Use YYYY-MM-DD",
+        message: `Cannot request leave on holiday: ${holidayCheck.reason}`,
       });
     }
 
-    const isRange = !!endDate && endDate !== leaveDate;
-    if (isRange && endDate < leaveDate) {
-      return res.status(400).json({
-        success: false,
-        message: "endDate cannot be before leaveDate",
-      });
-    }
-
-    const dateStrings = isRange
-      ? getInclusiveDateStrings(leaveDate, endDate)
-      : [leaveDate];
-
-    // Single-day requests keep the original Sunday/holiday block; range
-    // requests intentionally cover every day in the span.
-    if (!isRange) {
-      const { start: parsedLeaveDate } = getDayRange(leaveDate);
-      if (parsedLeaveDate.getUTCDay() === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Cannot request leave on Sunday",
-        });
-      }
-      const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
-      if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot request leave on holiday: ${holidayCheck.reason}`,
-        });
-      }
-    }
-
-    for (const dateStr of dateStrings) {
-      const { start: dayStart, end: dayEnd } = getDayRange(dateStr);
-      const existing = await Leave.findOne({
-        userId,
-        leaveDate: { $gte: dayStart, $lte: dayEnd },
-        status: { $in: ["pending", "approved"] },
-      });
-      if (existing) {
-        return res.status(400).json({
-          success: false,
-          message: `A leave request already exists for ${dateStr}`,
-        });
-      }
-    }
-
-    const requestGroupId = isRange ? randomUUID() : null;
-    const docs = dateStrings.map((dateStr) => ({
+    const existing = await Leave.findOne({
       userId,
-      leaveDate: getDayRange(dateStr).start,
-      requestGroupId,
+      leaveDate: { $gte: parsedLeaveDate, $lte: end },
+      status: { $in: ["pending", "approved"] },
+    });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: "A leave request already exists for this date",
+      });
+    }
+
+    const leave = new Leave({
+      userId,
+      leaveDate: parsedLeaveDate,
       reason,
       leaveType: leaveType || "unpaid",
       status: "pending",
-    }));
-    const savedLeaves = await Leave.insertMany(docs);
+    });
+    await leave.save();
 
-    const startStr = formatDateForLog(savedLeaves[0].leaveDate);
-    const endStr = formatDateForLog(
-      savedLeaves[savedLeaves.length - 1].leaveDate,
-    );
-    const rangeLabel = isRange ? `${startStr} to ${endStr}` : startStr;
+    const leaveDateStr = formatDateForLog(parsedLeaveDate);
     await logActivity(req, {
       action: "CREATE",
-      actionLabel: `Leave request submitted by ${staff.staffName} for ${rangeLabel}`,
+      actionLabel: `Leave request submitted by ${staff.staffName} for ${leaveDateStr}`,
       tableName: "leaves",
       tableLabel: "Leave",
-      recordId: savedLeaves[0]._id,
-      referenceNumber: `${userId}_${startStr}`,
-      newData: isRange
-        ? savedLeaves.map((l) => l.toObject())
-        : savedLeaves[0].toObject(),
-      description: `${toTitleCase(leaveType || "unpaid")} leave requested by ${staff.staffName} for ${rangeLabel} (${dateStrings.length} day(s)). Reason: ${reason}`,
+      recordId: leave._id,
+      referenceNumber: `${userId}_${leaveDateStr}`,
+      newData: leave.toObject(),
+      description: `${toTitleCase(leaveType || "unpaid")} leave requested by ${staff.staffName} for ${leaveDateStr}. Reason: ${reason}`,
       refField: "userId",
     });
 
     res.status(201).json({
       success: true,
-      message: isRange
-        ? `Leave request submitted for ${dateStrings.length} days. Waiting for admin approval.`
-        : "Leave request submitted. Waiting for admin approval.",
-      leave: savedLeaves[0],
-      leaves: savedLeaves,
-      requestGroupId,
+      message: "Leave request submitted. Waiting for admin approval.",
+      leave,
     });
   } catch (error) {
     res
@@ -930,7 +857,8 @@ export const approveLeaveRequest = async (req, res) => {
     if (leave.leaveType === "paid") {
       const staffRecord = await getStaffById(leave.userId);
       const joinDate =
-        staffRecord?.date ?? new Date(Date.UTC(new Date().getFullYear(), 0, 1));
+        staffRecord?.date ??
+        new Date(Date.UTC(new Date().getFullYear(), 0, 1));
       const available = await getAvailablePaidLeaves(leave.userId, joinDate);
       if (available < 1) {
         return res.status(400).json({
@@ -1009,144 +937,6 @@ export const rejectLeaveRequest = async (req, res) => {
     });
 
     res.json({ success: true, message: "Leave request rejected", leave });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ success: false, message: "Server error: " + error.message });
-  }
-};
-
-// PUT /requests/group/:groupId/approve — admin approves every day in a
-// multi-day leave request at once.
-export const approveLeaveGroup = async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const leaves = await Leave.find({ requestGroupId: groupId });
-    if (leaves.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Leave request group not found" });
-    }
-    const pending = leaves.filter((l) => l.status === "pending");
-    if (pending.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: `This request is already ${leaves[0].status}`,
-      });
-    }
-
-    if (pending[0].leaveType === "paid") {
-      const staffRecord = await getStaffById(pending[0].userId);
-      const joinDate =
-        staffRecord?.date ?? new Date(Date.UTC(new Date().getFullYear(), 0, 1));
-      const available = await getAvailablePaidLeaves(
-        pending[0].userId,
-        joinDate,
-      );
-      if (available < pending.length) {
-        return res.status(400).json({
-          success: false,
-          message: `Staff has insufficient paid leave balance for this calendar year. Requested ${pending.length} day(s), ${available} available.`,
-        });
-      }
-    }
-
-    const now = new Date();
-    await Leave.updateMany(
-      { requestGroupId: groupId, status: "pending" },
-      { status: "approved", approvedBy: req.user._id, approvedAt: now },
-    );
-    const updated = await Leave.find({ requestGroupId: groupId }).sort({
-      leaveDate: 1,
-    });
-
-    const startStr = formatDateForLog(updated[0].leaveDate);
-    const endStr = formatDateForLog(updated[updated.length - 1].leaveDate);
-    await logActivity(req, {
-      action: "UPDATE",
-      actionLabel: `Approved leave request for user ${updated[0].userId} (${startStr} to ${endStr})`,
-      tableName: "leaves",
-      tableLabel: "Leave",
-      recordId: updated[0]._id,
-      newData: updated.map((l) => l.toObject()),
-      description: `Leave request approved for user ${updated[0].userId}, ${startStr} to ${endStr} (${updated.length} day(s)).`,
-      refField: "userId",
-    });
-
-    res.json({
-      success: true,
-      message: `Leave request approved for ${updated.length} day(s)`,
-      leaves: updated,
-    });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ success: false, message: "Server error: " + error.message });
-  }
-};
-
-// PUT /requests/group/:groupId/reject — admin rejects every day in a
-// multi-day leave request at once.
-export const rejectLeaveGroup = async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const leaves = await Leave.find({ requestGroupId: groupId });
-    if (leaves.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Leave request group not found" });
-    }
-    const pending = leaves.filter((l) => l.status === "pending");
-    if (pending.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: `This request is already ${leaves[0].status}`,
-      });
-    }
-
-    const now = new Date();
-    const update = {
-      status: "rejected",
-      approvedBy: req.user._id,
-      approvedAt: now,
-    };
-    await Leave.updateMany(
-      { requestGroupId: groupId, status: "pending" },
-      update,
-    );
-    if (req.body?.remarks) {
-      // Append the admin remark to each day's reason individually (bulk
-      // updateMany can't reference each doc's own field in one query).
-      await Promise.all(
-        pending.map((l) =>
-          Leave.findByIdAndUpdate(l._id, {
-            reason: `${l.reason} [Admin: ${req.body.remarks}]`,
-          }),
-        ),
-      );
-    }
-    const updated = await Leave.find({ requestGroupId: groupId }).sort({
-      leaveDate: 1,
-    });
-
-    const startStr = formatDateForLog(updated[0].leaveDate);
-    const endStr = formatDateForLog(updated[updated.length - 1].leaveDate);
-    await logActivity(req, {
-      action: "UPDATE",
-      actionLabel: `Rejected leave request for user ${updated[0].userId} (${startStr} to ${endStr})`,
-      tableName: "leaves",
-      tableLabel: "Leave",
-      recordId: updated[0]._id,
-      newData: updated.map((l) => l.toObject()),
-      description: `Leave request rejected for user ${updated[0].userId}, ${startStr} to ${endStr} (${updated.length} day(s)).`,
-      refField: "userId",
-    });
-
-    res.json({
-      success: true,
-      message: `Leave request rejected for ${updated.length} day(s)`,
-      leaves: updated,
-    });
   } catch (error) {
     res
       .status(500)
@@ -1276,10 +1066,12 @@ export const recordAttendance = async (req, res) => {
     const loginDT = parseDT(loginTime),
       logoutDT = parseDT(logoutTime);
     if (logoutDT <= loginDT)
-      return res.status(400).json({
-        success: false,
-        message: "Logout time must be after login time",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Logout time must be after login time",
+        });
     const holidayCheck = await isHolidayOrSunday(loginDT);
     if (holidayCheck.isHoliday)
       return res.status(400).json({
@@ -1945,10 +1737,12 @@ export const convertExtraHoursToLeave = async (req, res) => {
     if (checkDate > today) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(400).json({
-        success: false,
-        message: "Cannot convert leave for future dates",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Cannot convert leave for future dates",
+        });
     }
     const holidayCheck = await isHolidayOrSunday(leaveDateUTC);
     if (holidayCheck.isHoliday) {
@@ -1983,10 +1777,12 @@ export const convertExtraHoursToLeave = async (req, res) => {
     ) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(400).json({
-        success: false,
-        message: "A swap leave already exists for this date",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "A swap leave already exists for this date",
+        });
     }
     const minutesNeeded = leaveDays * 480;
     const totalSummary = await calculateExtraHoursSummary(userId);
@@ -2057,10 +1853,12 @@ export const convertExtraHoursToLeave = async (req, res) => {
     if (minutesRemaining > 0) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(500).json({
-        success: false,
-        message: "Failed to deduct all required minutes.",
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message: "Failed to deduct all required minutes.",
+        });
     }
     let leaveAttendance;
     if (existingAttendance && existingAttendance.isLeaveDay) {
@@ -2233,10 +2031,12 @@ export const getExtraHoursSimple = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to get extra hours: " + error.message,
-    });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Failed to get extra hours: " + error.message,
+      });
   }
 };
 
@@ -2248,10 +2048,12 @@ export const getUserAttendance = async (req, res) => {
     const records = await getUserAttendanceRange(userId, startDate, endDate);
     res.json({ success: true, data: records, count: records.length });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to get attendance records: " + error.message,
-    });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Failed to get attendance records: " + error.message,
+      });
   }
 };
 

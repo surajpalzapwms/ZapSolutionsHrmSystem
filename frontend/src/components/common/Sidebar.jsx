@@ -11,6 +11,7 @@ import {
   LayoutDashboard,
   FileText,
   CalendarPlus,
+  CalendarCheck,
 } from "lucide-react";
 import { getCurrentUser, isAdminUser } from "../../utils/authUser";
 
@@ -19,6 +20,7 @@ const NAV_ITEMS = [
   { label: "Staff", icon: Users, path: "/staffmemberLayout/staffmember", adminOnly: true },
   { label: "Holidays", icon: Calendar, path: "/hrmlayout/holidays", adminOnly: false },
   { label: "Attendance", icon: Clock, path: "/hrmlayout/leaveattendance", adminOnly: true },
+  { label: "Leave", icon: CalendarCheck, path: "/hrmlayout/leave", adminOnly: true },
   { label: "Payroll", icon: DollarSign, path: "/hrmlayout/payroll", adminOnly: true },
   { label: "Staff Basic Payroll", icon: Wallet, path: "/hrmlayout/staffbasicpayroll", adminOnly: true },
   { label: "Advance", icon: Wallet, path: "/hrmlayout/advance", adminOnly: true },

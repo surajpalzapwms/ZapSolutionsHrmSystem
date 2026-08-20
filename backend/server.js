@@ -1,8 +1,39 @@
 import dns from "dns";
 
-// Force reliable DNS resolvers so mongodb+srv:// SRV lookups don't fail
-// on networks/ISPs whose default DNS doesn't handle SRV records properly
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+// Some networks/ISPs' default DNS doesn't handle SRV records properly,
+// which breaks mongodb+srv:// lookups. But hardcoding public resolvers
+// (8.8.8.8 / 1.1.1.1) unconditionally is itself risky — some networks
+// block outbound DNS to those specific IPs while their own default
+// resolver works fine, which would turn a working setup into a broken
+// one. So: try the SRV lookup with whatever DNS the OS is already using
+// first, and only switch to public resolvers if that actually fails.
+async function ensureSrvResolvable(mongoUri) {
+  const match = mongoUri.match(/^mongodb\+srv:\/\/[^@]+@([^/?]+)/);
+  if (!match) return; // not an SRV-style URI, nothing to check
+
+  const srvHost = `_mongodb._tcp.${match[1]}`;
+
+  try {
+    await dns.promises.resolveSrv(srvHost);
+    // Default resolver works fine — leave it alone.
+  } catch (err) {
+    console.warn(
+      `⚠️  SRV lookup for ${srvHost} failed with the default DNS resolver ` +
+        `(${err.code}). Falling back to 8.8.8.8 / 1.1.1.1...`,
+    );
+    dns.setServers(["8.8.8.8", "1.1.1.1"]);
+    try {
+      await dns.promises.resolveSrv(srvHost);
+      console.log("✅ SRV lookup succeeded using fallback DNS resolvers.");
+    } catch (fallbackErr) {
+      console.error(
+        `❌ SRV lookup for ${srvHost} also failed using fallback DNS resolvers ` +
+          `(${fallbackErr.code}). This network may be blocking DNS to 8.8.8.8/1.1.1.1 ` +
+          `as well as your default resolver — check your network/firewall/VPN.`,
+      );
+    }
+  }
+}
 
 import "dotenv/config";
 import express from "express";
@@ -35,9 +66,13 @@ app.set("trust proxy", 1);
 
 // Middleware
 app.use(helmet());
-// Strip trailing slashes so "http://localhost:5173/" and "http://localhost:5173"
-// are treated as the same origin (a common source of CORS rejections).
-const stripTrailingSlash = (url) => url.trim().replace(/\/+$/, "");
+// Strip trailing slashes AND lowercase the origin so "http://localhost:5173/",
+// "http://localhost:5173", and "HTTPS://LOCALHOST:5173" are all treated as
+// the same origin. Hostnames are case-insensitive per spec, but a plain
+// string comparison is not — without lowercasing here, an allowed origin
+// like "https://HRM.zapsolutionz.com" in .env will silently reject the
+// real browser Origin header "https://hrm.zapsolutionz.com".
+const normalizeOrigin = (url) => url.trim().replace(/\/+$/, "").toLowerCase();
 
 // Origins from FRONTEND_URL (e.g. your deployed Vercel URL) are always
 // allowed. On top of that, always allow the common local Vite dev server
@@ -52,8 +87,8 @@ const LOCAL_DEV_ORIGINS = [
 const allowedOrigins = [
   ...(process.env.FRONTEND_URL || "http://localhost:5173")
     .split(",")
-    .map(stripTrailingSlash),
-  ...LOCAL_DEV_ORIGINS,
+    .map(normalizeOrigin),
+  ...LOCAL_DEV_ORIGINS.map(normalizeOrigin),
 ].filter((origin, index, all) => all.indexOf(origin) === index);
 
 app.use(
@@ -62,13 +97,13 @@ app.use(
       // allow non-browser tools (curl/Postman) that send no Origin header
       if (!origin) return callback(null, true);
 
-      const normalizedOrigin = stripTrailingSlash(origin);
+      const normalizedOrigin = normalizeOrigin(origin);
 
       if (allowedOrigins.includes(normalizedOrigin)) {
         callback(null, true);
       } else {
         // Log exactly what was rejected vs what's allowed, so a mismatched
-        // port/host/trailing-slash in FRONTEND_URL is easy to spot.
+        // port/host/trailing-slash/case in FRONTEND_URL is easy to spot.
         console.warn(
           `❌ CORS rejected origin "${origin}". Allowed origins: ${allowedOrigins.join(", ")}. ` +
             `Check FRONTEND_URL in your backend .env file.`,
@@ -162,6 +197,8 @@ if (
 }
 
 async function startServer(retries = 3, delayMs = 3000) {
+  await ensureSrvResolvable(MONGO_URI);
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       await connectDB(MONGO_URI);

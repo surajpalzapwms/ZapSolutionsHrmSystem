@@ -37,8 +37,6 @@ const Expenses = () => {
   } = useOfficeExpense();
 
   const [editingExpense, setEditingExpense] = useState(null);
-  // Set by the form when it opens the category manager, so we can refresh
-  // its own dropdown as soon as a category is added/renamed/deleted.
   const [refreshCategoryOptions, setRefreshCategoryOptions] = useState(null);
 
   React.useEffect(() => {
@@ -103,6 +101,7 @@ const Expenses = () => {
         <Sidebar isOpen={sidebarOpen} toggleSidebar={() => setSidebarOpen(false)} isMobile={true} />
       )}
 
+      {/* UPDATED: Header section with Add button moved to the right */}
       <div className="flex justify-between items-center mb-4">
         <div className="flex items-center gap-2">
           {isMobileView && (
@@ -116,11 +115,18 @@ const Expenses = () => {
           <Receipt className="w-5 h-5 text-blue-600" />
           <h1 className="text-xl font-bold text-gray-800">Expenses</h1>
         </div>
+        
         {!isMobileView && (
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            {/* Add Button moved here */}
+            <Button variant="primary" size="sm" onClick={addModal.open}>
+              Add Expense
+            </Button>
+            
             <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
               Total: {currentData.length}
             </span>
+            
             <SearchBar
               value={searchTerm}
               onChange={setSearchTerm}
@@ -131,10 +137,9 @@ const Expenses = () => {
         )}
       </div>
 
+      {/* Keep the action buttons row but remove Add Expense from here */}
       <div className="flex flex-wrap gap-3 mb-4">
-        <Button variant="primary" size="sm" onClick={addModal.open}>
-          Add Expense
-        </Button>
+        {/* Removed: <Button variant="primary" size="sm" onClick={addModal.open}> */}
         <Button
           variant="outline"
           size="sm"

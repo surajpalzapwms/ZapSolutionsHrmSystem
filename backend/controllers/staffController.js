@@ -66,6 +66,69 @@ const duplicateKeyMessage = (err) => {
     : `A staff member with this ${label} already exists`;
 };
 
+// Helper function to add months to a date
+const addMonths = (dateStr, months) => {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  d.setMonth(d.getMonth() + months);
+  return d;
+};
+
+// Helper function to add days to a date
+const addDays = (dateStr, days) => {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  d.setDate(d.getDate() + days);
+  return d;
+};
+
+// Calculate probation end date (joining date + months - 1 day)
+const calculateProbationEndDate = (joiningDate, months) => {
+  if (!joiningDate || !months) return null;
+  const dateAfterMonths = addMonths(joiningDate, months);
+  if (!dateAfterMonths) return null;
+  return addDays(dateAfterMonths, -1);
+};
+
+// Calculate confirmation date (joining date + months)
+const calculateConfirmationDate = (joiningDate, months) => {
+  if (!joiningDate || !months) return null;
+  return addMonths(joiningDate, months);
+};
+
+// Status and Employment Type are mutually exclusive in the UI — only one
+// card is active at a time — but a stray payload (an old client, a direct
+// API call, a partial update) could still send date fields that don't
+// belong to the active status/employmentType. This nulls out whichever
+// fields don't apply to `data.status` / `data.employmentType`, so the
+// record on disk never disagrees with what's actually selected.
+//   - `explicitFields`: a set of field names the caller explicitly sent in
+//     THIS request — those are respected and never overridden. Only used
+//     by updateStaff, where an untouched field shouldn't be wiped just
+//     because a different field changed. createStaff/importStaff build a
+//     brand-new document each time, so they pass no exceptions.
+const applyStatusEmploymentExclusivity = (data, explicitFields = new Set()) => {
+  if (data.status !== "Probation" && !explicitFields.has("probationEndDate")) {
+    data.probationEndDate = null;
+  }
+  if (
+    data.status !== "Confirmation" &&
+    !explicitFields.has("confirmationDate")
+  ) {
+    data.confirmationDate = null;
+  }
+  if (data.status !== "Relieving" && !explicitFields.has("relievingDate")) {
+    data.relievingDate = null;
+  }
+  if (!data.employmentType) {
+    if (!explicitFields.has("projectStartDate")) data.projectStartDate = null;
+    if (!explicitFields.has("projectEndDate")) data.projectEndDate = null;
+  }
+  return data;
+};
+
 /**
  * GET /api/staff/me — the logged-in account's own Staff profile.
  * Staff and User are only linked by email (no stored userId), same
@@ -127,16 +190,19 @@ export const getStaffById = asyncHandler(async (req, res) => {
 // Auto-increments off the highest existing numeric suffix (e.g. 5 staff → next is ZAP0006),
 // rather than trusting createdAt order, so it stays correct even if an ID was ever
 // entered manually or out of sequence.
+// Auto-increments off the highest existing numeric suffix
 export const generateStaffId = async () => {
   const docs = await Staff.find(
-    { staffId: { $regex: /^ZAP\d+$/ } },
+    { staffId: { $regex: /^ZS\d+$/ } },  // Changed from ZAP to ZS
     { staffId: 1 },
   ).lean();
   const maxNum = docs.reduce((max, d) => {
-    const n = parseInt(d.staffId.replace("ZAP", ""), 10) || 0;
+    const n = parseInt(d.staffId.replace("ZS", ""), 10) || 0;  // Changed from ZAP to ZS
     return n > max ? n : max;
   }, 0);
-  return `ZAP${String(maxNum + 1).padStart(4, "0")}`;
+  // Start from 10 instead of 1
+  const nextNumber = Math.max(maxNum + 1, 10);
+  return `ZS${String(nextNumber).padStart(3, "0")}`;  // Changed to 3 digits (010, 011, etc.)
 };
 
 /** POST /api/staff — create a staff member */
@@ -151,9 +217,16 @@ export const createStaff = asyncHandler(async (req, res) => {
     contactNo,
     email,
     password,
-    date,
-    status,
+    date, // Joining Date
+    status = "Probation",
+    probationMonths = 3,
+    probationEndDate,
+    confirmationMonths = 3,
+    confirmationDate,
     relievingDate,
+    employmentType = "",
+    projectStartDate,
+    projectEndDate,
     enabled = true,
     // "Make Admin" checkbox on the Add Staff form — only ever has an
     // effect when the caller is the super admin (checked below) and the
@@ -198,24 +271,61 @@ export const createStaff = asyncHandler(async (req, res) => {
   // staff member — an ordinary admin creating staff always creates a plain
   // ("user") login, even if a stray makeAdmin flag is sent, so an admin can
   // never quietly promote someone (including themselves) to admin.
-  const wantsAdmin = wantsLogin && isTruthy(makeAdmin) && req.user?.role === "super-admin";
+  const wantsAdmin =
+    wantsLogin && isTruthy(makeAdmin) && req.user?.role === "super-admin";
+
+  // Calculate dates based on status
+  const joiningDate = date ? new Date(date) : new Date();
+
+  // Calculate probation end date if status is Probation
+  let finalProbationEndDate = probationEndDate;
+  if (status === "Probation" && !finalProbationEndDate) {
+    finalProbationEndDate = calculateProbationEndDate(
+      joiningDate,
+      probationMonths,
+    );
+  }
+
+  // Calculate confirmation date if status is Confirmation
+  let finalConfirmationDate = confirmationDate;
+  if (status === "Confirmation" && !finalConfirmationDate) {
+    finalConfirmationDate = calculateConfirmationDate(
+      joiningDate,
+      confirmationMonths,
+    );
+  }
+
+  // Status and Employment Type are mutually exclusive in the UI — collapse
+  // whichever set of date fields doesn't belong to the chosen status /
+  // employmentType down to null before the document is ever written, so a
+  // fresh record never carries dates from a status it isn't in.
+  const staffData = applyStatusEmploymentExclusivity({
+    staffName: finalStaffName,
+    staffId: finalStaffId,
+    projectName: projectName?.trim() || "",
+    contactNo: contactNo?.trim() || "",
+    date: joiningDate,
+    status: status || "Probation",
+    probationMonths: probationMonths || 3,
+    probationEndDate: finalProbationEndDate || null,
+    confirmationMonths: confirmationMonths || 3,
+    confirmationDate: finalConfirmationDate || null,
+    relievingDate: relievingDate ? new Date(relievingDate) : null,
+    employmentType: employmentType || "",
+    projectStartDate: projectStartDate ? new Date(projectStartDate) : null,
+    projectEndDate: projectEndDate ? new Date(projectEndDate) : null,
+    enabled,
+  });
 
   let staff;
   try {
     staff = await Staff.create({
-      staffName: finalStaffName,
-      staffId: finalStaffId,
-      projectName: projectName?.trim() || "",
-      contactNo: contactNo?.trim() || "",
+      ...staffData,
       // Omit rather than store "" — with a sparse unique index, multiple
       // blank strings would still collide as duplicates.
       ...(trimmedEmail ? { email: trimmedEmail } : {}),
       // Hashed automatically by the pre("save") hook on the model.
       ...(password ? { password } : {}),
-      date: date ? new Date(date) : new Date(),
-      status: status || "Trial",
-      relievingDate: relievingDate ? new Date(relievingDate) : null,
-      enabled,
     });
   } catch (err) {
     if (err.code === 11000) {
@@ -266,7 +376,9 @@ export const createStaff = asyncHandler(async (req, res) => {
         ? "Staff member created successfully with login access"
         : "Staff member created successfully",
     data: sanitize(staff),
-    ...(linkedUser ? { userId: linkedUser._id, userRole: linkedUser.role } : {}),
+    ...(linkedUser
+      ? { userId: linkedUser._id, userRole: linkedUser.role }
+      : {}),
   });
 });
 
@@ -281,12 +393,20 @@ export const updateStaff = asyncHandler(async (req, res) => {
     contactNo,
     email,
     password,
-    date,
+    date, // Joining Date
     status,
+    probationMonths,
+    probationEndDate,
+    confirmationMonths,
+    confirmationDate,
     relievingDate,
+    employmentType,
+    projectStartDate,
+    projectEndDate,
     enabled,
     makeAdmin,
   } = req.body;
+
   const trimmedEmail = email !== undefined ? email.trim() : undefined;
   const trimmedPassword =
     password && password.trim() ? password.trim() : undefined;
@@ -305,29 +425,125 @@ export const updateStaff = asyncHandler(async (req, res) => {
   if (!existingStaff) throw new ApiError(404, "Staff member not found");
   const originalEmail = existingStaff.email;
 
+  // Prepare update object
+  const updateData = {};
+
+  if (staffName !== undefined) updateData.staffName = staffName;
+  if (staffId !== undefined) updateData.staffId = staffId.trim();
+  if (projectName !== undefined) updateData.projectName = projectName.trim();
+  if (contactNo !== undefined) updateData.contactNo = contactNo.trim();
+  if (trimmedEmail) updateData.email = trimmedEmail;
+  if (trimmedPassword) updateData.password = trimmedPassword;
+  if (date !== undefined) updateData.date = new Date(date);
+  if (status !== undefined) updateData.status = status;
+  if (probationMonths !== undefined)
+    updateData.probationMonths = probationMonths;
+  if (probationEndDate !== undefined) {
+    updateData.probationEndDate = probationEndDate
+      ? new Date(probationEndDate)
+      : null;
+  }
+  if (confirmationMonths !== undefined)
+    updateData.confirmationMonths = confirmationMonths;
+  if (confirmationDate !== undefined) {
+    updateData.confirmationDate = confirmationDate
+      ? new Date(confirmationDate)
+      : null;
+  }
+  if (relievingDate !== undefined) {
+    updateData.relievingDate = relievingDate ? new Date(relievingDate) : null;
+  }
+  if (employmentType !== undefined) updateData.employmentType = employmentType;
+  if (projectStartDate !== undefined) {
+    updateData.projectStartDate = projectStartDate
+      ? new Date(projectStartDate)
+      : null;
+  }
+  if (projectEndDate !== undefined) {
+    updateData.projectEndDate = projectEndDate
+      ? new Date(projectEndDate)
+      : null;
+  }
+  if (enabled !== undefined) updateData.enabled = enabled;
+
+  // Auto-calculate dates if status changed and no explicit dates provided
+  const newStatus = status || existingStaff.status;
+  const joiningDate = date ? new Date(date) : existingStaff.date;
+  const newProbationMonths =
+    probationMonths !== undefined
+      ? probationMonths
+      : existingStaff.probationMonths;
+  const newConfirmationMonths =
+    confirmationMonths !== undefined
+      ? confirmationMonths
+      : existingStaff.confirmationMonths;
+
+  // If status is Probation and probationEndDate not explicitly set, calculate it
+  if (newStatus === "Probation" && probationEndDate === undefined) {
+    updateData.probationEndDate = calculateProbationEndDate(
+      joiningDate,
+      newProbationMonths,
+    );
+  }
+
+  // If status is Confirmation and confirmationDate not explicitly set, calculate it
+  if (newStatus === "Confirmation" && confirmationDate === undefined) {
+    updateData.confirmationDate = calculateConfirmationDate(
+      joiningDate,
+      newConfirmationMonths,
+    );
+  }
+
+  // If status is Relieving and relievingDate not set, default to today
+  if (
+    newStatus === "Relieving" &&
+    relievingDate === undefined &&
+    !existingStaff.relievingDate
+  ) {
+    updateData.relievingDate = new Date();
+  }
+
+  // Status and Employment Type are mutually exclusive in the UI — only
+  // enforce that here when this request is actually touching one of them.
+  // Otherwise an unrelated update (e.g. just editing contactNo) would wipe
+  // out dates that were never part of this request.
+  if (status !== undefined || employmentType !== undefined) {
+    const newEmploymentType =
+      employmentType !== undefined ? employmentType : existingStaff.employmentType;
+    applyStatusEmploymentExclusivity(
+      { ...updateData, status: newStatus, employmentType: newEmploymentType },
+      new Set([
+        probationEndDate !== undefined ? "probationEndDate" : null,
+        confirmationDate !== undefined ? "confirmationDate" : null,
+        relievingDate !== undefined ? "relievingDate" : null,
+        projectStartDate !== undefined ? "projectStartDate" : null,
+        projectEndDate !== undefined ? "projectEndDate" : null,
+      ].filter(Boolean)),
+    );
+    // applyStatusEmploymentExclusivity mutates the object passed to it —
+    // pull the (possibly nulled) date fields back out into updateData.
+    if (newStatus !== "Probation" && probationEndDate === undefined) {
+      updateData.probationEndDate = null;
+    }
+    if (newStatus !== "Confirmation" && confirmationDate === undefined) {
+      updateData.confirmationDate = null;
+    }
+    if (newStatus !== "Relieving" && relievingDate === undefined) {
+      updateData.relievingDate = null;
+    }
+    if (!newEmploymentType) {
+      if (projectStartDate === undefined) updateData.projectStartDate = null;
+      if (projectEndDate === undefined) updateData.projectEndDate = null;
+    }
+  }
+
   let updated;
   try {
-    updated = await Staff.findByIdAndUpdate(
-      req.params.id,
-      {
-        ...(staffName !== undefined && { staffName }),
-        ...(staffId !== undefined && { staffId: staffId.trim() }),
-        ...(projectName !== undefined && { projectName: projectName.trim() }),
-        ...(contactNo !== undefined && { contactNo: contactNo.trim() }),
-        ...(trimmedEmail && { email: trimmedEmail }),
-        // Blank/omitted password means "leave it unchanged" — never
-        // overwrite the stored hash with an empty value. When present,
-        // the pre("findOneAndUpdate") hook on the model hashes it.
-        ...(trimmedPassword && { password: trimmedPassword }),
-        ...(date !== undefined && { date: new Date(date) }),
-        ...(status !== undefined && { status }),
-        ...(relievingDate !== undefined && {
-          relievingDate: relievingDate ? new Date(relievingDate) : null,
-        }),
-        ...(enabled !== undefined && { enabled }),
-      },
-      { new: true, runValidators: true, context: "query" },
-    );
+    updated = await Staff.findByIdAndUpdate(req.params.id, updateData, {
+      new: true,
+      runValidators: true,
+      context: "query",
+    });
   } catch (err) {
     if (err.code === 11000) {
       throw new ApiError(409, duplicateKeyMessage(err));
@@ -491,15 +707,59 @@ export const importStaff = asyncHandler(async (req, res) => {
   const docs = [];
   for (const row of rows) {
     if (!row.staffName || !row.staffName.trim()) continue;
-    docs.push({
+
+    const joiningDate = row.date ? new Date(row.date) : new Date();
+    const probationMonths = row.probationMonths || 3;
+    const confirmationMonths = row.confirmationMonths || 3;
+    const status = row.status || "Probation";
+
+    let probationEndDate = row.probationEndDate
+      ? new Date(row.probationEndDate)
+      : null;
+    let confirmationDate = row.confirmationDate
+      ? new Date(row.confirmationDate)
+      : null;
+
+    // Auto-calculate if not provided
+    if (status === "Probation" && !probationEndDate) {
+      probationEndDate = calculateProbationEndDate(
+        joiningDate,
+        probationMonths,
+      );
+    }
+
+    if (status === "Confirmation" && !confirmationDate) {
+      confirmationDate = calculateConfirmationDate(
+        joiningDate,
+        confirmationMonths,
+      );
+    }
+
+    // insertMany() below skips Mongoose's pre("save") hooks entirely, so
+    // the model-level safety net never runs for imported rows — apply the
+    // same status/employmentType exclusivity here explicitly.
+    const doc = applyStatusEmploymentExclusivity({
       staffName: row.staffName.trim(),
       staffId: row.staffId?.trim() || (await generateStaffId()),
       projectName: row.projectName?.trim() || "",
       contactNo: row.contactNo?.trim() || "",
       ...(row.email?.trim() ? { email: row.email.trim() } : {}),
-      date: row.date ? new Date(row.date) : new Date(),
+      date: joiningDate,
+      status: status,
+      probationMonths: probationMonths,
+      probationEndDate: probationEndDate,
+      confirmationMonths: confirmationMonths,
+      confirmationDate: confirmationDate,
+      relievingDate: row.relievingDate ? new Date(row.relievingDate) : null,
+      employmentType: row.employmentType || "",
+      projectStartDate: row.projectStartDate
+        ? new Date(row.projectStartDate)
+        : null,
+      projectEndDate: row.projectEndDate ? new Date(row.projectEndDate) : null,
       enabled: row.enabled !== undefined ? row.enabled : true,
     });
+
+    docs.push(doc);
   }
 
   if (docs.length === 0) {

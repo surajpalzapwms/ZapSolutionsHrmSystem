@@ -17,8 +17,8 @@ const staffSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["Trial", "Confirmed"],
-      default: "Trial",
+      enum: ["Probation", "Confirmation", "Relieving"],
+      default: "Probation",
     },
     contactNo: {
       type: String,
@@ -36,12 +36,44 @@ const staffSchema = new mongoose.Schema(
       select: false,
     },
     date: {
-      type: Date,
+      type: Date, // Joining Date
     },
-    // Last working day, if this staff member has left / is leaving the
-    // organization. When set, payroll for the month it falls in is prorated
-    // to only pay through this date instead of the full month.
+    // Probation related fields
+    probationMonths: {
+      type: Number,
+      default: 3,
+      min: 1,
+    },
+    probationEndDate: {
+      type: Date,
+      default: null,
+    },
+    // Confirmation related fields
+    confirmationMonths: {
+      type: Number,
+      default: 3,
+      min: 1,
+    },
+    confirmationDate: {
+      type: Date,
+      default: null,
+    },
+    // Relieving date
     relievingDate: {
+      type: Date,
+      default: null,
+    },
+    // Employment type fields
+    employmentType: {
+      type: String,
+      enum: ["", "Project Basic", "Outsource Base"],
+      default: "",
+    },
+    projectStartDate: {
+      type: Date,
+      default: null,
+    },
+    projectEndDate: {
       type: Date,
       default: null,
     },
@@ -55,9 +87,27 @@ const staffSchema = new mongoose.Schema(
   },
 );
 
+// Only the date fields belonging to the currently-selected `status` (and,
+// separately, to a chosen `employmentType`) are meaningful. This is a
+// safety net at the model level — the controller already enforces the same
+// rule on create/update — so any other code path that calls
+// `Staff.create()` / `doc.save()` directly (e.g. a future script) can't
+// leave stale dates behind either. Note: this does NOT run on
+// `insertMany()` (see importStaff, which applies the same rule inline).
+function enforceStatusEmploymentExclusivity(doc) {
+  if (doc.status !== "Probation") doc.probationEndDate = null;
+  if (doc.status !== "Confirmation") doc.confirmationDate = null;
+  if (doc.status !== "Relieving") doc.relievingDate = null;
+  if (!doc.employmentType) {
+    doc.projectStartDate = null;
+    doc.projectEndDate = null;
+  }
+}
+
 // Covers Staff.create() / doc.save() — hashes only when the plaintext
 // password was actually set/changed on this call.
 staffSchema.pre("save", async function (next) {
+  enforceStatusEmploymentExclusivity(this);
   if (!this.isModified("password") || !this.password) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();

@@ -22,6 +22,7 @@
 // Requires `app.set("trust proxy", 1)` in server.js (already set) so
 // req.ip reflects the real client IP rather than the proxy's own address.
 
+
 const parseAllowedList = () =>
   (process.env.OFFICE_ALLOWED_IPS || "")
     .split(",")

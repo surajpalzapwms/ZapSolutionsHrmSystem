@@ -86,14 +86,20 @@ const Login = () => {
     }
   };
 
-  const handleSubmit = async (e) => {
+const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!validate()) return;
+    console.log("Form submitted. isSignUp:", isSignUp, "form:", form);
+
+    if (!validate()) {
+      console.log("Validation failed. Errors:", errors);
+      return;
+    }
+    console.log("Validation passed");
 
     setLoading(true);
     try {
       if (isSignUp) {
-        // Send correct fields to backend
+        console.log("Sending register request to /api/auth/register");
         const { data } = await api.post("/api/auth/register", {
           firstName: form.firstName,
           lastName: form.lastName,
@@ -101,6 +107,7 @@ const Login = () => {
           contactNumber: form.contactNumber,
           password: form.password,
         });
+        console.log("Register response:", data);
 
         showToast("success", "Account created successfully! Please login.");
         setIsSignUp(false);
@@ -113,21 +120,25 @@ const Login = () => {
           confirmPassword: "" 
         });
       } else {
+        console.log("Sending login request to /api/auth/login with email:", form.email);
         const { data } = await api.post("/api/auth/login", {
           email: form.email,
           password: form.password,
         });
+        console.log("Login response:", data);
 
         // Backend responds with { success, message, data: { id, name, email, role, token } }
         const payload = data.data || data;
+        console.log("Extracted payload:", payload);
+
         const { token, ...userInfo } = payload;
+        console.log("Token present:", !!token, "userInfo:", userInfo);
 
         localStorage.setItem("token", token);
         localStorage.setItem("user", JSON.stringify(userInfo));
+        console.log("Stored token and user in localStorage");
 
-        // Dispatch both custom event and storage event for reliability
         window.dispatchEvent(new Event("userLoggedIn"));
-        // Also trigger a storage event for cross-tab communication
         window.dispatchEvent(
           new StorageEvent("storage", {
             key: "token",
@@ -138,23 +149,30 @@ const Login = () => {
         );
 
         showToast("success", "Logged in successfully");
-
-        // Navigate to dashboard
+        console.log("Navigating to dashboard");
         navigate("/", { replace: true });
       }
     } catch (error) {
+      console.error("Auth request failed. Full error object:", error);
+      console.error("error.message:", error.message);
+      console.error("error.response?.status:", error.response?.status);
+      console.error("error.response?.data:", error.response?.data);
+      console.error("error.response?.headers:", error.response?.headers);
+      console.error("error.request (if no response received):", error.request);
+      console.error("error.config?.url:", error.config?.url);
+      console.error("error.config?.baseURL:", error.config?.baseURL);
+
       showToast(
         "error",
         error.response?.data?.message || "Authentication failed"
       );
       if (isSignUp && error.response?.status === 403) {
-        // Someone else finished signing up as admin first — re-check and
-        // fall back to the login form.
         setAdminExists(true);
         setIsSignUp(false);
       }
     } finally {
       setLoading(false);
+      console.log("Loading set to false");
     }
   };
 

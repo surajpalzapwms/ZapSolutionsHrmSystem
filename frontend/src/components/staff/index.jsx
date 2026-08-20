@@ -45,6 +45,10 @@ const Staff = () => {
   } = useStaff();
 
   const [editingStaff, setEditingStaff] = useState(null);
+  // Populated by StaffForm's onStaffIdChange callback — the generated
+  // preview ID for a new staff member, or the real staffId when editing.
+  // Shown in the modal header, next to the X, via Modal's headerRight slot.
+  const [modalStaffId, setModalStaffId] = useState("");
 
   React.useEffect(() => {
     const checkMobile = () => setIsMobileView(window.innerWidth < 768);
@@ -55,7 +59,13 @@ const Staff = () => {
 
   const handleEdit = (member) => {
     setEditingStaff(member);
+    setModalStaffId(member?.staffId || "");
     editModal.open();
+  };
+
+  const handleOpenAddModal = () => {
+    setModalStaffId("");
+    addModal.open();
   };
 
   const handleDelete = async (member) => {
@@ -127,7 +137,7 @@ const Staff = () => {
 
       <div className="flex flex-wrap gap-3 mb-4">
         {canAddStaff && (
-          <Button variant="primary" size="sm" onClick={addModal.open}>
+          <Button variant="primary" size="sm" onClick={handleOpenAddModal}>
             Add Staff
           </Button>
         )}
@@ -160,15 +170,46 @@ const Staff = () => {
         onPageChange={setCurrentPage}
       />
 
-      <Modal isOpen={addModal.isOpen} onClose={addModal.close} title="Add Staff Member" size="max-w-2xl">
-        <StaffForm onSubmit={handleAddSuccess} onCancel={addModal.close} />
+      <Modal
+        isOpen={addModal.isOpen}
+        onClose={addModal.close}
+        title="Add Staff Member"
+        size="max-w-2xl"
+        headerRight={
+          modalStaffId && (
+            <span className="text-sm text-gray-500">
+              Staff ID:{" "}
+              <span className="font-medium text-gray-700">{modalStaffId}</span>
+            </span>
+          )
+        }
+      >
+        <StaffForm
+          onSubmit={handleAddSuccess}
+          onCancel={addModal.close}
+          onStaffIdChange={setModalStaffId}
+        />
       </Modal>
 
-      <Modal isOpen={editModal.isOpen} onClose={editModal.close} title="Edit Staff Member" size="max-w-2xl">
+      <Modal
+        isOpen={editModal.isOpen}
+        onClose={editModal.close}
+        title="Edit Staff Member"
+        size="max-w-2xl"
+        headerRight={
+          modalStaffId && (
+            <span className="text-sm text-gray-500">
+              Staff ID:{" "}
+              <span className="font-medium text-gray-700">{modalStaffId}</span>
+            </span>
+          )
+        }
+      >
         <StaffForm
           initialData={editingStaff}
           onSubmit={handleEditSuccess}
           onCancel={editModal.close}
+          onStaffIdChange={setModalStaffId}
           isEdit
         />
       </Modal>

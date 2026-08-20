@@ -149,54 +149,203 @@ export const register = async (req, res) => {
 
 export const login = async (req, res) => {
   try {
+    console.log("========== LOGIN START ==========");
+
+    // 1. Request body
+    console.log("[1] req.body:", req.body);
+
     const { email, password } = req.body;
 
+    console.log("[2] Extracted email:", email);
+    console.log("[3] Password received:", password ? "YES" : "NO");
+
+    // 2. Validate email/password
+    console.log("[4] Checking email and password...");
+
     if (!email || !password) {
+      console.log("[4.1] FAILED: Email or password missing");
+
       return res.status(400).json({
         success: false,
         message: "Please provide email and password",
       });
     }
 
+    console.log("[4.2] Email and password are present");
+
+    // 3. Normalize email
+    console.log("[5] Converting email to string...");
+
     const emailAsString = String(email);
+
+    console.log("[5.1] emailAsString:", emailAsString);
+
+    console.log("[6] Trimming email...");
+
     const trimmedEmail = emailAsString.trim();
+
+    console.log("[6.1] trimmedEmail:", trimmedEmail);
+
+    console.log("[7] Converting email to lowercase...");
+
     const normalizedEmail = trimmedEmail.toLowerCase();
+
+    console.log("[7.1] normalizedEmail:", normalizedEmail);
+
+    // 4. Find user
+    console.log("[8] Searching user in MongoDB...");
+
     const user = await User.findOne({
       email: normalizedEmail,
     }).select("+password");
 
+    console.log("[8.1] MongoDB user query completed");
+
+    console.log(
+      "[8.2] User result:",
+      user ? "USER FOUND" : "USER NOT FOUND"
+    );
+
+    if (user) {
+      console.log("[8.3] User email:", user.email);
+      console.log("[8.4] User ID:", user._id);
+      console.log("[8.5] User role:", user.role);
+      console.log(
+        "[8.6] Password field exists:",
+        user.password ? "YES" : "NO"
+      );
+    }
+
+    // 5. User doesn't exist
+    console.log("[9] Checking whether user exists...");
+
     if (!user) {
+      console.log("[9.1] FAILED: User not found");
+
+      console.log("========== LOGIN END: 401 USER NOT FOUND ==========");
+
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
       });
     }
+
+    console.log("[9.2] User exists, continuing login");
+
+    // 6. Password comparison
+    console.log("[10] Starting password comparison...");
+
+    console.log(
+      "[10.1] Calling user.comparePassword(password)..."
+    );
 
     const isMatch = await user.comparePassword(password);
+
+    console.log("[10.2] Password comparison completed");
+
+    console.log("[10.3] Password match result:", isMatch);
+
+    // 7. Invalid password
+    console.log("[11] Checking password result...");
+
     if (!isMatch) {
+      console.log("[11.1] FAILED: Password does NOT match");
+
+      console.log("========== LOGIN END: 401 INVALID PASSWORD ==========");
+
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
       });
     }
+
+    console.log("[11.2] SUCCESS: Password matched");
+
+    // 8. Update last login
+    console.log("[12] Updating lastLogin...");
+
     user.lastLogin = new Date();
+
+    console.log("[12.1] lastLogin value:", user.lastLogin);
+
+    console.log("[12.2] Saving user to MongoDB...");
+
     await user.save();
 
-    // Non-admin logins auto check-in for attendance — but only from the
-    // office network, same rule as the silent auto-checkin fired on app
-    // load (see autoCheckIn in controllers/leave.js). Otherwise logging in
-    // from home would mark attendance while opening the app from home
-    // wouldn't, which would be an inconsistent (and gameable) rule.
-    // Failure here should never block login itself.
-    if (!isAdminRole(user.role) && isFromOfficeNetwork(req)) {
+    console.log("[12.3] User saved successfully");
+
+    // 9. Check admin role
+    console.log("[13] Checking admin role...");
+
+    const adminRoleResult = isAdminRole(user.role);
+
+    console.log("[13.1] User role:", user.role);
+    console.log("[13.2] isAdminRole result:", adminRoleResult);
+
+    // 10. Check office network
+    console.log("[14] Checking office network...");
+
+    const officeNetworkResult = isFromOfficeNetwork(req);
+
+    console.log(
+      "[14.1] isFromOfficeNetwork result:",
+      officeNetworkResult
+    );
+
+    // 11. Auto attendance
+    if (!adminRoleResult && officeNetworkResult) {
+      console.log(
+        "[15] User is NOT admin AND user is from office network"
+      );
+
+      console.log("[15.1] Starting automatic attendance check-in...");
+
       try {
         await performSelfCheckIn(user._id);
+
+        console.log("[15.2] Automatic attendance check-in SUCCESS");
       } catch (attErr) {
-        console.error("Auto attendance check-in failed:", attErr.message);
+        console.error(
+          "[15.2] Automatic attendance check-in FAILED:",
+          attErr
+        );
+
+        console.error(
+          "[15.3] Attendance failure will NOT block login"
+        );
       }
+    } else {
+      console.log(
+        "[15] Automatic attendance check-in SKIPPED"
+      );
+
+      console.log(
+        "[15.1] Reason - isAdminRole:",
+        adminRoleResult
+      );
+
+      console.log(
+        "[15.2] Reason - isFromOfficeNetwork:",
+        officeNetworkResult
+      );
     }
 
+    // 12. Generate JWT
+    console.log("[16] Generating JWT token...");
+
     const token = generateToken(user);
+
+    console.log("[16.1] JWT token generated");
+    console.log(
+      "[16.2] Token exists:",
+      token ? "YES" : "NO"
+    );
+
+    // Don't print the actual token in production.
+    console.log("[16.3] Preparing successful response...");
+
+    // 13. Send response
+    console.log("[17] Sending HTTP 200 response...");
 
     res.status(200).json({
       success: true,
@@ -210,8 +359,15 @@ export const login = async (req, res) => {
         token,
       },
     });
+
+    console.log("========== LOGIN SUCCESS ==========");
   } catch (error) {
-    console.error("Login error:", error);
+    console.error("========== LOGIN ERROR ==========");
+    console.error("[ERROR] Login error:", error);
+    console.error("[ERROR] Error message:", error.message);
+    console.error("[ERROR] Error stack:", error.stack);
+    console.error("========== LOGIN END: 500 ==========");
+
     res.status(500).json({
       success: false,
       message: "Login failed",

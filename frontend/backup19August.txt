@@ -1,0 +1,11 @@
+PORT=5000
+
+FRONTEND_URL=https://zap-solutions-hrm-system.vercel.app,https://HRM.zapsolutionz.com
+
+JWT_SECRET=8f4a2c9e7b1d6f3a5c8e2d9b4f7a1c6e8d3b5f9a2c7e4d1b6f8a3c5e9d2
+JWT_EXPIRE=7d
+
+MONGO_URI=mongodb+srv://zapHRM10July:ZAPSolz%24Aug%25@cluster0.1hxo0lb.mongodb.net/hrm_production?retryWrites=true&w=majority&appName=Cluster0
+
+
+

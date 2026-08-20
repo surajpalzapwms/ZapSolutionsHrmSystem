@@ -83,6 +83,7 @@ export const allowSuperAdminOnly = async (req, res, next) => {
 export const validateRequest = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
+    console.log("Validation errors:", errors.array()); // temp debug
     return res.status(400).json({
       success: false,
       message: "Validation failed",

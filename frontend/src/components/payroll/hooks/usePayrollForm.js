@@ -2,15 +2,23 @@
 import { useState, useCallback, useEffect } from "react";
 import { useForm } from "../../../hooks/useForm";
 import { payrollService } from "../../../services/payrollService";
-import { staffBasicPayrollService } from "../../../services/staffBasicPayrollService";
+import { staffService } from "../../../services/staffService";
 import { showToast } from "../../../utils/toast";
-import { validateRequired } from "../../../utils/validation";
+import {
+  validateRequired,
+  validatePositiveNumber,
+} from "../../../utils/validation";
 import { getCurrentMonth } from "../../../utils/dateUtils";
 
+// Staff, Pay Period, and Basic Salary are the only mandatory fields —
+// everything else (allowances, deductions, payment info, remarks) is
+// optional and can be filled in later.
 const validate = (form) => {
   const errors = {};
   if (!validateRequired(form.staffId)) errors.staffId = "Select a staff member";
   if (!validateRequired(form.period)) errors.period = "Pay period is required";
+  if (!validatePositiveNumber(form.basicSalary))
+    errors.basicSalary = "Enter a valid Basic Salary";
   return errors;
 };
 
@@ -29,8 +37,9 @@ export const usePayrollForm = (initialData) => {
       staffId: "",
       staffName: "",
       period: getCurrentMonth(),
+      basicSalary: "",
       allowances: [],
-      deductions: 0,
+      deductions: [],
       paidAmount: "",
       paymentMethod: "bank",
       bankAccount: "",
@@ -45,20 +54,15 @@ export const usePayrollForm = (initialData) => {
   // advance deduction, previous month's pending balance, and total payable.
   const [summary, setSummary] = useState(null);
 
-  // Payroll calculation requires a Staff Basic Payroll record to exist, so
-  // only offer staff who already have one — otherwise "Calculate" fails
-  // with "Basic payroll not found".
+  // Basic Salary can now be typed in directly, so any staff member can be
+  // picked here — a Staff Basic Payroll record is only needed if the admin
+  // chooses to use "Calculate" for attendance-based auto-fill.
   useEffect(() => {
-    staffBasicPayrollService
+    staffService
       .getAll()
       .then((res) => {
         const records = res.data?.data || res.data || [];
-        const options = records.map((r) => ({
-          _id: r.employeeId,
-          staffId: r.staffId,
-          staffName: r.staffName,
-        }));
-        setStaffOptions(options);
+        setStaffOptions(records);
       })
       .catch(() => setStaffOptions([]));
   }, []);
@@ -73,8 +77,13 @@ export const usePayrollForm = (initialData) => {
           initialData.employeeName ||
           "",
         period: initialData.period || getCurrentMonth(),
+        basicSalary: initialData.basicSalary ?? "",
         allowances: initialData.allowances || [],
-        deductions: initialData.deductions ?? 0,
+        // Guard against legacy records that stored a plain deduction total
+        // instead of itemized rows.
+        deductions: Array.isArray(initialData.deductions)
+          ? initialData.deductions
+          : [],
         paidAmount: initialData.paidAmount ?? "",
         paymentMethod: initialData.paymentMethod || "bank",
         bankAccount: initialData.bankAccount || "",
@@ -88,6 +97,7 @@ export const usePayrollForm = (initialData) => {
       const member = staffOptions.find((m) => (m._id || m.staffId) === value);
       setField("staffId", value);
       setField("staffName", member?.staffName || member?.name || "");
+      setField("basicSalary", "");
       setSummary(null);
     },
     [staffOptions, setField],
@@ -101,8 +111,9 @@ export const usePayrollForm = (initialData) => {
       const data = res.data?.data || res.data;
       if (data) {
         setSummary(data);
-        // Default the amount paid to the full amount owed — the user can
-        // lower it to make a partial payment; the rest carries to next month.
+        // Auto-fill Basic Salary and the amount paid from the attendance-based
+        // calculation — both remain editable so the admin can override them.
+        setField("basicSalary", data.basicSalary);
         setField("paidAmount", data.totalPayable);
       }
     } catch (err) {
@@ -120,13 +131,22 @@ export const usePayrollForm = (initialData) => {
     (sum, a) => sum + (Number(a.amount) || 0),
     0,
   );
-  const basicComponent = summary?.finalSalary ?? 0;
+  const totalDeduction = (form.deductions || []).reduce(
+    (sum, d) => sum + (Number(d.amount) || 0),
+    0,
+  );
+  // Once "Calculate" has run, finalSalary already accounts for leave and
+  // advance deductions. Before that (or if Basic Salary was edited after
+  // calculating), fall back to the typed Basic Salary as an estimate — the
+  // server always recalculates the authoritative figures on save.
+  const basicComponent =
+    summary?.finalSalary ?? (Number(form.basicSalary) || 0);
   const previousPendingAmount = summary?.previousPendingAmount ?? 0;
   const totalPayable = Math.max(
     0,
     basicComponent +
       totalAllowance -
-      (Number(form.deductions) || 0) +
+      totalDeduction +
       previousPendingAmount,
   );
   const paidAmount =
@@ -140,21 +160,26 @@ export const usePayrollForm = (initialData) => {
     [setField],
   );
 
+  const setDeductions = useCallback(
+    (deductions) => setField("deductions", deductions),
+    [setField],
+  );
+
   const submit = useCallback(
     async (isEdit, id) => {
       if (!runValidate()) return false;
-      if (!summary) {
-        showToast("error", "Click Calculate before saving the payroll");
-        return false;
-      }
       try {
         setIsSubmitting(true);
         const payload = {
           employeeId: form.staffId,
           employeeName: form.staffName,
           period: form.period,
+          // Basic Salary is always sent explicitly — whether it was typed in
+          // directly or auto-filled via "Calculate" — so it doesn't depend
+          // on a Staff Basic Payroll record existing on the server.
+          basicSalary: Number(form.basicSalary),
           allowances: form.allowances,
-          deductions: Number(form.deductions) || 0,
+          deductions: form.deductions,
           paidAmount,
           paymentMethod: form.paymentMethod,
           bankAccount: form.bankAccount,
@@ -176,7 +201,7 @@ export const usePayrollForm = (initialData) => {
         setIsSubmitting(false);
       }
     },
-    [form, paidAmount, summary, runValidate, setIsSubmitting],
+    [form, paidAmount, runValidate, setIsSubmitting],
   );
 
   return {
@@ -192,6 +217,8 @@ export const usePayrollForm = (initialData) => {
     summary,
     setAllowances,
     totalAllowance,
+    setDeductions,
+    totalDeduction,
     totalPayable,
     paidAmount,
     pendingAmount,

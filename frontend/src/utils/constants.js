@@ -12,6 +12,16 @@ export const ALLOWANCE_TYPES = [
   "Other",
 ];
 
+export const DEDUCTION_TYPES = [
+  "Provident Fund",
+  "Professional Tax",
+  "Income Tax (TDS)",
+  "ESI",
+  "Loan Deduction",
+  "Late Penalty",
+  "Other",
+];
+
 export const PAYROLL_STATUS = {
   PENDING: "pending",
   APPROVED: "approved",

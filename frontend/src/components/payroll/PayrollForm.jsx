@@ -3,6 +3,7 @@ import React from "react";
 import { Calculator } from "lucide-react";
 import { usePayrollForm } from "./hooks/usePayrollForm";
 import AllowanceManager from "./AllowanceManager";
+import DeductionManager from "./DeductionManager";
 import InputField from "../common/InputField";
 import TextArea from "../common/TextArea";
 import Dropdown from "../common/Dropdown";
@@ -39,6 +40,8 @@ const PayrollForm = ({
     summary,
     setAllowances,
     totalAllowance,
+    setDeductions,
+    totalDeduction,
     totalPayable,
     paidAmount,
     pendingAmount,
@@ -80,15 +83,33 @@ const PayrollForm = ({
         />
       </div>
 
-      <Button
-        type="button"
-        variant="outline"
-        onClick={calculate}
-        loading={calculating}
-        disabled={!form.staffId || !form.period}
-      >
-        <Calculator size={16} className="mr-1" /> Calculate
-      </Button>
+      <div className="grid grid-cols-2 gap-4 items-end">
+        <InputField
+          label="Basic Salary"
+          name="basicSalary"
+          type="text"
+          inputMode="decimal"
+          value={form.basicSalary}
+          onChange={handleChange}
+          error={errors.basicSalary}
+          placeholder="Enter directly, or use Calculate"
+          required
+        />
+        <Button
+          type="button"
+          variant="outline"
+          onClick={calculate}
+          loading={calculating}
+          disabled={!form.staffId || !form.period}
+        >
+          <Calculator size={16} className="mr-1" /> Calculate (optional)
+        </Button>
+      </div>
+      <p className="text-xs text-gray-500 -mt-2">
+        Type the Basic Salary directly, or click Calculate to auto-fill it
+        (and estimate leave/advance deductions) from attendance — only
+        available if this staff member has a Staff Basic Payroll record.
+      </p>
 
       {summary && (
         <div className="border border-gray-200 rounded-lg p-4 grid grid-cols-2 gap-3 text-sm">
@@ -125,22 +146,18 @@ const PayrollForm = ({
         total={totalAllowance}
       />
 
-      <div className="grid grid-cols-2 gap-4">
-        <InputField
-          label="Deductions"
-          name="deductions"
-          type="text"
-          inputMode="decimal"
-          value={form.deductions}
-          onChange={handleChange}
-        />
-        <div className="flex flex-col justify-end">
-          <label className="text-sm font-medium text-gray-700 mb-1">
-            Total Payable
-          </label>
-          <div className="border rounded-md px-3 py-2 bg-gray-100 font-semibold text-gray-800">
-            {formatMoney(totalPayable)}
-          </div>
+      <DeductionManager
+        deductions={form.deductions}
+        onChange={setDeductions}
+        total={totalDeduction}
+      />
+
+      <div className="flex flex-col justify-end">
+        <label className="text-sm font-medium text-gray-700 mb-1">
+          Total Payable
+        </label>
+        <div className="border rounded-md px-3 py-2 bg-gray-100 font-semibold text-gray-800">
+          {formatMoney(totalPayable)}
         </div>
       </div>
 

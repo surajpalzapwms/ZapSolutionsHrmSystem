@@ -1,3 +1,4 @@
+
 // src/components/payroll/PayrollList.jsx
 import React from "react";
 import { Eye, Trash2 } from "lucide-react";
@@ -42,13 +43,7 @@ const PayrollList = ({
       header: "Year",
       render: (row) => splitPeriod(row.period).year,
     },
-    {
-      key: "projectName",
-      header: "Team",
-      render: (row) => (
-        <span className="text-indigo-600">{row.projectName || "—"}</span>
-      ),
-    },
+   
     {
       key: "contactNo",
       header: "Contact",
@@ -77,15 +72,17 @@ const PayrollList = ({
       ),
     },
     {
-      key: "deductions",
+      key: "totalDeduction",
       header: "Ded.",
       render: (row) => (
         <span
           className={
-            row.deductions > 0 ? "text-red-500 font-medium" : "text-gray-400"
+            row.totalDeduction > 0
+              ? "text-red-500 font-medium"
+              : "text-gray-400"
           }
         >
-          {formatCurrency(row.deductions)}
+          {formatCurrency(row.totalDeduction)}
         </span>
       ),
     },

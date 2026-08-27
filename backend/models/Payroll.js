@@ -52,7 +52,22 @@ const payrollSchema = new mongoose.Schema(
       min: 0,
     },
 
-    deductions: {
+    deductions: [
+      {
+        type: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        amount: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+      },
+    ],
+
+    totalDeduction: {
       type: Number,
       default: 0,
       min: 0,

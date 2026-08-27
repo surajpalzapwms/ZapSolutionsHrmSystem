@@ -5,6 +5,7 @@ import StaffAdvance from "../models/StaffAdvance.js";
 import Account from "../models/Account.js";
 import Leave from "../models/Leave.js";
 import mongoose from "mongoose";
+import PDFDocument from "pdfkit";
 import { isAdminRole } from "../config/permissions.js";
 
 // Helper functions
@@ -38,16 +39,28 @@ const getPreviousPeriod = (period) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
-const calculateSalary = async (employeeId, period, session) => {
+const calculateSalary = async (
+  employeeId,
+  period,
+  session,
+  manualBasicSalary = null,
+) => {
   const employee = await Staff.findById(employeeId).session(session);
   if (!employee) throw new Error("Employee not found");
 
-  const basicPayroll = await StaffBasicPayroll.findOne({ employeeId }).session(
-    session,
-  );
-  if (!basicPayroll) throw new Error("Basic payroll not found");
-
-  const fullBasicSalary = toExactAmount(basicPayroll.currentBasicSalary || 0);
+  // A manually-entered basic salary (typed directly on the Add Payroll form)
+  // takes priority and doesn't require a pre-existing Staff Basic Payroll
+  // record. Otherwise fall back to the stored basic payroll record, as before.
+  let fullBasicSalary;
+  if (manualBasicSalary !== null && manualBasicSalary !== undefined) {
+    fullBasicSalary = toExactAmount(manualBasicSalary);
+  } else {
+    const basicPayroll = await StaffBasicPayroll.findOne({
+      employeeId,
+    }).session(session);
+    if (!basicPayroll) throw new Error("Basic payroll not found");
+    fullBasicSalary = toExactAmount(basicPayroll.currentBasicSalary || 0);
+  }
   const [year, month] = period.split("-").map(Number);
   const totalDaysInMonth = new Date(year, month, 0).getDate();
   const perDaySalary = fullBasicSalary / totalDaysInMonth;
@@ -190,7 +203,7 @@ export const exportPayrollsCSV = async (req, res) => {
         p.period,
         p.adjustedBasicSalary ?? p.basicSalary,
         p.totalAllowance,
-        p.deductions,
+        p.totalDeduction,
         p.advanceDeduction,
         p.netSalary,
         p.paidAmount,
@@ -334,6 +347,274 @@ export const getPayroll = async (req, res) => {
   }
 };
 
+// "YYYY-MM" -> "Month YYYY", e.g. "2026-07" -> "July 2026"
+const formatPeriodLabel = (period) => {
+  const [year, month] = period.split("-").map(Number);
+  const monthNames = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  return `${monthNames[(month || 1) - 1] || ""} ${year}`.trim();
+};
+
+const formatCurrency = (value) =>
+  `Rs. ${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+
+// @desc    Download a single payroll record as a PDF payslip
+// @route   GET /api/hrm/payroll/:id/payslip-export
+// @access  Private (self can only download their own; admins can download any)
+export const exportPayslipPdf = async (req, res) => {
+  try {
+    const payroll = await Payroll.findById(req.params.id).populate(
+      "employeeId",
+      "staffName email projectName staffId contactNo",
+    );
+
+    if (!payroll) {
+      return res.status(404).json({
+        success: false,
+        message: "Payroll not found",
+      });
+    }
+
+    // Same self-service scoping used by getPayrolls: non-admins may only
+    // download their own payslip, matched by email -> Staff profile.
+    if (!isAdminRole(req.user?.role)) {
+      const ownStaff = await Staff.findOne({
+        email: req.user?.email?.toLowerCase().trim(),
+      }).select("_id");
+      if (!ownStaff || String(ownStaff._id) !== String(payroll.employeeId?._id)) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not authorized to download this payslip",
+        });
+      }
+    }
+
+    const staff = payroll.employeeId || {};
+    const periodLabel = formatPeriodLabel(payroll.period);
+    const fileName = `Payslip-${(staff.staffName || "staff").replace(/\s+/g, "_")}-${payroll.period}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
+    doc.pipe(res);
+
+    // ── Palette (matches the "Employee Payslip" reference template) ────────
+    const NAVY = "#1B3A5C";
+    const GOLD = "#C9A24B";
+    const CREAM = "#F5E9C8";
+    const TEXT_DARK = "#1B1B1B";
+    const TEXT_MUTED = "#555555";
+
+    const pageWidth = doc.page.width; // 595.28 for A4
+    const marginX = 50;
+    const contentWidth = pageWidth - marginX * 2;
+
+    // ── Decorative header band with a wavy bottom edge ──────────────────────
+    const drawWaveBand = (topY, height, color, flip = false) => {
+      const baseY = flip ? topY : topY + height;
+      const amp = 14;
+      doc.save();
+      doc.moveTo(0, topY);
+      doc.lineTo(pageWidth, topY);
+      doc.lineTo(pageWidth, baseY - amp);
+      doc.bezierCurveTo(
+        pageWidth * 0.75, baseY + amp,
+        pageWidth * 0.55, baseY - amp * 1.6,
+        pageWidth * 0.35, baseY,
+      );
+      doc.bezierCurveTo(
+        pageWidth * 0.2, baseY + amp,
+        pageWidth * 0.08, baseY - amp,
+        0, baseY - amp * 0.4,
+      );
+      doc.closePath();
+      doc.fill(color);
+      doc.restore();
+    };
+
+    drawWaveBand(0, 78, NAVY);
+
+    // Title
+    doc
+      .fontSize(22)
+      .fillColor(NAVY)
+      .font("Helvetica-Bold")
+      .text("EMPLOYEE PAYSLIP", marginX, 108, { width: contentWidth, align: "center" });
+
+    // Gold accent line with small diamond ends, under the title
+    const lineY = 140;
+    doc.moveTo(marginX + 10, lineY).lineTo(pageWidth - marginX - 10, lineY).strokeColor(GOLD).lineWidth(1.5).stroke();
+    [marginX, pageWidth - marginX].forEach((x) => {
+      doc.polygon([x - 5, lineY], [x, lineY - 5], [x + 5, lineY], [x, lineY + 5]).fill(GOLD);
+    });
+
+    // ── Employee details ────────────────────────────────────────────────────
+    let y = 162;
+    doc.font("Helvetica-Bold").fontSize(10).fillColor(TEXT_DARK);
+    const detailRows = [
+      ["Month", periodLabel],
+      ["Employee Name", staff.staffName || "-"],
+      ["Employee ID", staff.staffId || "NA"],
+      ["Department", staff.projectName || "NA"],
+      ["Designation", staff.employmentType || "NA"],
+      ["Pay Date", "10th/month"],
+    ];
+    const labelX = marginX;
+    const colonX = marginX + 120;
+    detailRows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").fillColor(TEXT_DARK).text(label, labelX, y, { width: 118 });
+      doc.font("Helvetica").fillColor(TEXT_DARK).text(`: ${value}`, colonX, y, { width: contentWidth - 120 });
+      y += 16;
+    });
+    y += 10;
+
+    // ── Section ribbon tab (flag-style navy tab with white label) ──────────
+    const drawRibbon = (label, ribbonY) => {
+      const w = 130;
+      const h = 20;
+      doc.save();
+      doc.moveTo(marginX, ribbonY)
+        .lineTo(marginX + w, ribbonY)
+        .lineTo(marginX + w - 8, ribbonY + h / 2)
+        .lineTo(marginX + w, ribbonY + h)
+        .lineTo(marginX, ribbonY + h)
+        .closePath()
+        .fill(NAVY);
+      doc.restore();
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(10)
+        .fillColor("#FFFFFF")
+        .text(label, marginX + 14, ribbonY + 5, { width: w - 20 });
+      return ribbonY + h;
+    };
+
+    // ── Cream line-item box: rows of "label : amount", ending in a bold total bar ──
+    const drawLineItemBox = (rows, totalLabel, totalValueText, boxTopY) => {
+      const rowH = 18;
+      const boxHeight = rows.length * rowH + 10;
+      doc.rect(marginX, boxTopY, contentWidth, boxHeight).fill(CREAM);
+
+      let rowY = boxTopY + 6;
+      doc.font("Helvetica").fontSize(9.5).fillColor(TEXT_DARK);
+      rows.forEach(([label, amount]) => {
+        doc.text(label, marginX + 14, rowY, { width: 220 });
+        doc.text(":", marginX + 240, rowY);
+        doc.text(amount, marginX + contentWidth - 110, rowY, { width: 96, align: "right" });
+        rowY += rowH;
+      });
+
+      const totalY = boxTopY + boxHeight + 4;
+      doc.rect(marginX, totalY, contentWidth, 22).fill(CREAM);
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(10)
+        .fillColor(TEXT_DARK)
+        .text(totalLabel, marginX + 14, totalY + 6, { width: 220 });
+      doc.text(totalValueText, marginX + contentWidth - 110, totalY + 6, { width: 96, align: "right" });
+
+      return totalY + 22;
+    };
+
+    // Earnings
+    const basic = payroll.adjustedBasicSalary ?? payroll.basicSalary;
+    const earningsRows = [["Basic Salary", formatCurrency(basic)]];
+    (payroll.allowances || []).forEach((a) => earningsRows.push([a.type, formatCurrency(a.amount)]));
+    if (earningsRows.length === 1) earningsRows.push(["No additional allowances", "NA"]);
+
+    y = drawRibbon("Earnings", y);
+    y = drawLineItemBox(
+      earningsRows,
+      "Total Earnings",
+      formatCurrency(payroll.totalAllowance + basic),
+      y + 4,
+    );
+    y += 14;
+
+    // Deductions
+    const deductionRows = (payroll.deductions || []).map((d) => [d.type, formatCurrency(d.amount)]);
+    if (payroll.advanceDeduction) {
+      deductionRows.push(["Advance Recovery", formatCurrency(payroll.advanceDeduction)]);
+    }
+    if (deductionRows.length === 0) deductionRows.push(["No deductions", "NA"]);
+
+    y = drawRibbon("Deductions", y);
+    const totalDeductions = payroll.totalDeduction + (payroll.advanceDeduction || 0);
+    y = drawLineItemBox(deductionRows, "Total Deductions", formatCurrency(totalDeductions), y + 4);
+    y += 18;
+
+    // ── Net Salary Received bar ─────────────────────────────────────────────
+    doc.rect(marginX, y, contentWidth, 26).fill(CREAM);
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(11)
+      .fillColor(TEXT_DARK)
+      .text("Net Salary Received", marginX + 14, y + 7, { width: 260 });
+    doc.text(
+      formatCurrency(payroll.netSalaryExact ?? payroll.netSalary),
+      marginX + contentWidth - 130,
+      y + 7,
+      { width: 116, align: "right" },
+    );
+    y += 46;
+
+    // ── Payment details (left) + Prepared by (right) ────────────────────────
+    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(TEXT_DARK);
+    const paymentRows = [
+      ["Net Pay", `: ${formatCurrency(payroll.netSalaryExact ?? payroll.netSalary)}`],
+      ["Bank Account", `: ${payroll.bankAccount || "NA"}`],
+      ["Payment Mode", `: ${payroll.paymentMethod === "bank" ? "Bank Transfer" : (payroll.paymentMethod || "NA")}`],
+    ];
+    let leftY = y;
+    paymentRows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(label, marginX, leftY, { width: 90 });
+      doc.font("Helvetica").text(value, marginX + 92, leftY, { width: 180 });
+      leftY += 16;
+    });
+
+    doc.font("Helvetica").fontSize(9.5).fillColor(TEXT_DARK).text("Prepared by:", marginX + 330, y);
+
+    y = Math.max(leftY, y + 16) + 26;
+
+    doc.font("Helvetica-Bold").fontSize(9.5).text("Authorized by:", marginX, y);
+    y += 14;
+    doc.font("Helvetica").text("Finance Manager \u2013 Zap Solutionz", marginX, y);
+    y += 26;
+
+    doc.font("Helvetica").text("Created by \u2013 Accounts team", marginX, y);
+    y += 14;
+    doc.font("Helvetica").text("Approved by Admin", marginX, y);
+
+    // Signature block, right-aligned, roughly level with "Authorized by"
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9.5)
+      .text(req.user?.name || "Accounts Team", marginX + 330, y - 40, { width: 160 });
+    doc.font("Helvetica").text("Zap Solutionz", marginX + 330, y - 26, { width: 160 });
+
+    // ── Footer wave band ─────────────────────────────────────────────────────
+    const footerHeight = 60;
+    drawWaveBand(doc.page.height - footerHeight, footerHeight, NAVY, true);
+
+    doc.end();
+  } catch (error) {
+    if (error.name === "CastError") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payroll ID",
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate payslip PDF",
+      error: error.message,
+    });
+  }
+};
+
 // @desc    Preview/calculate a staff member's salary for a period before saving
 // @route   GET /api/hrm/payroll/calculate/:employeeId/:period
 // @access  Private
@@ -388,8 +669,9 @@ export const createPayroll = async (req, res) => {
     const {
       employeeId,
       period,
+      basicSalary, // optional — manual override, doesn't require a Staff Basic Payroll record
       allowances = [],
-      deductions = 0,
+      deductions = [], // itemized [{ type, amount }], e.g. Provident Fund, Professional Tax
       paymentMethod = "bank",
       bankAccount = "",
       remarks = "",
@@ -397,13 +679,20 @@ export const createPayroll = async (req, res) => {
       sourceAccountId = null,
     } = req.body;
 
-    // Validate
+    // Validate — Basic Salary is the only truly mandatory pay figure;
+    // Staff and Period are required too since they identify the record.
     if (!employeeId || !period) {
       throw new Error("Employee ID and period are required");
     }
 
     if (!/^\d{4}-\d{2}$/.test(period)) {
       throw new Error("Period must be in YYYY-MM format");
+    }
+
+    const hasManualBasicSalary =
+      basicSalary !== undefined && basicSalary !== null && basicSalary !== "";
+    if (hasManualBasicSalary && (isNaN(basicSalary) || Number(basicSalary) < 0)) {
+      throw new Error("Basic Salary must be a valid positive number");
     }
 
     // Check existing payroll
@@ -415,8 +704,15 @@ export const createPayroll = async (req, res) => {
     }
 
     // Calculate salary (includes leave deduction, advance deduction, and
-    // any pending balance carried over from the previous period)
-    const salaryData = await calculateSalary(employeeId, period, session);
+    // any pending balance carried over from the previous period). If the
+    // admin typed a Basic Salary directly, it overrides the stored Staff
+    // Basic Payroll record — and no such record is required in that case.
+    const salaryData = await calculateSalary(
+      employeeId,
+      period,
+      session,
+      hasManualBasicSalary ? Number(basicSalary) : null,
+    );
 
     // Process allowances/deductions on top of the calculated basic salary
     const processedAllowances = allowances.map((a) => ({
@@ -427,7 +723,14 @@ export const createPayroll = async (req, res) => {
       (sum, a) => sum + a.amount,
       0,
     );
-    const deductionAmount = toFixedAmount(deductions);
+    const processedDeductions = deductions.map((d) => ({
+      type: d.type,
+      amount: toFixedAmount(d.amount),
+    }));
+    const deductionAmount = processedDeductions.reduce(
+      (sum, d) => sum + d.amount,
+      0,
+    );
 
     const netSalaryExact = Math.max(
       0,
@@ -499,7 +802,8 @@ export const createPayroll = async (req, res) => {
       adjustedBasicSalary: toFixedAmount(salaryData.finalSalary),
       allowances: processedAllowances,
       totalAllowance: toFixedAmount(totalAllowance),
-      deductions: deductionAmount,
+      deductions: processedDeductions,
+      totalDeduction: toFixedAmount(deductionAmount),
       netSalary: toFixedAmount(netSalaryExact),
       netSalaryExact,
       advanceDeduction: toFixedAmount(salaryData.advanceDeduction),

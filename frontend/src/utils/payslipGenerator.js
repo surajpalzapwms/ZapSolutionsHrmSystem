@@ -52,7 +52,8 @@ export const buildPayslipData = (payroll, staffRecord = {}) => {
     basicSalary: payroll.adjustedBasicSalary ?? payroll.basicSalary ?? 0,
     allowances: payroll.allowances || [],
     totalAllowance: payroll.totalAllowance || 0,
-    deductions: payroll.deductions || 0,
+    deductions: payroll.deductions || [],
+    totalDeduction: payroll.totalDeduction || 0,
     advanceDeduction: payroll.advanceDeduction || 0,
     leaveDeduction: payroll.attendanceInfo?.leaveDeduction || 0,
     netSalary: payroll.netSalary || 0,
@@ -206,12 +207,12 @@ export const generatePayslipPDF = (data) => {
   // matches the reference template instead of collapsing to a single
   // "No deductions" line whenever nothing happens to be non-zero.
   const deductionRows = [
-    ["Other Deductions", money(data.deductions)],
+    ...data.deductions.map((d) => [d.type, money(d.amount)]),
     ["Advance Deduction", money(data.advanceDeduction)],
     ["Leave Deduction", money(data.leaveDeduction)],
   ];
   const totalDeductions =
-    Number(data.deductions) +
+    Number(data.totalDeduction) +
     Number(data.advanceDeduction) +
     Number(data.leaveDeduction);
 

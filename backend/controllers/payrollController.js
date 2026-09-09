@@ -97,7 +97,10 @@ const calculateSalary = async (
         }).session(session)
       : [];
 
-  const unpaidLeaveDays = leaves.length;
+  // Sum dayValue instead of the raw record count, so a half-day unpaid
+  // leave (dayValue: 0.5) only deducts half a day's salary instead of a
+  // full day. `?? 1` covers records saved before dayValue existed.
+  const unpaidLeaveDays = leaves.reduce((sum, l) => sum + (l.dayValue ?? 1), 0);
   const leaveDeduction = unpaidLeaveDays * perDaySalary;
   const effectiveDays = Math.max(0, payableDays - unpaidLeaveDays);
   const netSalary = Math.max(0, perDaySalary * effectiveDays);

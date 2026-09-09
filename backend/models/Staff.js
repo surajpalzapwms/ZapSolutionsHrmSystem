@@ -38,6 +38,10 @@ const staffSchema = new mongoose.Schema(
     date: {
       type: Date, // Joining Date
     },
+    dateOfBirth: {
+      type: Date,
+      default: null,
+    },
     // Probation related fields
     probationMonths: {
       type: Number,
@@ -87,17 +91,23 @@ const staffSchema = new mongoose.Schema(
   },
 );
 
-// Only the date fields belonging to the currently-selected `status` (and,
-// separately, to a chosen `employmentType`) are meaningful. This is a
-// safety net at the model level — the controller already enforces the same
-// rule on create/update — so any other code path that calls
-// `Staff.create()` / `doc.save()` directly (e.g. a future script) can't
-// leave stale dates behind either. Note: this does NOT run on
-// `insertMany()` (see importStaff, which applies the same rule inline).
+// Employment-type dates (projectStartDate/projectEndDate) only make sense
+// when an employmentType is actually chosen — that part stays a hard
+// exclusivity rule at the model level. This is a safety net — the
+// controller already enforces the same rule on create/update — so any
+// other code path that calls `Staff.create()` / `doc.save()` directly
+// (e.g. a future script) can't leave stale dates behind either. Note: this
+// does NOT run on `insertMany()` (see importStaff, which applies the same
+// rule inline).
+//
+// IMPORTANT: probationEndDate / confirmationDate / relievingDate are
+// intentionally NOT nulled out when `status` changes. Those three dates
+// together form the staff member's lifecycle history (probation end,
+// confirmation start, leaving date) and the "View" details panel shows all
+// of them at once regardless of the current status — wiping the earlier
+// ones on every status change would make that view permanently blank for
+// anyone who has already moved past Probation.
 function enforceStatusEmploymentExclusivity(doc) {
-  if (doc.status !== "Probation") doc.probationEndDate = null;
-  if (doc.status !== "Confirmation") doc.confirmationDate = null;
-  if (doc.status !== "Relieving") doc.relievingDate = null;
   if (!doc.employmentType) {
     doc.projectStartDate = null;
     doc.projectEndDate = null;

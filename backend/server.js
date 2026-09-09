@@ -55,6 +55,9 @@ import officeExpenseRoutes from "./routes/officeExpenseRoutes.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import leaveAttendanceRoutes from "./routes/leave.js";
 import leavePolicyRoutes from "./routes/leavePolicy.js";
+import resignationRoutes from "./routes/resignation.js";
+import counselingRoutes from "./routes/counseling.js";
+import { reconcileAllStaffAbsences } from "./services/leaveAutomation.js";
 
 const app = express();
 
@@ -135,11 +138,9 @@ app.use("/api/hrm/advances", advanceRoutes);
 app.use("/api/hrm/staff-basic-payrolls", staffBasicPayrollRoutes);
 app.use("/api/hrm/expense-categories", expenseCategoryRoutes);
 app.use("/api/hrm/office-expenses", officeExpenseRoutes);
+app.use("/api/hrm/resignations", resignationRoutes);
+app.use("/api/hrm/counseling", counselingRoutes);
 
-// Root route - simple confirmation that the API is up.
-// Without this, hitting the base URL in a browser shows Express's default
-// "Cannot GET /" message, which looks like the server is down even when it's
-// running fine (it's just that "/" itself has no route handler).
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
@@ -196,6 +197,35 @@ if (
   );
 }
 
+// Runs the absent-day auto-leave sweep once now (best-effort, for whatever
+// was missed while the server was down) and then every 24h after that.
+// This is a plain in-process timer rather than a real cron package — fine
+// for a single-instance deployment; if this ever runs on more than one
+// server process, prefer pointing an OS-level cron / PM2 cron at
+// POST /api/hrm/leaves/reconcile-absences instead and set
+// LEAVE_AUTOMATION_DISABLED=true here so it doesn't run twice.
+function scheduleDailyAbsenceReconciliation() {
+  if (process.env.LEAVE_AUTOMATION_DISABLED === "true") {
+    console.log("ℹ️  Daily absence reconciliation disabled (LEAVE_AUTOMATION_DISABLED=true).");
+    return;
+  }
+
+  const runOnce = async () => {
+    try {
+      const summary = await reconcileAllStaffAbsences();
+      console.log(
+        `🗓️  Absence reconciliation: ${summary.leavesCreated} leave(s) auto-created across ${summary.staffProcessed} staff` +
+          (summary.errors.length ? ` (${summary.errors.length} error(s))` : ""),
+      );
+    } catch (err) {
+      console.error("❌ Daily absence reconciliation failed:", err.message);
+    }
+  };
+
+  runOnce();
+  setInterval(runOnce, 24 * 60 * 60 * 1000);
+}
+
 async function startServer(retries = 3, delayMs = 3000) {
   await ensureSrvResolvable(MONGO_URI);
 
@@ -207,6 +237,7 @@ async function startServer(retries = 3, delayMs = 3000) {
         console.log(`📊 Environment: ${process.env.NODE_ENV}`);
         console.log(`🌐 Allowed CORS origins: ${allowedOrigins.join(", ")}`);
       });
+      scheduleDailyAbsenceReconciliation();
       return;
     } catch (err) {
       console.error(

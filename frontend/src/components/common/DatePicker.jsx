@@ -70,6 +70,17 @@ const DatePicker = ({
           disabled={disabled}
           minDate={minDate}
           maxDate={maxDate}
+          // Reaching a date months/years back used to mean clicking the
+          // "previous month" arrow over and over. These add a Month and a
+          // Year <select> right in the calendar header — pick the year,
+          // pick the month, done. "select" mode (rather than "scroll")
+          // keeps them as instant dropdowns, and the year list covers a
+          // wide, sensible range around today.
+          showMonthDropdown
+          showYearDropdown
+          dropdownMode="select"
+          yearDropdownItemNumber={30}
+          scrollableYearDropdown
           wrapperClassName="block w-full"
           className={`border rounded-md pl-3 pr-9 py-2 w-full ${className} ${
             error ? "border-red-500" : "border-gray-300"

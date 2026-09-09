@@ -19,6 +19,9 @@ export const attendanceService = {
       userId,
       allow,
     }),
+  importAttendance: (rows) =>
+    api.post("/api/hrm/leaves/attendance/import", rows),
+  importLeaves: (rows) => api.post("/api/hrm/leaves/leave/import", rows),
   deleteAttendance: (id) => api.delete(`/api/hrm/leaves/attendance/${id}`),
   deleteByDate: (userId, date) =>
     api.delete(`/api/hrm/leaves/attendance/date/${userId}/${date}`),
@@ -32,6 +35,14 @@ export const attendanceService = {
   getStaffSummary: () => api.get("/api/hrm/leaves/staff-summary"),
   getStaffCalendar: (staffId, params) =>
     api.get(`/api/hrm/leaves/staff-summary/${staffId}/calendar`, { params }),
+  // Admin repair tool: re-bridges Sunday/holiday days sitting between two
+  // approved leaves that were left un-bridged by data created before the
+  // sandwich-leave order-independence fix (e.g. an Excel import whose rows
+  // weren't in date order). Safe to call more than once.
+  reconcileSandwichLeave: (staffId, params) =>
+    api.post(`/api/hrm/leaves/reconcile-sandwich/${staffId}`, null, {
+      params,
+    }),
 
   // ── Leave requests: staff self-service + admin approval ─────────────────
   // Staff member: submit a request / see their own requests + status.

@@ -43,8 +43,14 @@ const BalanceCell = ({ bucket, showCarry = false }) => {
   );
 };
 
+// Paid, sick and casual `taken` are all year-to-date now (all three
+// accumulate across the year — see leaveBalance.js). `takenThisYear` is
+// kept as an alias on sick/casual for backwards compatibility with any
+// older cached payload shape.
 const totalTaken = (row) =>
-  (row.paid?.taken || 0) + (row.sick?.taken || 0) + (row.casual?.taken || 0);
+  (row.paid?.taken || 0) +
+  (row.sick?.takenThisYear ?? row.sick?.taken ?? 0) +
+  (row.casual?.takenThisYear ?? row.casual?.taken ?? 0);
 
 const CategoryBreakdownRow = ({ label, bucket }) => (
   <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
@@ -306,14 +312,14 @@ const LeaveManagement = () => {
           />
           <PolicyField
             label="Sick Leave"
-            hint="Resets each year (no carry-forward)"
+            hint="Accumulates through the year, resets each January"
             value={policy.sickPerYear}
             disabled={!admin}
             onChange={(v) => setPolicy((s) => ({ ...s, sickPerYear: v }))}
           />
           <PolicyField
             label="Casual Leave"
-            hint="Resets each year (no carry-forward)"
+            hint="Accumulates through the year, resets each January"
             value={policy.casualPerYear}
             disabled={!admin}
             onChange={(v) => setPolicy((s) => ({ ...s, casualPerYear: v }))}
@@ -322,7 +328,10 @@ const LeaveManagement = () => {
 
         <div className="mt-4 inline-flex items-center text-xs text-gray-500">
           <ArrowRightCircle size={14} className="mr-1 text-blue-500" />
-          Only paid leave carries forward; sick &amp; casual reset on 1 Jan.
+          Paid, sick and casual leave all accrue 1/12th of the yearly amount
+          each month and accumulate through the year. Only paid leave carries
+          any unused balance forward into the next year — sick &amp; casual
+          reset to a fresh count every 1 January.
         </div>
       </Modal>
 

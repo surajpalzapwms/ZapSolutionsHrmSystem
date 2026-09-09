@@ -72,11 +72,23 @@ saturdayHolidayRuleSchema.statics.getOccurrenceOfDate = function (date) {
   return Math.ceil(d.getUTCDate() / 7);
 };
 
+// The 3rd/4th (and any other) Saturday-holiday rule only starts applying
+// from May 2026 onward. Attendance for earlier months (e.g. Feb, Mar 2026)
+// should never be blocked by this rule, even if a rule document happens to
+// exist for that year/month.
+const SATURDAY_RULE_EFFECTIVE_FROM = new Date(Date.UTC(2026, 4, 1)); // May 1, 2026
+
 /** True if `date` is a Saturday covered by that month's recurring-holiday rule. */
 saturdayHolidayRuleSchema.statics.isSaturdayHoliday = async function (date) {
   const d = new Date(date);
   const occurrence = this.getOccurrenceOfDate(d);
   if (!occurrence) return { isHoliday: false, occurrence: null };
+
+  // Dates before May 2026 are never subject to the Saturday-holiday rule,
+  // regardless of what's saved in the DB for that month.
+  if (d < SATURDAY_RULE_EFFECTIVE_FROM) {
+    return { isHoliday: false, occurrence };
+  }
 
   const rule = await this.findOne({
     year: d.getUTCFullYear(),

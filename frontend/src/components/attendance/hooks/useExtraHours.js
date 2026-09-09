@@ -13,13 +13,15 @@ export const useExtraHours = () => {
     try {
       setLoading(true);
       const res = await attendanceService.getExtraHours(userId, params);
-      const data = res.data?.data || res.data || [];
-      setExtraHours(data);
-      setTotalMinutes(
-        Array.isArray(data)
-          ? data.reduce((sum, r) => sum + (r.extraHoursInMinutes || 0), 0)
-          : res.data?.totalMinutes || 0
+      const payload = res.data?.data || {};
+      // recordsWithExtraHours is the actual per-day array; sort it so the
+      // biggest single-day contributors surface first — that's what you
+      // need to see to explain an inflated total like "20d 7h 22m".
+      const records = [...(payload.recordsWithExtraHours || [])].sort(
+        (a, b) => (b.extraHoursInMinutes || 0) - (a.extraHoursInMinutes || 0)
       );
+      setExtraHours(records);
+      setTotalMinutes(payload.totalExtraMinutes || 0);
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to load extra hours");
     } finally {

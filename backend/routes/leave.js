@@ -24,6 +24,7 @@ import {
   checkOut,
   autoCheckIn,
   getMyTodayAttendance,
+  getMyMonthAttendance,
   setEarlySignOutPermission,
   getOpenAttendanceToday,
   getStaffSummary,
@@ -34,6 +35,8 @@ import {
   getAllLeaveRequests,
   approveLeaveRequest,
   rejectLeaveRequest,
+  reconcileAbsences,
+  reconcileStaffSandwichLeave,
 } from "../controllers/leave.js";
 
 const router = express.Router();
@@ -43,6 +46,7 @@ const router = express.Router();
 // ever touches the caller's own record, so this deliberately does NOT use
 // allowAdminOnly.
 router.get("/attendance/me/today", protect, getMyTodayAttendance);
+router.get("/attendance/me/month", protect, getMyMonthAttendance);
 router.post("/attendance/checkin", protect, checkIn);
 router.post("/attendance/checkout", protect, checkOut);
 // Silent, automatic, fired by the frontend on app load — see autoCheckIn
@@ -109,6 +113,24 @@ router.get("/requests/pending", protect, allowAdminOnly, getPendingLeaveRequests
 router.get("/requests/all", protect, allowAdminOnly, getAllLeaveRequests);
 router.put("/requests/:id/approve", protect, allowAdminOnly, approveLeaveRequest);
 router.put("/requests/:id/reject", protect, allowAdminOnly, rejectLeaveRequest);
+
+// Admin (or a scheduled job hitting this with a service token) — sweeps
+// every staff member for working days with no attendance and no leave
+// request, auto-marking them paid/unpaid per balance. Also fine to point
+// an OS-level cron / PM2 cron restart hook at this once a day.
+router.post("/reconcile-absences", protect, allowAdminOnly, reconcileAbsences);
+
+// Admin repair tool: re-bridges Sunday/holiday blocks inside a staff
+// member's EXISTING leave history that were missed before this fix (e.g.
+// an Excel import whose rows weren't in date order). See
+// reconcileStaffSandwichLeave for details. Optional ?fromDate&toDate query
+// params narrow the window; otherwise it covers all leave on file.
+router.post(
+  "/reconcile-sandwich/:staffId",
+  protect,
+  allowAdminOnly,
+  reconcileStaffSandwichLeave,
+);
 
 // ── Misc ─────────────────────────────────────────────────────────────────────
 router.get("/extra-hours/:userId", getExtraHoursSimple);

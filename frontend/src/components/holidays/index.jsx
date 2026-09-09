@@ -28,7 +28,9 @@ const formatFullDate = (dateString) => {
 const Holidays = () => {
   const [isMobileView, setIsMobileView] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [showCalendarView, setShowCalendarView] = useState(false);
+  // Default to the calendar (whole-year) view so holidays for the entire
+  // year are visible as soon as the Holidays tab opens.
+  const [showCalendarView, setShowCalendarView] = useState(true);
   const [saturdaySettingsOpen, setSaturdaySettingsOpen] = useState(false);
   const admin = isAdminUser(getCurrentUser());
 

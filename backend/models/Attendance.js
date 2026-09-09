@@ -43,9 +43,19 @@ const attendanceSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Minutes borrowed from the user's overtime bank (see
+    // deductFromExtraHoursBank in services/leave.js) to promote THIS day
+    // to "full" despite falling short of the shift's net requirement. Kept
+    // for audit/debugging only — the actual deduction lives on the source
+    // record(s)' own extraHoursInMinutes, this is just "how much, and why
+    // this day is full despite a shortfall".
+    bankMinutesUsed: {
+      type: Number,
+      default: 0,
+    },
     attendanceType: {
       type: String,
-      enum: ["full", "half", "short"],
+      enum: ["full", "half", "short", "absent"],
     },
     isLeaveDay: {
       type: Boolean,

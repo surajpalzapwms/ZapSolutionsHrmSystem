@@ -63,12 +63,18 @@ export const formatMinutesToTimeString = (minutes) => {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
 };
 
-/** Classifies a shift by minutes worked into full / half / short. */
-export const classifyAttendance = (totalMinutesWorked) => {
-  if (totalMinutesWorked >= 7 * 60) return { type: "full", expectedMinutes: 8 * 60 };
-  if (totalMinutesWorked >= 4 * 60) return { type: "half", expectedMinutes: 4 * 60 };
-  return { type: "short", expectedMinutes: 8 * 60 };
-};
+/**
+ * Classifies a shift by minutes worked into full / half / short.
+ *
+ * This used to duplicate its own copy of the full/half/short thresholds,
+ * which had drifted out of sync with the real rule used by the self
+ * sign-in/out flow (getAttendanceType in services/leave.js) — editing one
+ * without the other silently left half the app on the old cutoffs. It now
+ * just re-exports that single implementation so manual/import attendance
+ * (this file's callers) and self-tracked attendance can never disagree
+ * again. See getAttendanceType for the current thresholds.
+ */
+export { getAttendanceType as classifyAttendance } from "../services/leave.js";
 
 export const toTitleCase = (str) => {
   if (!str) return "";

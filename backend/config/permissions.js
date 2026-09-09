@@ -25,6 +25,7 @@ export const TAB_TREE = [
   },
   { key: "advance", label: "Advance" },
   { key: "expenses", label: "Expenses" },
+  { key: "resignations", label: "Resignations" },
 ];
 
 // Flat list of every valid tab + sub-tab key, e.g. ["staff", "staff.add", ...]

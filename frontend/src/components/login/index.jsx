@@ -88,18 +88,18 @@ const Login = () => {
 
 const handleSubmit = async (e) => {
     e.preventDefault();
-    console.log("Form submitted. isSignUp:", isSignUp, "form:", form);
+    
 
     if (!validate()) {
-      console.log("Validation failed. Errors:", errors);
+  
       return;
     }
-    console.log("Validation passed");
+    
 
     setLoading(true);
     try {
       if (isSignUp) {
-        console.log("Sending register request to /api/auth/register");
+
         const { data } = await api.post("/api/auth/register", {
           firstName: form.firstName,
           lastName: form.lastName,
@@ -107,7 +107,7 @@ const handleSubmit = async (e) => {
           contactNumber: form.contactNumber,
           password: form.password,
         });
-        console.log("Register response:", data);
+        
 
         showToast("success", "Account created successfully! Please login.");
         setIsSignUp(false);
@@ -120,24 +120,21 @@ const handleSubmit = async (e) => {
           confirmPassword: "" 
         });
       } else {
-        console.log("Sending login request to /api/auth/login with email:", form.email);
         const { data } = await api.post("/api/auth/login", {
           email: form.email,
           password: form.password,
         });
-        console.log("Login response:", data);
+      
 
         // Backend responds with { success, message, data: { id, name, email, role, token } }
         const payload = data.data || data;
-        console.log("Extracted payload:", payload);
+        
 
         const { token, ...userInfo } = payload;
-        console.log("Token present:", !!token, "userInfo:", userInfo);
+        
 
         localStorage.setItem("token", token);
         localStorage.setItem("user", JSON.stringify(userInfo));
-        console.log("Stored token and user in localStorage");
-
         window.dispatchEvent(new Event("userLoggedIn"));
         window.dispatchEvent(
           new StorageEvent("storage", {
@@ -149,7 +146,6 @@ const handleSubmit = async (e) => {
         );
 
         showToast("success", "Logged in successfully");
-        console.log("Navigating to dashboard");
         navigate("/", { replace: true });
       }
     } catch (error) {
@@ -172,7 +168,6 @@ const handleSubmit = async (e) => {
       }
     } finally {
       setLoading(false);
-      console.log("Loading set to false");
     }
   };
 

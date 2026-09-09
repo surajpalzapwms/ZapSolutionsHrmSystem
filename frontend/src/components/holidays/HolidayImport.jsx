@@ -43,11 +43,29 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 // day-first parsing below is handled before ever falling back to `new Date`.
 const parseCellDate = (value) => {
   if (value === "" || value === null || value === undefined) return null;
-  if (value instanceof Date)
-    return Number.isNaN(value.getTime()) ? null : value;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    // The xlsx library's `cellDates: true` conversion returns a Date
+    // object shifted for the local timezone, but for timezones ahead of
+    // UTC (e.g. IST) it can land a few seconds *before* actual local
+    // midnight (23:59:5x the day before) instead of exactly on it — just
+    // enough to flip a date-only cell to the previous calendar day. Adding
+    // 12 hours before reading off the local Y/M/D absorbs that drift (up
+    // to ~half a day either direction) without affecting correctly parsed
+    // dates. We then rebuild the date as UTC midnight of that calendar
+    // day — sending anything else (e.g. the raw local Date, which
+    // `.toISOString()` would convert to a UTC instant a few hours before
+    // or after actual midnight depending on the browser's timezone) is
+    // what was making holidays never match the backend's UTC-midnight
+    // comparisons and silently vanish from every attendance calendar.
+    const rounded = new Date(value.getTime() + 12 * 60 * 60 * 1000);
+    return new Date(
+      Date.UTC(rounded.getFullYear(), rounded.getMonth(), rounded.getDate()),
+    );
+  }
 
   if (typeof value === "number") {
-    // Excel serial date: days since 1899-12-30
+    // Excel serial date: days since 1899-12-30 (already UTC-anchored).
     const epoch = new Date(Date.UTC(1899, 11, 30));
     const asDate = new Date(epoch.getTime() + value * ONE_DAY_MS);
     return Number.isNaN(asDate.getTime()) ? null : asDate;
@@ -60,7 +78,11 @@ const parseCellDate = (value) => {
     let m = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
     if (m) {
       const [, y, mo, d] = m;
-      const date = new Date(Number(y), Number(mo) - 1, Number(d));
+      // Built directly as UTC midnight (not a local Date later converted
+      // via toISOString(), which shifts by the browser's UTC offset and
+      // is what caused holidays to fall on the wrong day for the
+      // backend's UTC-based date matching).
+      const date = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
       return Number.isNaN(date.getTime()) ? null : date;
     }
 
@@ -71,23 +93,31 @@ const parseCellDate = (value) => {
       const day = Number(d);
       const month = Number(mo);
       if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-      const date = new Date(Number(y), month - 1, day);
+      const date = new Date(Date.UTC(Number(y), month - 1, day));
       return Number.isNaN(date.getTime()) ? null : date;
     }
 
     // Fallback for anything else (e.g. "7 Nov 2026") - unambiguous formats
-    // like this are safe to hand to the native parser.
+    // like this are safe to hand to the native parser, then re-anchored
+    // to UTC midnight the same way as the branches above.
     const parsed = new Date(trimmed);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+    if (Number.isNaN(parsed.getTime())) return null;
+    return new Date(
+      Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()),
+    );
   }
 
   return null;
 };
 
 const atDayStart = (date) => {
-  const copy = new Date(date);
-  copy.setHours(0, 0, 0, 0);
-  return copy;
+  // `date` from parseCellDate is already anchored to UTC midnight of the
+  // intended calendar day; re-deriving it via the UTC getters (rather
+  // than local setHours(0,0,0,0)) keeps it that way instead of
+  // reintroducing a local-timezone shift.
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
 };
 
 const firstDefined = (row, keys) => {
@@ -127,7 +157,10 @@ const toDailyEntries = (rawRows) => {
         const cursor = new Date(start);
         while (cursor <= end) {
           entries.push({ name, date: new Date(cursor), description });
-          cursor.setDate(cursor.getDate() + 1);
+          // start/end are UTC-midnight anchored (see parseCellDate) —
+          // stepping with the UTC setter keeps every day in the range on
+          // that same anchoring instead of drifting via local time.
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
         }
       } else {
         entries.push({ name, date: null, description });

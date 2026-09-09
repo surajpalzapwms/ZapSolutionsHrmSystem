@@ -143,13 +143,6 @@ const HolidayAnnouncement = () => {
         // Change direction:
         // RIGHT -> LEFT
         directionRef.current = -1;
-
-        console.log(
-          "Announcement reached RIGHT side"
-        );
-        console.log(
-          "Direction changed: RIGHT -> LEFT"
-        );
       }
 
       // ------------------------------------------------
@@ -160,17 +153,7 @@ const HolidayAnnouncement = () => {
         positionRef.current <= leftLimit
       ) {
         positionRef.current = leftLimit;
-
-        // Change direction:
-        // LEFT -> RIGHT
         directionRef.current = 1;
-
-        console.log(
-          "Announcement reached LEFT side"
-        );
-        console.log(
-          "Direction changed: LEFT -> RIGHT"
-        );
       }
 
       // Move element using JavaScript

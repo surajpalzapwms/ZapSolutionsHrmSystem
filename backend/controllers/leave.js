@@ -15,7 +15,6 @@ import {
   calculateMonthlyExtraHoursSummary,
   findExistingAttendance,
   findExistingLeave,
-  getAvailablePaidLeaves,
   getAllAttendance,
   getAttendanceForDay,
   getHolidays as getHolidaysService,
@@ -24,13 +23,33 @@ import {
   getUserAttendanceRange,
   getDateStringIST,
   getClampedWorkingMinutes,
+  getWorkedMinutesBreakdown,
+  classifyWorkedMinutes,
+  getAvailableBankMinutes,
+  deductFromExtraHoursBank,
   getUserShift,
+  resolveEffectiveShift,
   findAttendanceByUserAndDate,
   findOpenAttendanceForDate,
+  buildAttendanceFields,
+  resolveUserIdByEmail,
+  resolveStaffIdByEmail,
+  resolveStaffIdByUserId,
   LUNCH_START,
   LUNCH_END,
   REQUIRED_WORK_MINUTES,
+  DEFAULT_SHIFT_START,
+  DEFAULT_SHIFT_END,
 } from "../services/leave.js";
+import { getRemainingForType } from "../services/leaveBalance.js";
+import {
+  reconcileSandwichLeave,
+  reconcileSandwichLeaveForRange,
+  cleanupSandwichLeavesFor,
+  reconcileAllStaffAbsences,
+  cancelConflictingLeaveOnAttendance,
+  cleanupInvalidNonWorkingDayLeaves,
+} from "../services/leaveAutomation.js";
 import User from "../models/User.js";
 import Holiday from "../models/holiday.js";
 import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
@@ -68,18 +87,26 @@ const getSaturdayHolidaysAsEntries = async (year) => {
 // actually work; wire in a real activity logger here if/when one exists.
 const logActivity = async (_req, _entry) => {};
 
+// Admin-entered/imported times (e.g. "2025-07-01T09:56:00" from the Excel
+// importer or the manual attendance form) are IST wall-clock values with no
+// timezone marker. `new Date(str)` alone would parse them in whatever
+// timezone the server process happens to run in, so we instead read off the
+// literal digits and treat them as IST, converting to a true UTC instant —
+// the same instant self sign-in produces via `new Date()`. Without the
+// IST_OFFSET_MS subtraction below, every imported/manually-recorded time
+// displays 5:30 later than what was typed (e.g. 9:56 AM shows as 3:26 PM).
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const parseDT = (str) => {
   const dt = new Date(str);
-  return new Date(
-    Date.UTC(
-      dt.getFullYear(),
-      dt.getMonth(),
-      dt.getDate(),
-      dt.getHours(),
-      dt.getMinutes(),
-      dt.getSeconds(),
-    ),
+  const istWallClockAsUTC = Date.UTC(
+    dt.getFullYear(),
+    dt.getMonth(),
+    dt.getDate(),
+    dt.getHours(),
+    dt.getMinutes(),
+    dt.getSeconds(),
   );
+  return new Date(istWallClockAsUTC - IST_OFFSET_MS);
 };
 
 // GET /attendance
@@ -168,14 +195,33 @@ export const updateAttendance = async (req, res) => {
           message: "Logout time must be after login time",
         });
 
-    const totalMinutesWorked = Math.floor((logoutDT - loginDT) / 60000);
-    const h = Math.floor(totalMinutesWorked / 60),
-      m = totalMinutesWorked % 60;
-    const totalTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
-    const { type: attendanceType, expectedMinutes } =
-      getAttendanceType(totalMinutesWorked);
-    const extraMinutes = Math.max(0, totalMinutesWorked - expectedMinutes);
-    const extraHours = formatMinutesToTimeString(extraMinutes);
+    // Same worked-minutes math as new attendance (shift-window + lunch
+    // subtracted, plus any overtime past shift end) instead of a raw
+    // logout-minus-login diff — a raw diff ignored the lunch break and
+    // shift window entirely, so an admin edit could classify a day
+    // differently than the same login/logout would if entered fresh.
+    const { shiftStartTime, shiftEndTime } = resolveEffectiveShift(loginDT);
+    const { netMinutes, overtimeMinutes } = getWorkedMinutesBreakdown(
+      loginDT,
+      logoutDT,
+      shiftStartTime,
+      shiftEndTime,
+    );
+    const effectiveMinutes = netMinutes + overtimeMinutes;
+    const totalTime = formatMinutesToTimeString(effectiveMinutes);
+
+    // This day's own previously-earned extra minutes are being replaced by
+    // the recalculated figure below, so they shouldn't also count toward
+    // "available bank" when deciding whether a shortfall can be covered —
+    // exclude them, then add back whatever bank the edit ends up using.
+    const bankExcludingThisRecord = Math.max(
+      0,
+      (await getAvailableBankMinutes(previousRecord.userId)) -
+        (previousRecord.extraHoursInMinutes || 0),
+    );
+    const { type: attendanceType, bankMinutesUsed, extraMinutesEarned } =
+      classifyWorkedMinutes(effectiveMinutes, bankExcludingThisRecord, loginDT);
+    const extraHours = formatMinutesToTimeString(extraMinutesEarned);
     const dateString = formatDateForLog(loginDT);
 
     const updated = await Attendance.findByIdAndUpdate(
@@ -184,16 +230,22 @@ export const updateAttendance = async (req, res) => {
         loginTime: loginDT,
         logoutTime: logoutDT,
         totalTime,
+        sessionMinutes: effectiveMinutes,
         workingHoursPerDay:
           workingHoursPerDay || previousRecord.workingHoursPerDay,
         extraHours,
-        extraHoursInMinutes: extraMinutes,
+        extraHoursInMinutes: extraMinutesEarned,
+        bankMinutesUsed,
         attendanceType,
         remarks: remarks || previousRecord.remarks,
         updatedAt: new Date(),
       },
       { new: true },
     );
+
+    if (bankMinutesUsed > 0) {
+      await deductFromExtraHoursBank(previousRecord.userId, bankMinutesUsed);
+    }
     const updatedDoc = updated.toObject();
 
     await logActivity(req, {
@@ -552,7 +604,8 @@ export const listLeaves = async (req, res) => {
 // POST / (apply leave)
 export const applyLeave = async (req, res) => {
   try {
-    const { userId, leaveDate, reason, leaveType, status } = req.body;
+    const { userId, leaveDate, endDate, reason, leaveType, status, isHalfDay } =
+      req.body;
     if (!userId || !leaveDate || !reason) {
       return res.status(400).json({
         success: false,
@@ -560,15 +613,17 @@ export const applyLeave = async (req, res) => {
       });
     }
 
-    const validLeaveTypes = ["paid", "unpaid", "swapleave"];
+    const validLeaveTypes = ["paid", "unpaid", "swapleave", "sick", "casual"];
     if (leaveType && !validLeaveTypes.includes(leaveType)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid leave type. Must be 'paid', 'unpaid', or 'swapleave'",
+        message:
+          "Invalid leave type. Must be 'paid', 'unpaid', 'swapleave', 'sick', or 'casual'",
       });
     }
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(leaveDate)) {
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRe.test(leaveDate)) {
       return res
         .status(400)
         .json({
@@ -576,12 +631,6 @@ export const applyLeave = async (req, res) => {
           message: "Invalid leaveDate format. Use YYYY-MM-DD",
         });
     }
-    // Timezone-safe parse: build the date from its UTC calendar parts instead of
-    // `new Date(leaveDate); .setHours(0,0,0,0)`, which silently shifted the date
-    // back by a day whenever the server's local timezone was ahead of UTC (e.g.
-    // IST) — "2026-07-17" would get stored as 2026-07-16T18:30Z and every screen
-    // that reads it back with getUTCDate() would show it as 16 Jul.
-    const { start: parsedLeaveDate } = getDayRange(leaveDate);
     const todayString = getDateStringIST(new Date());
     if (leaveDate > todayString) {
       return res
@@ -591,6 +640,213 @@ export const applyLeave = async (req, res) => {
           message: "Cannot apply for leave for future dates",
         });
     }
+
+    // `userId` here is the Staff._id (see leaveStaffOptions on the
+    // frontend), but Attendance records are keyed by the linked login
+    // User._id — resolve that once up front so the "already has
+    // attendance" checks below (both range and single-day mode) actually
+    // match real Attendance rows instead of comparing against an ID that
+    // Attendance never uses. A staff member with no linked login account
+    // simply has no attendance to conflict with.
+    const staffForAttendanceLookup = await Staff.findById(userId)
+      .select("email")
+      .lean();
+    const attendanceUserId = staffForAttendanceLookup?.email
+      ? (
+          await resolveUserIdByEmail([staffForAttendanceLookup.email])
+        )[staffForAttendanceLookup.email.toLowerCase()] || null
+      : null;
+
+    // ── Range mode (admin picks a "Date Range" in the Apply Leave modal) ──
+    // Walks every calendar day from leaveDate to endDate, same day-by-day
+    // approach applyMyLeave's batch request uses below, except every day
+    // lands as "approved" directly (this is the direct admin-apply path,
+    // there's no separate approval step) and each creation is immediately
+    // run through the sandwich-leave check. Doing that in ascending date
+    // order is what lets a Sunday/holiday sitting inside the range — even
+    // several in a row, e.g. a Sunday next to a public holiday — get
+    // filled in automatically: by the time the loop reaches the first
+    // working day AFTER that block, the working day BEFORE it already has
+    // an approved leave, so reconcileSandwichLeave's backward-looking check
+    // finds it and fills the block in (see services/leaveAutomation.js).
+    if (endDate && endDate !== leaveDate) {
+      if (!dateRe.test(endDate)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid endDate format. Use YYYY-MM-DD",
+        });
+      }
+      if (endDate < leaveDate) {
+        return res.status(400).json({
+          success: false,
+          message: "endDate must be on or after leaveDate",
+        });
+      }
+      if (endDate > todayString) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot apply for leave for future dates",
+        });
+      }
+
+      const resolvedLeaveType = leaveType || "unpaid";
+      const isBalanceTracked = ["paid", "sick", "casual"].includes(
+        resolvedLeaveType,
+      );
+
+      let remainingForRangeType = Infinity;
+      if (isBalanceTracked) {
+        const staffRecord = await getStaffById(userId);
+        const joinDate =
+          staffRecord?.date ??
+          new Date(Date.UTC(new Date().getFullYear(), 0, 1));
+        const relievingDate =
+          staffRecord?.status === "Relieving" ? staffRecord?.relievingDate : null;
+        remainingForRangeType = await getRemainingForType(
+          userId,
+          joinDate,
+          resolvedLeaveType,
+          new Date(),
+          relievingDate,
+        );
+        if (remainingForRangeType < 1) {
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient ${resolvedLeaveType} leave balance for this calendar year (${remainingForRangeType} day(s) remaining). Choose Unpaid leave instead.`,
+          });
+        }
+      }
+
+      const batchId = `${userId}-${Date.now()}`;
+      const created = [];
+      const skipped = [];
+
+      // Iterate using UTC midnights so day math never drifts across
+      // timezones — same pattern applyMyLeave's batch loop uses.
+      let cursor = new Date(`${leaveDate}T00:00:00.000Z`);
+      const last = new Date(`${endDate}T00:00:00.000Z`);
+      for (let guard = 0; cursor <= last && guard < 366; guard++) {
+        const y = cursor.getUTCFullYear();
+        const m = String(cursor.getUTCMonth() + 1).padStart(2, "0");
+        const d = String(cursor.getUTCDate()).padStart(2, "0");
+        const dayStr = `${y}-${m}-${d}`;
+        const { start: parsedDate, end: dayEnd } = getDayRange(dayStr);
+        cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+
+        // Sundays and holidays never get their own Leave record created
+        // here directly — they're left for reconcileSandwichLeave to fill
+        // in from the working days on either side. That's what keeps a
+        // holiday that ISN'T actually bracketed by leave on both sides
+        // (e.g. it falls right at the edge of the requested range) a free
+        // holiday instead of being force-marked as leave.
+        if (parsedDate.getUTCDay() === 0) {
+          skipped.push({ date: dayStr, reason: "Sunday" });
+          continue;
+        }
+        const holidayCheck = await isHolidayOrSunday(parsedDate);
+        if (holidayCheck.isHoliday) {
+          skipped.push({ date: dayStr, reason: holidayCheck.reason || "Holiday" });
+          continue;
+        }
+
+        const existingAttendanceDay = attendanceUserId
+          ? await findExistingAttendance(attendanceUserId, parsedDate)
+          : null;
+        if (existingAttendanceDay) {
+          skipped.push({ date: dayStr, reason: "Attendance already recorded" });
+          continue;
+        }
+
+        const existing = await Leave.findOne({
+          userId,
+          leaveDate: { $gte: parsedDate, $lte: dayEnd },
+          status: { $in: ["pending", "approved"] },
+        });
+        if (existing) {
+          skipped.push({ date: dayStr, reason: "Already requested" });
+          continue;
+        }
+
+        // Same balance-exhaustion fallback applyMyLeave's batch uses: once
+        // the tracked balance runs out partway through this same range,
+        // later days still get the day off — just as unpaid instead of
+        // being silently dropped.
+        const dayLeaveType =
+          isBalanceTracked && remainingForRangeType < 1
+            ? "unpaid"
+            : resolvedLeaveType;
+
+        const dayLeave = new Leave({
+          userId,
+          leaveDate: parsedDate,
+          reason,
+          leaveType: dayLeaveType,
+          status: "approved",
+          batchId,
+        });
+        await dayLeave.save();
+        created.push(dayLeave);
+        if (isBalanceTracked && dayLeaveType === resolvedLeaveType) {
+          remainingForRangeType -= 1;
+        }
+      }
+
+      // Bridge any Sunday/holiday block(s) inside the range in a single,
+      // order-independent pass over the whole leaveDate..endDate span —
+      // instead of reconciling after each individual day above, which only
+      // catches a bracketed block if the two days on either side of it
+      // happen to already be saved by the time the loop reaches them. A
+      // block made of MORE than one non-working day (e.g. a Sunday sitting
+      // right next to a public holiday) needs both the day before AND the
+      // day after the whole block to exist first, which isn't guaranteed
+      // mid-loop — this final pass sees the finished range as a whole, so
+      // it always finds it regardless of how many non-working days are in
+      // the run or what order they were created in.
+      if (created.length > 0) {
+        try {
+          await reconcileSandwichLeaveForRange(userId, leaveDate, endDate);
+        } catch (sandwichErr) {
+          console.error(
+            "Sandwich leave reconciliation failed (range apply):",
+            sandwichErr,
+          );
+        }
+      }
+
+      if (created.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No leave was created — every day in the range was a Sunday, a holiday, already requested, or already has attendance.",
+          skipped,
+        });
+      }
+
+      await logActivity(req, {
+        action: "CREATE",
+        actionLabel: `Applied ${toTitleCase(resolvedLeaveType)} Leave for User ${userId} from ${leaveDate} to ${endDate}`,
+        tableName: "leaves",
+        tableLabel: "Leave",
+        description: `${toTitleCase(resolvedLeaveType)} leave applied for user ${userId} from ${leaveDate} to ${endDate}: ${created.length} day(s) created, ${skipped.length} skipped (Sundays/holidays inside the range are backfilled as leave automatically where bracketed on both sides). Reason: ${reason}`,
+        refField: "userId",
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: `${created.length} day(s) applied as ${toTitleCase(resolvedLeaveType)} leave (${skipped.length} day(s) skipped — see details).`,
+        created,
+        skipped,
+        batchId,
+      });
+    }
+
+    // ── Single-day mode ────────────────────────────────────────────────
+    // Timezone-safe parse: build the date from its UTC calendar parts instead of
+    // `new Date(leaveDate); .setHours(0,0,0,0)`, which silently shifted the date
+    // back by a day whenever the server's local timezone was ahead of UTC (e.g.
+    // IST) — "2026-07-17" would get stored as 2026-07-16T18:30Z and every screen
+    // that reads it back with getUTCDate() would show it as 16 Jul.
+    const { start: parsedLeaveDate } = getDayRange(leaveDate);
     if (parsedLeaveDate.getUTCDay() === 0) {
       return res
         .status(400)
@@ -605,10 +861,9 @@ export const applyLeave = async (req, res) => {
       });
     }
 
-    const existingAttendance = await findExistingAttendance(
-      userId,
-      parsedLeaveDate,
-    );
+    const existingAttendance = attendanceUserId
+      ? await findExistingAttendance(attendanceUserId, parsedLeaveDate)
+      : null;
     if (existingAttendance) {
       return res.status(400).json({
         success: false,
@@ -617,8 +872,18 @@ export const applyLeave = async (req, res) => {
     }
 
     const { start, end } = getDayRange(parsedLeaveDate);
+    // Only a pending or already-approved leave should block a new one on
+    // the same date — a *rejected* record must not, or a date a staff
+    // member's request was rejected on becomes permanently unusable (it
+    // shows nothing on the calendar, since only approved leaves render,
+    // yet silently rejects every future attempt to mark that same day).
+    // Matches the scoping applyMyLeave already uses below.
     if (
-      await Leave.findOne({ userId, leaveDate: { $gte: start, $lte: end } })
+      await Leave.findOne({
+        userId,
+        leaveDate: { $gte: start, $lte: end },
+        status: { $in: ["pending", "approved"] },
+      })
     ) {
       return res
         .status(400)
@@ -628,15 +893,29 @@ export const applyLeave = async (req, res) => {
         });
     }
 
-    if (leaveType === "paid") {
+    // A half-day leave only ever counts as 0.5 of a day, regardless of
+    // leave type — this is what makes Paid/Sick/Casual/Unpaid balances and
+    // the calendar's totals match a real half-day off instead of silently
+    // charging (and displaying) a full day for it.
+    const dayValue = isHalfDay ? 0.5 : 1;
+
+    if (leaveType === "paid" || leaveType === "sick" || leaveType === "casual") {
       const staffRecord = await getStaffById(userId);
       const joinDate =
         staffRecord?.date ?? new Date(Date.UTC(new Date().getFullYear(), 0, 1));
-      const available = await getAvailablePaidLeaves(userId, joinDate);
-      if (available < 1) {
+      const relievingDate =
+        staffRecord?.status === "Relieving" ? staffRecord?.relievingDate : null;
+      const available = await getRemainingForType(
+        userId,
+        joinDate,
+        leaveType,
+        new Date(),
+        relievingDate,
+      );
+      if (available < dayValue) {
         return res.status(400).json({
           success: false,
-          message: "Insufficient paid leave balance for this calendar year.",
+          message: `Insufficient ${leaveType} leave balance for this calendar year (${available} day(s) remaining). Choose Unpaid leave instead.`,
         });
       }
     }
@@ -647,8 +926,27 @@ export const applyLeave = async (req, res) => {
       reason,
       leaveType: leaveType || "unpaid",
       status: status || "approved",
+      dayValue,
     });
     await leave.save();
+
+    // Best-effort: this is the direct admin-apply path (used by the
+    // calendar screen), not the staff-request→approve flow, but it can
+    // still land a leave right next to a Sunday/holiday block on the other
+    // side of an already-approved leave. Without this call, marking Friday,
+    // Saturday, and Monday as leave one day at a time from the calendar
+    // would leave the Sunday in between un-sandwiched (shown as a free
+    // holiday) instead of being counted and deducted as leave too. Only
+    // runs when the record actually landed as "approved" — a pending
+    // record isn't a real bracket yet.
+    if (leave.status === "approved") {
+      try {
+        await reconcileSandwichLeave(leave);
+      } catch (sandwichErr) {
+        console.error("Sandwich leave reconciliation failed:", sandwichErr);
+      }
+    }
+
     const savedDoc = leave.toObject();
     const leaveDateStr = formatDateForLog(parsedLeaveDate);
     await logActivity(req, {
@@ -692,93 +990,195 @@ export const applyMyLeave = async (req, res) => {
     if (!staff) {
       return res.status(404).json({
         success: false,
-        message:
-          "No staff profile is linked to your account yet. Contact your admin.",
+        message: "No staff profile is linked to your account yet. Contact your admin.",
       });
     }
     const userId = staff._id;
-    const { leaveDate, reason, leaveType } = req.body;
 
-    if (!leaveDate || !reason) {
+    // Accept { leaveDate } (single) OR { fromDate, toDate } (range).
+    const { reason, leaveType, isHalfDay } = req.body;
+    const fromDate = req.body.fromDate || req.body.leaveDate;
+    const toDate = req.body.toDate || req.body.leaveDate;
+    // Half-day only makes sense for a genuine single-day request — a
+    // multi-day range keeps every day a full day off.
+    const isSingleDay = fromDate === toDate;
+    const dayValue = isSingleDay && isHalfDay ? 0.5 : 1;
+
+    if (!fromDate || !toDate || !reason) {
       return res.status(400).json({
         success: false,
-        message: "Leave date and reason are required",
+        message: "fromDate, toDate and reason are required",
       });
     }
-    const validLeaveTypes = ["paid", "unpaid", "swapleave"];
+    const validLeaveTypes = ["paid", "unpaid", "swapleave", "sick", "casual"];
     if (leaveType && !validLeaveTypes.includes(leaveType)) {
       return res.status(400).json({
         success: false,
         message:
-          "Invalid leave type. Must be 'paid', 'unpaid', or 'swapleave'",
+          "Invalid leave type. Must be 'paid', 'unpaid', 'swapleave', 'sick', or 'casual'",
       });
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(leaveDate)) {
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRe.test(fromDate) || !dateRe.test(toDate)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid leaveDate format. Use YYYY-MM-DD",
+        message: "Invalid date format. Use YYYY-MM-DD",
       });
     }
-
-    const { start: parsedLeaveDate, end } = getDayRange(leaveDate);
-
-    if (parsedLeaveDate.getUTCDay() === 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Cannot request leave on Sunday" });
-    }
-
-    const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
-    if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+    if (fromDate > toDate) {
       return res.status(400).json({
         success: false,
-        message: `Cannot request leave on holiday: ${holidayCheck.reason}`,
+        message: "fromDate must be on or before toDate",
       });
     }
 
-    const existing = await Leave.findOne({
-      userId,
-      leaveDate: { $gte: parsedLeaveDate, $lte: end },
-      status: { $in: ["pending", "approved"] },
-    });
-    if (existing) {
+    const resolvedLeaveType = leaveType || "unpaid";
+    const isBalanceTracked =
+      resolvedLeaveType === "paid" ||
+      resolvedLeaveType === "sick" ||
+      resolvedLeaveType === "casual";
+
+    // Balance check up front, same rule the admin-side applyLeave/
+    // approveLeaveRequest endpoints enforce: a staff member must have at
+    // least a full day (>= 1) of accrued balance left to take that type of
+    // leave. Previously this self-service endpoint never checked at all —
+    // a request just sat as "pending" with no feedback until an admin
+    // rejected it at approval time, so someone with e.g. only 0.5 accrued
+    // sick days could still submit (and think they'd succeeded).
+    let remainingForBatchType = Infinity;
+    if (isBalanceTracked) {
+      const joinDate =
+        staff.date ?? new Date(Date.UTC(new Date().getFullYear(), 0, 1));
+      const relievingDate =
+        staff.status === "Relieving" ? staff.relievingDate : null;
+      const availableApproved = await getRemainingForType(
+        userId,
+        joinDate,
+        resolvedLeaveType,
+        new Date(),
+        relievingDate,
+      );
+
+      // Also account for this staff member's own already-pending requests
+      // of the same type this year — those haven't been deducted from
+      // `availableApproved` yet (only approved leave counts against it),
+      // but they're still a promise on the same balance, so a new batch
+      // shouldn't be allowed to double-book days that are already spoken
+      // for by an earlier pending request.
+      const batchYear = new Date(`${fromDate}T00:00:00.000Z`).getUTCFullYear();
+      const yearStart = new Date(Date.UTC(batchYear, 0, 1, 0, 0, 0, 0));
+      const yearEnd = new Date(Date.UTC(batchYear, 11, 31, 23, 59, 59, 999));
+      const pendingSameTypeAgg = await Leave.aggregate([
+        {
+          $match: {
+            userId,
+            leaveType: resolvedLeaveType,
+            status: "pending",
+            leaveDate: { $gte: yearStart, $lte: yearEnd },
+          },
+        },
+        { $group: { _id: null, total: { $sum: { $ifNull: ["$dayValue", 1] } } } },
+      ]);
+      const pendingSameType = pendingSameTypeAgg[0]?.total || 0;
+
+      remainingForBatchType = availableApproved - pendingSameType;
+
+      if (remainingForBatchType < dayValue) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient ${resolvedLeaveType} leave balance for this calendar year. Choose Unpaid leave instead, or pick a different leave type.`,
+        });
+      }
+    }
+
+    // Walk each calendar day in the range.
+    const batchId = `${userId}-${Date.now()}`;
+    const created = [];
+    const skipped = [];
+
+    // Iterate using UTC midnights so day math never drifts across timezones.
+    let cursor = new Date(`${fromDate}T00:00:00.000Z`);
+    const last = new Date(`${toDate}T00:00:00.000Z`);
+    // Safety cap so a bad range can't spin forever.
+    for (let guard = 0; cursor <= last && guard < 366; guard++) {
+      const y = cursor.getUTCFullYear();
+      const m = String(cursor.getUTCMonth() + 1).padStart(2, "0");
+      const d = String(cursor.getUTCDate()).padStart(2, "0");
+      const dayStr = `${y}-${m}-${d}`;
+
+      const { start: parsedLeaveDate, end } = getDayRange(dayStr);
+
+      // Skip Sundays.
+      if (parsedLeaveDate.getUTCDay() === 0) {
+        skipped.push({ date: dayStr, reason: "Sunday" });
+      } else {
+        const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
+        if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+          skipped.push({ date: dayStr, reason: holidayCheck.reason || "Holiday" });
+        } else {
+          const existing = await Leave.findOne({
+            userId,
+            leaveDate: { $gte: parsedLeaveDate, $lte: end },
+            status: { $in: ["pending", "approved"] },
+          });
+          if (existing) {
+            skipped.push({ date: dayStr, reason: "Already requested" });
+          } else if (isBalanceTracked && remainingForBatchType < dayValue) {
+            // The balance ran out partway through a multi-day range — every
+            // day beyond this point in the SAME batch/type falls back to
+            // unpaid leave rather than being silently dropped, so the staff
+            // member still gets the day(s) off requested; they just aren't
+            // drawn from a balance that no longer has anything left.
+            const leave = new Leave({
+              userId,
+              leaveDate: parsedLeaveDate,
+              reason,
+              leaveType: "unpaid",
+              status: "pending",
+              batchId,
+              dayValue,
+            });
+            await leave.save();
+            created.push(leave);
+          } else {
+            const leave = new Leave({
+              userId,
+              leaveDate: parsedLeaveDate,
+              reason,
+              leaveType: resolvedLeaveType,
+              status: "pending",
+              batchId,
+              dayValue,
+            });
+            await leave.save();
+            created.push(leave);
+            if (isBalanceTracked) remainingForBatchType -= dayValue;
+          }
+        }
+      }
+      cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+    }
+
+    if (created.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "A leave request already exists for this date",
+        message: "No leave was created — every day in the range was a Sunday, a holiday, or already requested.",
+        skipped,
       });
     }
 
-    const leave = new Leave({
-      userId,
-      leaveDate: parsedLeaveDate,
-      reason,
-      leaveType: leaveType || "unpaid",
-      status: "pending",
-    });
-    await leave.save();
-
-    const leaveDateStr = formatDateForLog(parsedLeaveDate);
-    await logActivity(req, {
-      action: "CREATE",
-      actionLabel: `Leave request submitted by ${staff.staffName} for ${leaveDateStr}`,
-      tableName: "leaves",
-      tableLabel: "Leave",
-      recordId: leave._id,
-      referenceNumber: `${userId}_${leaveDateStr}`,
-      newData: leave.toObject(),
-      description: `${toTitleCase(leaveType || "unpaid")} leave requested by ${staff.staffName} for ${leaveDateStr}. Reason: ${reason}`,
-      refField: "userId",
-    });
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: "Leave request submitted. Waiting for admin approval.",
-      leave,
+      message:
+        created.length === 1
+          ? "Leave request submitted. Waiting for admin approval."
+          : `${created.length} days requested. Waiting for admin approval.`,
+      created,
+      skipped,
+      batchId,
     });
   } catch (error) {
-    res
-      .status(500)
-      .json({ success: false, message: "Server error: " + error.message });
+    res.status(500).json({ success: false, message: "Server error: " + error.message });
   }
 };
 
@@ -834,6 +1234,105 @@ export const getAllLeaveRequests = async (req, res) => {
   }
 };
 
+// POST /leave/reconcile-sandwich/:staffId — admin repair tool for data that
+// was already created before this fix (e.g. an Excel import processed rows
+// out of date order, so a Sunday-next-to-a-holiday block never got bridged
+// even though the leave on both sides of it was approved). Re-runs the
+// order-independent sandwich pass over that staff member's leave history
+// so already-imported/applied leave gets bridged retroactively — no need
+// to delete and re-import anything. Safe to call more than once.
+// Optional ?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD narrow the window;
+// without them, it covers every leave date on file for that staff member.
+export const reconcileStaffSandwichLeave = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (req.query.fromDate && !dateRe.test(req.query.fromDate)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "fromDate must be in YYYY-MM-DD format" });
+    }
+    if (req.query.toDate && !dateRe.test(req.query.toDate)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "toDate must be in YYYY-MM-DD format" });
+    }
+
+    let fromDate = req.query.fromDate ? getDayRange(req.query.fromDate).start : null;
+    let toDate = req.query.toDate ? getDayRange(req.query.toDate).start : null;
+
+    if (!fromDate || !toDate) {
+      const [earliest, latest] = await Promise.all([
+        Leave.findOne({ userId: staffId }).sort({ leaveDate: 1 }).select("leaveDate").lean(),
+        Leave.findOne({ userId: staffId }).sort({ leaveDate: -1 }).select("leaveDate").lean(),
+      ]);
+      if (!earliest || !latest) {
+        return res.json({
+          success: true,
+          created: 0,
+          message: "No leave records found for this staff member.",
+        });
+      }
+      if (!fromDate) fromDate = earliest.leaveDate;
+      if (!toDate) toDate = latest.leaveDate;
+    }
+
+    const created = await reconcileSandwichLeaveForRange(staffId, fromDate, toDate);
+
+    await logActivity(req, {
+      action: "UPDATE",
+      actionLabel: `Reconciled sandwich leave for staff ${staffId}: ${created.length} day(s) bridged`,
+      tableName: "leaves",
+      tableLabel: "Leave",
+      description: `Sandwich-leave reconciliation re-run for staff ${staffId} from ${dateKeyForLog(fromDate)} to ${dateKeyForLog(toDate)}: ${created.length} Sunday/holiday day(s) bridged into leave.`,
+      refField: "userId",
+    });
+
+    res.json({ success: true, created: created.length, dates: created.map((c) => c.leaveDate) });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error: " + error.message });
+  }
+};
+
+const dateKeyForLog = (d) => new Date(d).toISOString().slice(0, 10);
+
+// POST /reconcile-absences — admin (or a daily cron/PM2 job) triggers the
+// absent-day auto-leave sweep for every staff member, up through
+// yesterday (or an explicit `uptoDate` query param, "YYYY-MM-DD"). Safe to
+// call more than once — see reconcileAllStaffAbsences for idempotency.
+export const reconcileAbsences = async (req, res) => {
+  try {
+    let uptoDate = null;
+    if (req.query.uptoDate) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(req.query.uptoDate)) {
+        return res.status(400).json({
+          success: false,
+          message: "uptoDate must be in YYYY-MM-DD format",
+        });
+      }
+      uptoDate = getDayRange(req.query.uptoDate).start;
+    }
+
+    const summary = await reconcileAllStaffAbsences(uptoDate);
+
+    await logActivity(req, {
+      action: "UPDATE",
+      actionLabel: `Ran absence reconciliation: ${summary.leavesCreated} leave(s) auto-created, ${summary.leavesCleaned || 0} stale auto-mark(s) removed, across ${summary.staffProcessed} staff`,
+      tableName: "leaves",
+      tableLabel: "Leave",
+      description: `Absence reconciliation processed ${summary.staffProcessed} staff, auto-created ${summary.leavesCreated} leave day(s), and removed ${summary.leavesCleaned || 0} previously over-marked absence day(s) that fell in untracked months.${summary.errors.length ? ` ${summary.errors.length} error(s).` : ""}`,
+    });
+
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error: " + error.message });
+  }
+};
+
 // PUT /requests/:id/approve — admin approves a pending leave request
 export const approveLeaveRequest = async (req, res) => {
   try {
@@ -856,17 +1355,28 @@ export const approveLeaveRequest = async (req, res) => {
       });
     }
 
-    if (leave.leaveType === "paid") {
+    if (
+      leave.leaveType === "paid" ||
+      leave.leaveType === "sick" ||
+      leave.leaveType === "casual"
+    ) {
       const staffRecord = await getStaffById(leave.userId);
       const joinDate =
         staffRecord?.date ??
         new Date(Date.UTC(new Date().getFullYear(), 0, 1));
-      const available = await getAvailablePaidLeaves(leave.userId, joinDate);
+      const relievingDate =
+        staffRecord?.status === "Relieving" ? staffRecord?.relievingDate : null;
+      const available = await getRemainingForType(
+        leave.userId,
+        joinDate,
+        leave.leaveType,
+        new Date(),
+        relievingDate,
+      );
       if (available < 1) {
         return res.status(400).json({
           success: false,
-          message:
-            "Staff has insufficient paid leave balance for this calendar year.",
+          message: `Staff has insufficient ${leave.leaveType} leave balance for this calendar year (${available} day(s) remaining). Reject this request or ask the staff member to resubmit it as Unpaid leave.`,
         });
       }
     }
@@ -875,6 +1385,16 @@ export const approveLeaveRequest = async (req, res) => {
     leave.approvedBy = req.user._id;
     leave.approvedAt = new Date();
     await leave.save();
+
+    // Best-effort: if this approval now brackets a weekend/holiday block
+    // together with another approved leave on the other side, fill in the
+    // sandwiched days too. Never let a hiccup here fail the approval
+    // itself — the leave is already approved at this point.
+    try {
+      await reconcileSandwichLeave(leave);
+    } catch (sandwichErr) {
+      console.error("Sandwich leave reconciliation failed:", sandwichErr);
+    }
 
     const leaveDateStr = formatDateForLog(leave.leaveDate);
     await logActivity(req, {
@@ -960,7 +1480,10 @@ export const updateLeave = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Leave record not found" });
     const { leaveDate, reason, leaveType, status } = req.body;
-    if (leaveType && !["paid", "unpaid", "swapleave"].includes(leaveType))
+    if (
+      leaveType &&
+      !["paid", "unpaid", "swapleave", "sick", "casual"].includes(leaveType)
+    )
       return res
         .status(400)
         .json({ success: false, message: "Invalid leave type" });
@@ -975,6 +1498,27 @@ export const updateLeave = async (req, res) => {
       },
       { new: true },
     );
+    // Keep sandwich days consistent with whatever this edit just did:
+    //  - if the record is (still/now) approved, it may newly bracket a
+    //    Sunday/holiday block together with an approved leave on the other
+    //    side (e.g. its date or leaveType just changed) — check again.
+    //  - if it used to be approved and no longer is (status changed away,
+    //    or it moved off the date that made it a bracket), any sandwich
+    //    day that only existed because of this record should be removed.
+    if (updated.status === "approved") {
+      try {
+        await reconcileSandwichLeave(updated);
+      } catch (sandwichErr) {
+        console.error("Sandwich leave reconciliation failed (edit):", sandwichErr);
+      }
+    } else if (previousRecord.status === "approved") {
+      try {
+        await cleanupSandwichLeavesFor(updated._id);
+      } catch (cleanupErr) {
+        console.error("Sandwich leave cleanup failed (edit):", cleanupErr);
+      }
+    }
+
     const updatedDoc = updated.toObject();
     const leaveDateStr = formatDateForLog(updated.leaveDate);
     await logActivity(req, {
@@ -1029,6 +1573,16 @@ export const deleteLeave = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Leave record not found" });
     await Leave.findByIdAndDelete(id);
+
+    // If this leave had bracketed a weekend/holiday into sandwich leave,
+    // those auto-created days no longer have anything justifying them.
+    let sandwichCleanupCount = 0;
+    try {
+      sandwichCleanupCount = await cleanupSandwichLeavesFor(leave._id);
+    } catch (cleanupErr) {
+      console.error("Sandwich leave cleanup failed:", cleanupErr);
+    }
+
     const leaveDateStr = formatDateForLog(leave.leaveDate);
     await logActivity(req, {
       action: "DELETE",
@@ -1048,7 +1602,13 @@ export const deleteLeave = async (req, res) => {
       description: `${toTitleCase(leave.leaveType)} leave for user ${leave.userId} on ${leaveDateStr} deleted. Status was: ${leave.status}`,
       refField: "userId",
     });
-    res.json({ success: true, message: "Leave record deleted successfully" });
+    res.json({
+      success: true,
+      message:
+        sandwichCleanupCount > 0
+          ? `Leave record deleted successfully. ${sandwichCleanupCount} sandwich leave day(s) also removed.`
+          : "Leave record deleted successfully",
+    });
   } catch (error) {
     res
       .status(500)
@@ -1059,60 +1619,87 @@ export const deleteLeave = async (req, res) => {
 // POST /attendance/record
 export const recordAttendance = async (req, res) => {
   try {
-    const { userId, loginTime, logoutTime, workingHoursPerDay } = req.body;
-    if (!userId || !loginTime || !logoutTime)
+    const { userId, loginTime, logoutTime, workingHoursPerDay, status, date } =
+      req.body;
+    const isMarker = status === "absent" || status === "half-day";
+
+    // A time is no longer mandatory — if the admin leaves login/logout
+    // blank, it falls back to the office's default shift (10:00 AM–6:30
+    // PM) below. A date is still required so we know which day to record.
+    if (!userId || (!loginTime && !date))
       return res.status(400).json({
         success: false,
-        message: "User ID, login time, and logout time are required",
+        message: "User ID and date are required",
       });
-    const loginDT = parseDT(loginTime),
-      logoutDT = parseDT(logoutTime);
-    if (logoutDT <= loginDT)
-      return res
-        .status(400)
-        .json({
+
+    let loginDT, logoutDT, dateString;
+    if (isMarker) {
+      dateString = date;
+      loginDT = parseDT(`${date}T00:00:00`);
+    } else {
+      dateString = loginTime ? getDateStringIST(parseDT(loginTime)) : date;
+      loginDT = loginTime
+        ? parseDT(loginTime)
+        : parseDT(`${dateString}T${DEFAULT_SHIFT_START}:00`);
+      logoutDT = logoutTime
+        ? parseDT(logoutTime)
+        : parseDT(`${dateString}T${DEFAULT_SHIFT_END}:00`);
+      if (logoutDT <= loginDT)
+        return res.status(400).json({
           success: false,
           message: "Logout time must be after login time",
         });
+    }
+
     const holidayCheck = await isHolidayOrSunday(loginDT);
     if (holidayCheck.isHoliday)
       return res.status(400).json({
         success: false,
         message: `Cannot record attendance on ${holidayCheck.reason}`,
       });
-    const dateString = getDateStringIST(loginDT);
     if (await findExistingAttendance(userId, dateString))
       return res.status(400).json({
         success: false,
         message:
           "Attendance already recorded for this user on the selected date",
       });
-    const totalMinutesWorked = Math.floor((logoutDT - loginDT) / 60000);
-    const h = Math.floor(totalMinutesWorked / 60),
-      m = totalMinutesWorked % 60;
-    const totalTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
-    const { type: attendanceType, expectedMinutes } =
-      getAttendanceType(totalMinutesWorked);
-    const extraMinutes = Math.max(0, totalMinutesWorked - expectedMinutes);
-    const extraHours = formatMinutesToTimeString(extraMinutes);
-    const remarkStr =
-      attendanceType === "half"
-        ? `Half day (${totalTime} worked, ${extraMinutes} extra min above 4 h base)`
-        : `Full day (${totalTime} worked, ${extraMinutes} extra min above 8 h base)`;
-    const attendance = new Attendance({
+
+    const bankMinutesAvailable = isMarker ? 0 : await getAvailableBankMinutes(userId);
+    const fields = buildAttendanceFields({
       userId,
+      dateString,
+      status: isMarker ? status : undefined,
       loginTime: loginDT,
       logoutTime: logoutDT,
-      date: dateString,
-      totalTime,
-      workingHoursPerDay: workingHoursPerDay || 8,
-      extraHours,
-      extraHoursInMinutes: extraMinutes,
-      attendanceType,
       source: "manual",
-      remarks: remarkStr,
+      bankMinutesAvailable,
     });
+    if (!isMarker && workingHoursPerDay) fields.workingHoursPerDay = workingHoursPerDay;
+    const attendanceType = fields.attendanceType;
+    const totalTime = fields.totalTime;
+    const extraMinutes = fields.extraHoursInMinutes || 0;
+    const extraHours = fields.extraHours;
+    const attendance = new Attendance(fields);
     await attendance.save();
+    // Only spend the bank once the day's own record has actually saved —
+    // if the save above throws (e.g. the unique userId+date index), nothing
+    // should be deducted.
+    if (fields.bankMinutesUsed > 0) {
+      await deductFromExtraHoursBank(userId, fields.bankMinutesUsed);
+    }
+
+    // Presence always wins: if this staff member already had an approved
+    // Leave sitting on this same date (e.g. an admin applied a whole
+    // date-range of paid leave in advance and the staff member came in
+    // anyway on one day in the middle of it), that Leave is cancelled here
+    // — balance restored, any Sunday/holiday it had bracketed cleaned up —
+    // so the day correctly shows Present instead of Leave. Best-effort:
+    // never blocks the attendance record that was just saved.
+    const conflictStaffId = await resolveStaffIdByUserId(userId);
+    if (conflictStaffId) {
+      await cancelConflictingLeaveOnAttendance(conflictStaffId, dateString);
+    }
+
     const savedDoc = attendance.toObject();
     await logActivity(req, {
       action: "CREATE",
@@ -1212,6 +1799,14 @@ export const performSelfCheckIn = async (userId) => {
     source: "self",
     sessionMinutes: 0,
   });
+
+  // Same self-heal as the admin "Record Attendance" path: a real sign-in
+  // always beats an already-approved Leave sitting on the same date.
+  const conflictStaffId = await resolveStaffIdByUserId(userId);
+  if (conflictStaffId) {
+    await cancelConflictingLeaveOnAttendance(conflictStaffId, dateString);
+  }
+
   return { ok: true, created: true, attendance };
 };
 
@@ -1346,14 +1941,17 @@ export const checkOut = async (req, res) => {
       });
     }
 
-    const currentSessionMinutes = getClampedWorkingMinutes(
+    const { netMinutes: currentSessionNet, overtimeMinutes } = getWorkedMinutesBreakdown(
       open.loginTime,
       now,
       shiftStartTime,
       shiftEndTime,
     );
-    const totalMinutesWorked =
-      (open.sessionMinutes || 0) + currentSessionMinutes;
+    // sessionMinutes accumulates NET minutes across sign-in/out sessions for
+    // the day (see performSelfCheckIn's resume logic); overtime is only
+    // meaningful for this final session, since it's time past shift end.
+    const totalMinutesWorked = (open.sessionMinutes || 0) + currentSessionNet;
+    const effectiveMinutes = totalMinutesWorked + overtimeMinutes;
 
     // Block the sign-out until the required net working time is complete,
     // unless an admin has approved an early sign-out for this record.
@@ -1370,23 +1968,28 @@ export const checkOut = async (req, res) => {
       });
     }
 
-    const totalTime = formatMinutesToTimeString(totalMinutesWorked);
-    const { type: attendanceType, expectedMinutes } =
-      getAttendanceType(totalMinutesWorked);
-    const extraMinutes = Math.max(0, totalMinutesWorked - expectedMinutes);
+    const totalTime = formatMinutesToTimeString(effectiveMinutes);
+    const bankMinutesAvailable = await getAvailableBankMinutes(userId);
+    const { type: attendanceType, bankMinutesUsed, extraMinutesEarned } =
+      classifyWorkedMinutes(effectiveMinutes, bankMinutesAvailable, open.loginTime);
     const wasEarly =
       totalMinutesWorked < REQUIRED_WORK_MINUTES && open.earlySignOutApproved;
 
     open.logoutTime = now;
-    open.sessionMinutes = totalMinutesWorked;
+    open.sessionMinutes = effectiveMinutes;
     open.totalTime = totalTime;
     open.attendanceType = attendanceType;
-    open.extraHours = formatMinutesToTimeString(extraMinutes);
-    open.extraHoursInMinutes = extraMinutes;
+    open.extraHours = formatMinutesToTimeString(extraMinutesEarned);
+    open.extraHoursInMinutes = extraMinutesEarned;
+    open.bankMinutesUsed = bankMinutesUsed;
     open.remarks = wasEarly
       ? `Admin-approved early sign-out. Working hours counted within shift (${shiftStartTime}–${shiftEndTime}, lunch excluded). Worked: ${totalTime}`
       : `Working hours counted within shift (${shiftStartTime}–${shiftEndTime}, lunch excluded). Worked: ${totalTime}`;
     await open.save();
+
+    if (bankMinutesUsed > 0) {
+      await deductFromExtraHoursBank(userId, bankMinutesUsed);
+    }
 
     res.json({
       success: true,
@@ -1402,9 +2005,112 @@ export const checkOut = async (req, res) => {
   }
 };
 
-// GET /attendance/me/today — the caller's own sign-in status for today, so
-// the dashboard can restore Sign In / Sign Out state (and the Sign Out
-// button's enabled/disabled state) after a page refresh.
+
+export const getMyMonthAttendance = async (req, res) => {
+  try {
+    const userId = req.user._id || req.user.id;
+
+    const year = Number(req.query.year);
+    const month = Number(req.query.month); // 1-indexed from the app
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid ?year=YYYY&month=MM (month 1-12) are required.",
+      });
+    }
+
+    const mm = String(month).padStart(2, "0");
+    const start = `${year}-${mm}-01`;
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const nextYear = month === 12 ? year + 1 : year;
+    const end = `${nextYear}-${String(nextMonth).padStart(2, "0")}-01`;
+
+    const startOfMonth = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+    const endOfMonth = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    const daysInMonth = endOfMonth.getUTCDate();
+
+    const [rows, dbHolidays] = await Promise.all([
+      Attendance.find({ userId, date: { $gte: start, $lt: end } })
+        .sort({ date: 1 })
+        .lean(),
+      Holiday.find({
+        enabled: true,
+        startDate: { $lte: endOfMonth },
+        endDate: { $gte: startOfMonth },
+      }).lean(),
+    ]);
+
+    // Recurring "Nth Saturday" rules -> concrete Holiday-shaped entries,
+    // reusing the same helper the admin calendar already relies on.
+    const saturdayHolidays = (await getSaturdayHolidaysAsEntries(year)).filter(
+      (h) => new Date(h.startDate) >= startOfMonth && new Date(h.startDate) <= endOfMonth,
+    );
+    const allHolidays = [...dbHolidays, ...saturdayHolidays];
+
+    // Seed every calendar day of the month, marking Sundays and any
+    // matching Holiday/Saturday-rule range as "holiday" up front — not
+    // just the days that happen to have an attendance row.
+    const byDate = {};
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateObj = new Date(Date.UTC(year, month - 1, d));
+      const dateStr = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+      const isSunday = dateObj.getUTCDay() === 0;
+
+      byDate[dateStr] = {
+        date: dateStr,
+        loginTime: null,
+        logoutTime: null,
+        status: isSunday ? "holiday" : undefined,
+        holidayName: isSunday ? "Sunday" : undefined,
+      };
+
+      for (const h of allHolidays) {
+        const s = new Date(h.startDate);
+        const e = new Date(h.endDate || h.startDate);
+        if (dateObj >= s && dateObj <= e) {
+          byDate[dateStr].status = "holiday";
+          byDate[dateStr].holidayName = h.name;
+          break;
+        }
+      }
+    }
+
+    // Fill in real punch data; only override the holiday seeding if the
+    // person actually has an attendance row for that (holiday) day.
+    for (const r of rows) {
+      const dateStr = r.date || (r.loginTime ? getDateStringIST(r.loginTime) : null);
+      if (!dateStr || !byDate[dateStr]) continue;
+      byDate[dateStr].loginTime = r.loginTime || null;
+      byDate[dateStr].logoutTime = r.logoutTime || null;
+      if (byDate[dateStr].status !== "holiday") {
+        byDate[dateStr].status = deriveCalendarStatus(r);
+      }
+    }
+
+    // NOTE: Saturdays are only "holiday" here via the admin-configured
+    // Saturday Holiday Rule or a manually-added Holiday record, both of
+    // which are already seeded into `byDate` above. A blanket fallback
+    // that force-marked every unworked Saturday as a holiday used to live
+    // here — it overrode the admin's per-month occurrence choices (e.g.
+    // unchecking 3rd & 4th Saturday for a month had no visible effect
+    // because this fallback re-applied "holiday" to it anyway), so it has
+    // been removed.
+
+    res.json({ success: true, records: Object.values(byDate) });
+  } catch (error) {
+    console.error("Get My Month Attendance Failed:", error.message);
+    res
+      .status(500)
+      .json({ success: false, message: "Server error: " + error.message });
+  }
+};
+
+function deriveCalendarStatus(r) {
+  if (r.isLeaveDay) return "leave";                 // blue block
+  if (r.attendanceType === "half") return "half-day"; // amber block
+  if (r.status === "absent") return "absent";        // red block
+  return "present";                                   // green block (present/late)
+}
 export const getMyTodayAttendance = async (req, res) => {
   try {
     const userId = req.user._id || req.user.id;
@@ -1539,30 +2245,79 @@ export const importAttendance = async (req, res) => {
         .json({ success: false, message: "No attendance data provided" });
     const results = { success: 0, failed: 0, errors: [] };
     const importedDocs = [];
+
+    // Rows may identify the staff member by userId directly, or by
+    // staffEmail (the Excel importer on the frontend only knows the staff's
+    // email, not their login User._id) — resolve those up front in one query.
+    const emailByIdxNeeded = attendanceData
+      .map((r) => r.staffEmail)
+      .filter(Boolean);
+    const userIdByEmail = await resolveUserIdByEmail(emailByIdxNeeded);
+
     for (const [index, row] of attendanceData.entries()) {
       try {
-        const { userId, loginTime, logoutTime, workingHoursPerDay } = row;
-        if (!userId || !loginTime || !logoutTime) {
+        const {
+          loginTime,
+          logoutTime,
+          workingHoursPerDay,
+          status,
+          date,
+          staffEmail,
+        } = row;
+        let { userId } = row;
+        if (!userId && staffEmail) {
+          userId = userIdByEmail[String(staffEmail).toLowerCase()];
+        }
+        const isMarker = status === "absent" || status === "half-day";
+
+        if (!userId) {
           results.failed++;
           results.errors.push(
-            `Row ${index + 1}: Missing userId, loginTime, or logoutTime`,
+            `Row ${index + 1}: Could not resolve staff (missing/unknown userId or staffEmail)`,
           );
           continue;
         }
-        const loginDT = parseDT(loginTime),
-          logoutDT = parseDT(logoutTime);
-        if (isNaN(loginDT.getTime()) || isNaN(logoutDT.getTime())) {
+        // A row no longer needs both loginTime and logoutTime — any time
+        // left out defaults to the office's standard shift (10:00 AM–6:30
+        // PM) below. We still need a date (either from the row's own
+        // `date`, or derived from loginTime) to know which day it's for.
+        if (!loginTime && !date) {
           results.failed++;
-          results.errors.push(`Row ${index + 1}: Invalid date format`);
+          results.errors.push(`Row ${index + 1}: Missing date`);
           continue;
         }
-        if (logoutDT <= loginDT) {
-          results.failed++;
-          results.errors.push(
-            `Row ${index + 1}: Logout time must be after login time`,
-          );
-          continue;
+
+        let loginDT, logoutDT, dateString;
+        if (isMarker) {
+          dateString = date;
+          loginDT = parseDT(`${date}T00:00:00`);
+          if (isNaN(loginDT.getTime())) {
+            results.failed++;
+            results.errors.push(`Row ${index + 1}: Invalid date format`);
+            continue;
+          }
+        } else {
+          dateString = loginTime ? getDateStringIST(parseDT(loginTime)) : date;
+          loginDT = loginTime
+            ? parseDT(loginTime)
+            : parseDT(`${dateString}T${DEFAULT_SHIFT_START}:00`);
+          logoutDT = logoutTime
+            ? parseDT(logoutTime)
+            : parseDT(`${dateString}T${DEFAULT_SHIFT_END}:00`);
+          if (isNaN(loginDT.getTime()) || isNaN(logoutDT.getTime())) {
+            results.failed++;
+            results.errors.push(`Row ${index + 1}: Invalid date format`);
+            continue;
+          }
+          if (logoutDT <= loginDT) {
+            results.failed++;
+            results.errors.push(
+              `Row ${index + 1}: Logout time must be after login time`,
+            );
+            continue;
+          }
         }
+
         const holidayCheck = await isHolidayOrSunday(loginDT);
         if (holidayCheck.isHoliday) {
           results.failed++;
@@ -1571,7 +2326,6 @@ export const importAttendance = async (req, res) => {
           );
           continue;
         }
-        const dateString = getDateStringIST(loginDT);
         if (await findExistingAttendance(userId, dateString)) {
           results.failed++;
           results.errors.push(
@@ -1579,27 +2333,34 @@ export const importAttendance = async (req, res) => {
           );
           continue;
         }
-        const totalMinutesWorked = Math.floor((logoutDT - loginDT) / 60000);
-        const h = Math.floor(totalMinutesWorked / 60),
-          m = totalMinutesWorked % 60;
-        const totalTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
-        const { type: attendanceType, expectedMinutes } =
-          getAttendanceType(totalMinutesWorked);
-        const extraMinutes = Math.max(0, totalMinutesWorked - expectedMinutes);
-        const attendance = new Attendance({
+
+        const bankMinutesAvailable = isMarker ? 0 : await getAvailableBankMinutes(userId);
+        const fields = buildAttendanceFields({
           userId,
+          dateString,
+          status: isMarker ? status : undefined,
           loginTime: loginDT,
           logoutTime: logoutDT,
-          date: dateString,
-          totalTime,
-          workingHoursPerDay: workingHoursPerDay || 8,
-          extraHours: formatMinutesToTimeString(extraMinutes),
-          extraHoursInMinutes: extraMinutes,
-          attendanceType,
           source: "import",
-          remarks: `${toTitleCase(attendanceType)} day (imported) — ${totalTime} worked`,
+          bankMinutesAvailable,
         });
+        if (!isMarker && workingHoursPerDay)
+          fields.workingHoursPerDay = workingHoursPerDay;
+
+        const attendance = new Attendance(fields);
         await attendance.save();
+        if (fields.bankMinutesUsed > 0) {
+          await deductFromExtraHoursBank(userId, fields.bankMinutesUsed);
+        }
+
+        // Same self-heal as the manual and self-check-in paths: a real
+        // attendance row for this date always beats any approved Leave the
+        // staff member already has sitting on it.
+        const conflictStaffId = await resolveStaffIdByUserId(userId);
+        if (conflictStaffId) {
+          await cancelConflictingLeaveOnAttendance(conflictStaffId, dateString);
+        }
+
         importedDocs.push(attendance.toObject());
         results.success++;
       } catch (err) {
@@ -1640,6 +2401,50 @@ export const importAttendance = async (req, res) => {
   }
 };
 
+// Staff._id + calendar month -> "has this staff member got ZERO real
+// Attendance records anywhere in that month?" Cached per (staff, year,
+// month) so a whole month's worth of Sunday/holiday rows in one import
+// only trigger one Attendance query each, not one per row.
+//
+// Why this matters: the Sunday/holiday guard below exists to stop an
+// accidental import from marking an ordinary non-working day as leave.
+// But when a whole calendar month has no attendance tracked for a staff
+// member at all (a data gap, before tracking started, an office
+// closure that was never logged, etc.), the admin needs to backfill
+// EVERY day of that month — Sundays and public holidays included — as
+// leave (typically unpaid), and the guard has nothing real left to
+// protect: there's no "ordinary week" for it to accidentally clobber.
+// `cache` is a Map the caller owns (one fresh Map per import request — see
+// importLeaves) so results don't leak between unrelated requests and don't
+// go stale if attendance data changes between one import and the next.
+const isMonthUntracked = async (cache, staffId, year, month) => {
+  const cacheKey = `${staffId}_${year}_${month}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+
+  // Same email bridge as resolveStaffIdByEmail/resolveUserIdByEmail:
+  // Leave.userId is Staff._id but Attendance.userId is the login
+  // User._id, so we go Staff -> email -> User to find attendance.
+  const staff = await Staff.findById(staffId).select("email").lean();
+  const attendanceUserId = staff?.email
+    ? (await resolveUserIdByEmail([staff.email]))[staff.email.toLowerCase()]
+    : null;
+
+  let untracked = true; // no linked login account at all -> nothing is ever "tracked"
+  if (attendanceUserId) {
+    const monthStart = new Date(Date.UTC(year, month, 1, 0, 0, 0, 0));
+    const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999));
+    const anyAttendance = await Attendance.findOne({
+      userId: attendanceUserId,
+      loginTime: { $gte: monthStart, $lte: monthEnd },
+    })
+      .select("_id")
+      .lean();
+    untracked = !anyAttendance;
+  }
+  cache.set(cacheKey, untracked);
+  return untracked;
+};
+
 // POST /leave/import
 export const importLeaves = async (req, res) => {
   try {
@@ -1650,14 +2455,66 @@ export const importLeaves = async (req, res) => {
         .json({ success: false, message: "No leave data provided" });
     const results = { success: 0, failed: 0, errors: [] };
     const importedDocs = [];
-    const validLeaveTypes = ["paid", "unpaid", "swapleave"];
+    // Tracks the earliest/latest leaveDate imported per staff member so a
+    // single order-independent sandwich-reconciliation pass can run per
+    // user after the loop below, instead of per-row (see the comment above
+    // the reconcileSandwichLeaveForRange call further down).
+    const touchedRangeByUser = new Map();
+    // Scoped to this one import request — see isMonthUntracked.
+    const untrackedMonthCache = new Map();
+    const validLeaveTypes = ["paid", "unpaid", "swapleave", "sick", "casual"];
+    // The frontend template/parser already normalizes common human-friendly
+    // labels ("Casual Leave", "Sick Leave", ...) down to the canonical enum
+    // values below, but this endpoint can also be hit directly (or with an
+    // older/edited sheet), so the same aliasing is repeated here as a
+    // defensive fallback. Without this, a row like leaveType: "casual leave"
+    // fails the validLeaveTypes check below and gets silently skipped —
+    // which is exactly why an imported leave could fail to save and never
+    // show up on the staff's attendance calendar.
+    const LEAVE_TYPE_ALIASES = {
+      paid: "paid",
+      "paid leave": "paid",
+      unpaid: "unpaid",
+      "unpaid leave": "unpaid",
+      sick: "sick",
+      "sick leave": "sick",
+      casual: "casual",
+      "casual leave": "casual",
+      swap: "swapleave",
+      swapleave: "swapleave",
+      "swap leave": "swapleave",
+    };
+    const normalizeLeaveType = (raw) => {
+      if (raw == null || raw === "") return undefined;
+      const key = String(raw).trim().toLowerCase();
+      return LEAVE_TYPE_ALIASES[key] || key;
+    };
+
+    // Rows may identify the staff member by userId directly, or by
+    // staffEmail (lets one Excel file cover multiple staff, each row
+    // naming its own person) — resolve those up front in one query.
+    const emailByIdxNeeded = leavesData.map((r) => r.staffEmail).filter(Boolean);
+    const staffIdByEmail = await resolveStaffIdByEmail(emailByIdxNeeded);
+
     for (const [index, row] of leavesData.entries()) {
       try {
-        const { userId, leaveDate, reason, leaveType, status } = row;
-        if (!userId || !leaveDate || !reason) {
+        const { leaveDate, reason, status, staffEmail } = row;
+        const leaveType = normalizeLeaveType(row.leaveType);
+        let { userId } = row;
+        if (!userId && staffEmail) {
+          userId = staffIdByEmail[String(staffEmail).toLowerCase()];
+        }
+        if (!userId) {
           results.failed++;
           results.errors.push(
-            `Row ${index + 1}: Missing userId, leaveDate, or reason`,
+            `Row ${index + 1}: Could not resolve staff (missing/unknown userId or staffEmail)`,
+          );
+          continue;
+        }
+        if (!leaveDate || !reason) {
+          results.failed++;
+          results.errors.push(
+            `Row ${index + 1}: Missing leaveDate or reason`,
           );
           continue;
         }
@@ -1675,24 +2532,44 @@ export const importLeaves = async (req, res) => {
         }
         // Same timezone-safe parse as applyLeave — see comment there.
         const { start: parsedDate } = getDayRange(leaveDate);
-        if (parsedDate.getUTCDay() === 0) {
-          results.failed++;
-          results.errors.push(
-            `Row ${index + 1}: Cannot import leave on Sunday`,
-          );
-          continue;
-        }
+        const isSunday = parsedDate.getUTCDay() === 0;
         const holidayCheck = await isHolidayOrSunday(parsedDate);
-        if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
-          results.failed++;
-          results.errors.push(
-            `Row ${index + 1}: Cannot import leave on holiday: ${holidayCheck.reason}`,
+        if (isSunday || holidayCheck.isHoliday) {
+          const untracked = await isMonthUntracked(
+            untrackedMonthCache,
+            userId,
+            parsedDate.getUTCFullYear(),
+            parsedDate.getUTCMonth(),
           );
-          continue;
+          // A month with zero real attendance for this staff member skips
+          // the guard entirely (see isMonthUntracked) so the whole month,
+          // Sundays/holidays included, can be backfilled as leave.
+          if (!untracked) {
+            if (isSunday) {
+              results.failed++;
+              results.errors.push(
+                `Row ${index + 1}: Cannot import leave on Sunday`,
+              );
+              continue;
+            }
+            if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+              results.failed++;
+              results.errors.push(
+                `Row ${index + 1}: Cannot import leave on holiday: ${holidayCheck.reason}`,
+              );
+              continue;
+            }
+          }
         }
         const { start, end } = getDayRange(parsedDate);
+        // Same scoping as applyLeave — a rejected record must not block a
+        // fresh import for the same date (see comment there).
         if (
-          await Leave.findOne({ userId, leaveDate: { $gte: start, $lte: end } })
+          await Leave.findOne({
+            userId,
+            leaveDate: { $gte: start, $lte: end },
+            status: { $in: ["pending", "approved"] },
+          })
         ) {
           results.failed++;
           results.errors.push(
@@ -1708,6 +2585,27 @@ export const importLeaves = async (req, res) => {
           status: status || "approved",
         });
         await leave.save();
+
+        // Same reasoning as applyLeave: an imported row can land as one
+        // bracket around a Sunday/holiday block, with the other bracket
+        // arriving in a later (or earlier — Excel rows aren't guaranteed
+        // to be date-sorted) row of the same file. Rather than trying to
+        // reconcile inline per-row here (which only works if rows happen
+        // to be processed in date order), just remember the date span
+        // touched for this user and reconcile it in one order-independent
+        // pass after the whole file has been processed — see the loop
+        // below.
+        if (leave.status === "approved") {
+          const key = String(userId);
+          const span = touchedRangeByUser.get(key);
+          if (!span) {
+            touchedRangeByUser.set(key, { min: parsedDate, max: parsedDate });
+          } else {
+            if (parsedDate < span.min) span.min = parsedDate;
+            if (parsedDate > span.max) span.max = parsedDate;
+          }
+        }
+
         importedDocs.push(leave.toObject());
         results.success++;
       } catch (err) {
@@ -1715,6 +2613,23 @@ export const importLeaves = async (req, res) => {
         results.errors.push(`Row ${index + 1}: ${err.message}`);
       }
     }
+
+    // One order-independent sandwich pass per staff member touched by this
+    // import, covering the full min..max date span imported for them. This
+    // is what lets a Sunday sitting right next to a public holiday (or any
+    // other multi-day non-working run) get bridged correctly no matter
+    // what order the Excel rows were in.
+    for (const [rangeUserId, span] of touchedRangeByUser) {
+      try {
+        await reconcileSandwichLeaveForRange(rangeUserId, span.min, span.max);
+      } catch (sandwichErr) {
+        console.error(
+          "Sandwich leave reconciliation failed (import range):",
+          sandwichErr,
+        );
+      }
+    }
+
     if (results.success > 0)
       await logActivity(req, {
         action: "IMPORT",
@@ -1754,6 +2669,23 @@ export const convertExtraHoursToLeave = async (req, res) => {
   session.startTransaction();
   try {
     const { userId, date, leaveDays = 1, useMonthlyOnly = false } = req.body;
+    const leaveDaysNum = Number(leaveDays);
+    if (!Number.isFinite(leaveDaysNum) || leaveDaysNum < 0.5) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "Number of days must be at least 0.5",
+      });
+    }
+    if (Math.round(leaveDaysNum * 2) !== leaveDaysNum * 2) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "Number of days must be in steps of 0.5 (e.g. 0.5, 1, 1.5, 2)",
+      });
+    }
     if (!userId || !date) {
       await session.abortTransaction();
       session.endSession();
@@ -1921,6 +2853,11 @@ export const convertExtraHoursToLeave = async (req, res) => {
       status: "approved",
       remarks: `Converted from extra hours on ${new Date().toISOString()}`,
       extraHoursSources: sources,
+      // `leaveDays` can be fractional (e.g. 1.5) when an admin converts a
+      // non-whole amount of banked extra hours — this is what lets that
+      // show up as 1.5 in the Swap count on the calendar instead of being
+      // rounded down to a flat 1 by the old countDocuments()-based total.
+      dayValue: leaveDaysNum,
     });
     await swapLeave.save({ session });
     await session.commitTransaction();
@@ -2098,20 +3035,8 @@ export const getUserAttendance = async (req, res) => {
 // Attendance.userId points at the login User account while Leave.userId
 // points directly at Staff — the only reliable bridge between the two is
 // email (same approach getAllAttendance() already uses above).
-const resolveUserIdByEmail = async (emails) => {
-  const cleanEmails = [
-    ...new Set(emails.filter(Boolean).map((e) => e.toLowerCase())),
-  ];
-  if (cleanEmails.length === 0) return {};
-  const users = await User.find({ email: { $in: cleanEmails } })
-    .select("email")
-    .lean();
-  const map = {};
-  users.forEach((u) => {
-    if (u.email) map[u.email.toLowerCase()] = u._id;
-  });
-  return map;
-};
+// (resolveUserIdByEmail now lives in services/leave.js — imported above —
+// so the Excel importers below can share it too.)
 
 export const getStaffSummary = async (req, res) => {
   try {
@@ -2135,7 +3060,13 @@ export const getStaffSummary = async (req, res) => {
 
         const [remainingPaid, leaveTaken, unpaidTaken, swapTaken] =
           await Promise.all([
-            getAvailablePaidLeaves(staff._id, staff.date),
+            getRemainingForType(
+              staff._id,
+              staff.date,
+              "paid",
+              new Date(),
+              staff.status === "Relieving" ? staff.relievingDate : null,
+            ),
             Leave.countDocuments({
               userId: staff._id,
               leaveType: "paid",
@@ -2164,6 +3095,17 @@ export const getStaffSummary = async (req, res) => {
           staffName: staff.staffName,
           email: staff.email || "",
           contactNo: staff.contactNo || "",
+          status: staff.status || "Probation",
+          // Joining date — needed by the calendar view so it can floor its
+          // year/month picker at the month the staff member actually
+          // joined, the same way relievingDate caps the top end below.
+          date: staff.date || null,
+          relievingDate: staff.relievingDate || null,
+          // A relieved staff member has no more working days to mark —
+          // surfaced here so the "Record Attendance" dropdown can disable
+          // them instead of silently letting an admin mark attendance for
+          // someone who has already left.
+          canMarkAttendance: staff.status !== "Relieving",
           paidLeaveAllotted: remainingPaid + leaveTaken,
           leaveTaken,
           remainingPaid,
@@ -2190,6 +3132,8 @@ const buildMonthDays = (
   leaveRecords,
   holidays,
   today,
+  relievingCutoff,
+  joinCutoff,
 ) => {
   const startOfMonth = new Date(Date.UTC(year, month, 1, 0, 0, 0, 0));
   const endOfMonth = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999));
@@ -2224,10 +3168,20 @@ const buildMonthDays = (
       return;
     const d = recDate.getUTCDate();
     if (!days[d]) return;
+    // A holiday (declared before or after the fact) always wins over an
+    // attendance record on that same date — otherwise a Sunday/Saturday
+    // rule or a holiday added retroactively gets silently overwritten back
+    // to Present/Half Day, which is the bug that stopped holidays from
+    // ever showing on this calendar.
+    if (days[d].status === "holiday") return;
     days[d].status = rec.attendanceType === "half" ? "half" : "present";
     days[d].recordId = rec._id;
     days[d].loginTime = rec.loginTime; // ✅ added
     days[d].logoutTime = rec.logoutTime || null; // ✅ added
+    // Marks this day as having REAL attendance (not just an isLeaveDay
+    // placeholder) so the Leave loop below can defer to it — see there for
+    // why. Stripped from the response afterward.
+    days[d]._hasRealAttendance = true;
   });
 
   leaveRecords.forEach((rec) => {
@@ -2236,14 +3190,54 @@ const buildMonthDays = (
       return;
     const d = recDate.getUTCDate();
     if (!days[d]) return;
-    days[d].status =
-      rec.leaveType === "paid"
-        ? "paid"
-        : rec.leaveType === "swapleave"
-          ? "swap"
-          : "unpaid";
+    // Defensive net: an actual attendance record on this date means the
+    // staff member genuinely worked that day, so it must show (and count)
+    // as Present/Half Day, never as leave — no matter what an approved
+    // Leave record says. Normally this situation can't arise at all
+    // anymore (see cancelConflictingLeaveOnAttendance, which cancels the
+    // conflicting Leave the moment real attendance is recorded), but this
+    // keeps the calendar correct for any data that predates that fix
+    // without needing a manual backfill.
+    if (days[d]._hasRealAttendance) return;
+    // An approved Leave record wins over the default holiday/Sunday shading
+    // ONLY when it's a legitimate sandwich-bridge record (isSandwich: true)
+    // — the mechanism that intentionally brackets a Sunday/holiday between
+    // two approved multi-day leaves of the same type (see
+    // reconcileSandwichLeaveForRange in services/leaveAutomation.js). Any
+    // other Leave record dated on a day that's already "holiday" here is
+    // stray data (e.g. a pre-fix auto-marked absence, or an Excel import
+    // that wrote a row for every calendar day without skipping non-working
+    // ones) — it must NOT flip a real day off into red "Unpaid Leave" (or
+    // whichever type it was saved as). getStaffCalendar self-heals this
+    // stray data away with cleanupInvalidNonWorkingDayLeaves on every view,
+    // but this guard keeps rendering correct even before that has run.
+    if (days[d].status === "holiday" && !rec.isSandwich) return;
+    // "paid", "sick" and "casual" are all balance-tracked leave types and
+    // each gets its own distinct calendar color (see STATUS_STYLES on the
+    // frontend) instead of collapsing into a generic "unpaid" block — that
+    // previously made a sick/casual day on the calendar look identical to
+    // an actual unpaid leave day.
+    const statusByType = {
+      paid: "paid",
+      sick: "sick",
+      casual: "casual",
+      swapleave: "swap",
+    };
+    days[d].status = statusByType[rec.leaveType] || "unpaid";
+    days[d].leaveType = rec.leaveType;
     days[d].leaveId = rec._id;
+    days[d].isHalfDay = (rec.dayValue ?? 1) < 1;
+    days[d].holidayName = undefined; // stale "Sunday"/holiday label from above, now overridden by leave
   });
+
+  // NOTE: Saturdays are only marked "holiday" via the admin-configured
+  // Saturday Holiday Rule (merged into `holidays` and applied above) or a
+  // manually-added Holiday record. A Saturday with no attendance record
+  // that ISN'T covered by an active rule is left unmarked here — it used
+  // to be blanket-forced to "holiday" for every unworked Saturday from
+  // March 2026 onward, which overrode the admin's per-month occurrence
+  // choices (e.g. unchecking 3rd & 4th Saturday for a month had no effect
+  // because this fallback re-applied "holiday" anyway).
 
   // Days after "today" (or an entirely future month) render blank, same as
   // the reference UI — except Holiday, which is known in advance (this
@@ -2267,7 +3261,67 @@ const buildMonthDays = (
     });
   }
 
-  return { days, isCurrentMonth };
+  // A staff member's calendar starts on their joining date, not before —
+  // clear everything before it (including holiday/Sunday shading), the
+  // same treatment as the relieving cutoff below. A whole month entirely
+  // before the joining month is cleared outright, so previous months
+  // don't show a staff member as "absent" on days before they existed
+  // in the organization.
+  if (joinCutoff) {
+    const joinYear = joinCutoff.getUTCFullYear();
+    const joinMonth = joinCutoff.getUTCMonth();
+    const joinDay = joinCutoff.getUTCDate();
+    const monthIsBeforeJoining =
+      year < joinYear || (year === joinYear && month < joinMonth);
+    const monthIsJoiningMonth = year === joinYear && month === joinMonth;
+
+    if (monthIsBeforeJoining) {
+      Object.values(days).forEach((day) => {
+        day.status = null;
+        day.holidayName = undefined;
+      });
+    } else if (monthIsJoiningMonth) {
+      for (let d = 1; d < joinDay; d++) {
+        days[d].status = null;
+        days[d].holidayName = undefined;
+      }
+    }
+  }
+
+  // A relieved staff member has no calendar past their last working day —
+  // clear everything after it, including holiday shading (unlike the
+  // "today" cutoff above, which still lets future holidays show through).
+  // A whole month entirely after the relieving month is cleared outright.
+  if (relievingCutoff) {
+    const relYear = relievingCutoff.getUTCFullYear();
+    const relMonth = relievingCutoff.getUTCMonth();
+    const relDay = relievingCutoff.getUTCDate();
+    const monthIsAfterRelieving =
+      year > relYear || (year === relYear && month > relMonth);
+    const monthIsRelievingMonth = year === relYear && month === relMonth;
+
+    if (monthIsAfterRelieving) {
+      Object.values(days).forEach((day) => {
+        day.status = null;
+        day.holidayName = undefined;
+      });
+    } else if (monthIsRelievingMonth) {
+      for (let d = relDay + 1; d <= daysInMonth; d++) {
+        days[d].status = null;
+        days[d].holidayName = undefined;
+      }
+    }
+  }
+
+  return {
+    days: Object.fromEntries(
+      Object.entries(days).map(([d, info]) => {
+        const { _hasRealAttendance, ...clean } = info;
+        return [d, clean];
+      }),
+    ),
+    isCurrentMonth,
+  };
 };
 
 export const getStaffCalendar = async (req, res) => {
@@ -2298,23 +3352,177 @@ export const getStaffCalendar = async (req, res) => {
       : null;
     const attendanceUserId = attendanceUser?._id || null;
 
+    // Only cuts off the calendar when the staff member has actually left
+    // (status "Relieving" with a relievingDate set) — everyone else's
+    // calendar renders as normal, unaffected.
+    const relievingCutoff =
+      staff.status === "Relieving" && staff.relievingDate
+        ? new Date(staff.relievingDate)
+        : null;
+
+    // Everyone has a joining date, so this cutoff always applies — it
+    // stops the calendar from showing days before the staff member
+    // actually joined the organization.
+    const joinCutoff = staff.date ? new Date(staff.date) : null;
+
     const yearStart = new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0));
     const yearEnd = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
 
-    const [unpaidCount, swapCount] = await Promise.all([
-      Leave.countDocuments({
-        userId: staffId,
-        leaveType: "unpaid",
-        status: "approved",
-        leaveDate: { $gte: yearStart, $lte: yearEnd },
-      }),
-      Leave.countDocuments({
-        userId: staffId,
-        leaveType: "swapleave",
-        status: "approved",
-        leaveDate: { $gte: yearStart, $lte: yearEnd },
-      }),
-    ]);
+    // Self-heal: bridge any Sunday/holiday day in this staff member's leave
+    // history that's genuinely bracketed by approved leave of the same type
+    // on both sides but never got turned into its own Leave record —
+    // imports/applies that ran before this fix, or rows that happened to
+    // save in an order where neither bracket existed yet. Runs every time
+    // this calendar is opened, so a gap like this fixes itself the moment
+    // an admin looks at the calendar — no manual "repair" step needed, and
+    // the Paid/Sick/Casual/Unpaid counts below immediately reflect it too,
+    // since it writes real Leave documents rather than just changing what
+    // this one response displays. Idempotent: a no-op once nothing is left
+    // to bridge.
+    try {
+      await reconcileSandwichLeaveForRange(staffId, yearStart, yearEnd);
+    } catch (sandwichErr) {
+      console.error(
+        "Sandwich leave self-heal failed (calendar view):",
+        sandwichErr,
+      );
+    }
+
+    // Self-heal, root-cause side: remove any approved Leave record dated on
+    // a Sunday/holiday that ISN'T a legitimate sandwich-bridge record (see
+    // cleanupInvalidNonWorkingDayLeaves) — stray data that would otherwise
+    // render that day as red "Unpaid Leave" (or whichever type) instead of
+    // yellow "Holiday", and inflate the counts below. Runs after the
+    // sandwich self-heal above so a genuine bridge created just now is
+    // never mistaken for stray data. Idempotent, same as the others here.
+    try {
+      await cleanupInvalidNonWorkingDayLeaves(staffId, yearStart, yearEnd);
+    } catch (cleanupErr) {
+      console.error(
+        "Invalid non-working-day leave cleanup failed (calendar view):",
+        cleanupErr,
+      );
+    }
+
+    // Self-heal, other direction: cancel any approved Leave that's sitting
+    // on a date where this staff member actually has real attendance (see
+    // cancelConflictingLeaveOnAttendance — new attendance already triggers
+    // this going forward, but this catches any pre-existing data that was
+    // created before that fix, e.g. a leave range applied in advance that
+    // predates a day the staff member then came in and worked). Runs every
+    // time this calendar is opened, same as the sandwich self-heal above —
+    // idempotent, and a no-op once nothing is left to fix.
+    let yearAttendanceForHeal = [];
+    if (attendanceUserId) {
+      try {
+        yearAttendanceForHeal = await Attendance.find({
+          userId: attendanceUserId,
+          loginTime: { $gte: yearStart, $lte: yearEnd },
+          isLeaveDay: { $ne: true },
+        })
+          .select("loginTime")
+          .lean();
+        for (const rec of yearAttendanceForHeal) {
+          const d = new Date(rec.loginTime);
+          const dateStr = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+          await cancelConflictingLeaveOnAttendance(staffId, dateStr);
+        }
+      } catch (attendanceHealErr) {
+        console.error(
+          "Attendance/leave conflict self-heal failed (calendar view):",
+          attendanceHealErr,
+        );
+      }
+    }
+
+    // Sums `dayValue` for approved leave of `leaveType` in the year range,
+    // instead of just counting documents. A plain countDocuments() treats
+    // every Leave record as a full day regardless of whether it's actually
+    // a half-day leave (dayValue: 0.5) or a multi-day swap conversion
+    // (dayValue: 1.5, 2, ...) — that mismatch is exactly what made the
+    // Paid/Sick/Casual/Unpaid totals shown here run higher than a manual
+    // day-by-day count. `$ifNull` covers records saved before this field
+    // existed, which default to a full day (1).
+    const sumLeaveDays = async (leaveType) => {
+      const result = await Leave.aggregate([
+        {
+          $match: {
+            userId: new mongoose.Types.ObjectId(staffId),
+            leaveType,
+            status: "approved",
+            leaveDate: { $gte: yearStart, $lte: yearEnd },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ["$dayValue", 1] } },
+          },
+        },
+      ]);
+      return result[0]?.total || 0;
+    };
+
+    const [
+      unpaidCount,
+      swapCount,
+      paidCount,
+      sickCount,
+      casualCount,
+      presentCount,
+      halfCount,
+    ] =
+      await Promise.all([
+        sumLeaveDays("unpaid"),
+        sumLeaveDays("swapleave"),
+        sumLeaveDays("paid"),
+        sumLeaveDays("sick"),
+        sumLeaveDays("casual"),
+        attendanceUserId
+          ? Attendance.countDocuments({
+              userId: attendanceUserId,
+              loginTime: { $gte: yearStart, $lte: yearEnd },
+              isLeaveDay: { $ne: true },
+              attendanceType: { $ne: "half" },
+            })
+          : 0,
+        attendanceUserId
+          ? Attendance.countDocuments({
+              userId: attendanceUserId,
+              loginTime: { $gte: yearStart, $lte: yearEnd },
+              isLeaveDay: { $ne: true },
+              attendanceType: "half",
+            })
+          : 0,
+      ]);
+
+    // "Total Working Days" = every calendar day of the year so far (from the
+    // staff member's joining date, or Jan 1 if that's later, through today
+    // or their relieving date — whichever comes first) minus days of
+    // UNPAID leave only. Paid, Sick, Casual and Swap leave are days the
+    // staff member is still compensated for (or, for Swap, already worked
+    // earlier and is banking), so they don't reduce this count — only
+    // Unpaid ("loss of pay") days do.
+    const utcDateOnly = (d) => {
+      const x = new Date(d);
+      return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate()));
+    };
+    const elapsedRangeStart =
+      joinCutoff && utcDateOnly(joinCutoff) > utcDateOnly(yearStart)
+        ? utcDateOnly(joinCutoff)
+        : utcDateOnly(yearStart);
+    let elapsedRangeEnd = utcDateOnly(yearEnd);
+    if (utcDateOnly(today) < elapsedRangeEnd) elapsedRangeEnd = utcDateOnly(today);
+    if (relievingCutoff && utcDateOnly(relievingCutoff) < elapsedRangeEnd) {
+      elapsedRangeEnd = utcDateOnly(relievingCutoff);
+    }
+    const elapsedCalendarDays =
+      elapsedRangeEnd >= elapsedRangeStart
+        ? Math.round((elapsedRangeEnd - elapsedRangeStart) / 86400000) + 1
+        : 0;
+
+    const totalLeaveTaken = unpaidCount;
+    const totalWorkingDays = Math.max(0, elapsedCalendarDays - totalLeaveTaken);
 
     if (isAnnual) {
       const [attendanceRecords, leaveRecords, holidays] = await Promise.all([
@@ -2348,6 +3556,8 @@ export const getStaffCalendar = async (req, res) => {
           leaveRecords,
           allHolidaysForYear,
           today,
+          relievingCutoff,
+          joinCutoff,
         );
         months.push({
           month: m,
@@ -2367,6 +3577,14 @@ export const getStaffCalendar = async (req, res) => {
           mode: "annual",
           unpaidCount,
           swapCount,
+          paidCount,
+          sickCount,
+          casualCount,
+          presentCount,
+          halfCount,
+          elapsedCalendarDays,
+          totalLeaveTaken,
+          totalWorkingDays,
           months,
         },
       });
@@ -2413,6 +3631,8 @@ export const getStaffCalendar = async (req, res) => {
       leaveRecords,
       [...holidays, ...saturdayHolidaysForMonth],
       today,
+      relievingCutoff,
+      joinCutoff,
     );
 
     res.json({
@@ -2428,6 +3648,14 @@ export const getStaffCalendar = async (req, res) => {
         isCurrentMonth,
         unpaidCount,
         swapCount,
+        paidCount,
+        sickCount,
+        casualCount,
+        presentCount,
+        halfCount,
+        elapsedCalendarDays,
+        totalLeaveTaken,
+        totalWorkingDays,
         days,
       },
     });

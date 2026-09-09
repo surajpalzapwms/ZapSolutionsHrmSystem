@@ -1,8 +1,30 @@
 import User from "../models/User.js";
+import Staff from "../models/Staff.js";
 import { performSelfCheckIn } from "./leave.js";
 import jwt from "jsonwebtoken";
 import { ALL_TAB_KEYS, TAB_TREE, isAdminRole } from "../config/permissions.js";
 import { isFromOfficeNetwork } from "../utils/officeNetwork.js";
+
+// Staff and User are only linked by email (no stored userId — same pattern
+// used everywhere else in this codebase). Returns a short, user-facing
+// reason string if this account belongs to a staff member who has already
+// left the organization (status "Relieving" with a relieving date that has
+// actually passed), or null if login should be allowed to proceed.
+const getRelievedLoginBlockReason = async (email) => {
+  if (!email) return null;
+  const staff = await Staff.findOne({ email: email.toLowerCase().trim() })
+    .select("status relievingDate")
+    .lean();
+  if (!staff || staff.status !== "Relieving" || !staff.relievingDate) {
+    return null;
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const relievingDate = new Date(staff.relievingDate);
+  relievingDate.setHours(0, 0, 0, 0);
+  if (relievingDate > today) return null; // relieving date hasn't arrived yet
+  return "You are not allowed to login because admin has deactivated you.";
+};
 
 // Generate JWT Token
 const generateToken = (user) => {
@@ -260,6 +282,27 @@ export const login = async (req, res) => {
     }
 
     console.log("[11.2] SUCCESS: Password matched");
+
+    // 7.5 Block login for staff who have already left the organization —
+    // status "Relieving" with a relieving date that has actually passed.
+    // Checked here (before touching lastLogin/token) so a relieved staff
+    // member gets a clear, immediate reason instead of a generic failure.
+    console.log("[11.5] Checking whether this staff member has been relieved...");
+
+    const relievedBlockReason = await getRelievedLoginBlockReason(user.email);
+
+    if (relievedBlockReason) {
+      console.log("[11.6] FAILED: Staff has been relieved —", relievedBlockReason);
+      console.log("========== LOGIN END: 403 STAFF RELIEVED ==========");
+
+      return res.status(403).json({
+        success: false,
+        message: relievedBlockReason,
+        code: "STAFF_RELIEVED",
+      });
+    }
+
+    console.log("[11.7] Staff is not relieved, continuing login");
 
     // 8. Update last login
     console.log("[12] Updating lastLogin...");

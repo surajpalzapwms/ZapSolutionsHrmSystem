@@ -43,8 +43,11 @@ const ExtraHoursModal = ({ isOpen, onClose, userId }) => {
           ) : (
             <div className="space-y-2 max-h-80 overflow-y-auto">
               {extraHours.map((record) => (
-                <div key={record._id} className="flex justify-between items-center border rounded-lg px-3 py-2">
-                  <span className="text-sm text-gray-700">{formatDateToDDMMMYYYY(record.createdAt)}</span>
+                <div key={record.id} className="flex justify-between items-center border rounded-lg px-3 py-2">
+                  <div className="flex flex-col">
+                    <span className="text-sm text-gray-700">{formatDateToDDMMMYYYY(record.date)}</span>
+                    <span className="text-xs text-gray-400 capitalize">{record.attendanceType}</span>
+                  </div>
                   <span className="text-sm font-medium text-gray-800">
                     {formatMinutes(record.extraHoursInMinutes || 0)}
                   </span>

@@ -2,10 +2,18 @@
 import React, { useMemo } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCalendar } from "./hooks/useCalendar";
-import { SHORT_DAYS } from "../../utils/constants";
+import { SHORT_DAYS, MONTHS } from "../../utils/constants";
+
+// A handful of clicks to reach a date months/years back is slow — offer a
+// direct Month + Year jump alongside the prev/next arrows. Covers a wide
+// range around today so past staff history (e.g. a June 2025 join date)
+// is one or two selects away instead of dozens of clicks.
+const currentYear = new Date().getFullYear();
+const YEAR_OPTIONS = Array.from({ length: 12 }, (_, i) => currentYear - 8 + i);
 
 const AttendanceCalendar = ({ attendance = [], leaves = [] }) => {
-  const { year, month, days, monthLabel, goToPrevMonth, goToNextMonth, goToToday, isSunday } = useCalendar();
+  const { year, month, days, monthLabel, goToPrevMonth, goToNextMonth, goToToday, goToMonth, isSunday } =
+    useCalendar();
 
   const recordsByDay = useMemo(() => {
     const map = {};
@@ -36,6 +44,30 @@ const AttendanceCalendar = ({ attendance = [], leaves = [] }) => {
         </button>
         <div className="flex items-center gap-3">
           <h3 className="text-lg font-semibold text-gray-800">{monthLabel}</h3>
+          <select
+            value={month}
+            onChange={(e) => goToMonth(year, Number(e.target.value))}
+            className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            aria-label="Jump to month"
+          >
+            {MONTHS.map((m, idx) => (
+              <option key={m} value={idx}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <select
+            value={year}
+            onChange={(e) => goToMonth(Number(e.target.value), month)}
+            className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            aria-label="Jump to year"
+          >
+            {YEAR_OPTIONS.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
           <button onClick={goToToday} className="text-xs text-indigo-600 hover:underline">
             Today
           </button>

@@ -1,6 +1,6 @@
 // src/components/staff/StaffList.jsx
 import React from "react";
-import { Pencil, Trash2, Power } from "lucide-react";
+import { Pencil, Trash2, Power, Eye } from "lucide-react";
 import Table from "../common/Table";
 import Pagination from "../common/Pagination";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
@@ -13,6 +13,7 @@ const StaffList = ({
   onEdit,
   onDelete,
   onToggleStatus,
+  onView,
   currentPage,
   totalPages,
   onPageChange,
@@ -76,6 +77,13 @@ const StaffList = ({
       header: "Actions",
       render: (row) => (
         <div className="flex justify-center gap-2">
+          <button
+            onClick={() => onView(row)}
+            className="text-blue-600 hover:text-blue-800"
+            title="View probation / confirmation / leaving details"
+          >
+            <Eye size={16} />
+          </button>
           <button
             onClick={() => onEdit(row)}
             className="text-indigo-600 hover:text-indigo-800"

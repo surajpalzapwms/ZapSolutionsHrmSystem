@@ -19,6 +19,8 @@ import AddStaffBasicPayroll from "./components/staff-basic-payroll/AddStaffBasic
 import StaffBasicPayroll from "./components/staff-basic-payroll/index";
 import MyPayslips from "./components/staff-basic-payroll/MyPayslips";
 import MyLeaveRequests from "./components/leave-requests/MyLeaveRequests";
+import MyResignation from "./components/resign/Myresignation";
+import ResignationRequests from "./components/resign/ResignationRequests";
 import AddStaffMember from "./components/staff/AddStaffMemberPage";
 import LeaveAndAttendance from "./components/attendance/index";
 import LeaveManagement from "./components/leave/index";
@@ -193,6 +195,18 @@ function App() {
                 the caller's own records (enforced server-side too). */}
             <Route path="my-payslips" element={<MyPayslips />} />
             <Route path="my-leave-requests" element={<MyLeaveRequests />} />
+            <Route path="my-resignation" element={<MyResignation />} />
+            {/* Admin: view every staff member's resignation requests
+                (including ones submitted from the mobile app) and
+                approve/reject them. */}
+            <Route
+              path="resignations"
+              element={
+                <AdminRoute requiredTab="resignations">
+                  <ResignationRequests />
+                </AdminRoute>
+              }
+            />
             <Route
               path="leaveattendance"
               element={

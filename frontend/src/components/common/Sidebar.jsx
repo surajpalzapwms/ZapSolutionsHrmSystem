@@ -13,6 +13,7 @@ import {
   CalendarPlus,
   CalendarCheck,
   ShieldCheck,
+  LogOut,
 } from "lucide-react";
 import {
   getCurrentUser,
@@ -42,12 +43,16 @@ const NAV_ITEMS = [
   { label: "Staff Basic Payroll", icon: Wallet, path: "/hrmlayout/staffbasicpayroll", adminOnly: true, tabKey: "staffbasicpayroll" },
   { label: "Advance", icon: Wallet, path: "/hrmlayout/advance", adminOnly: true, tabKey: "advance" },
   { label: "Expenses", icon: Receipt, path: "/hrmlayout/expenses", adminOnly: true, tabKey: "expenses" },
+  // Admin: review every staff member's resignation requests (submitted from
+  // either the website or the mobile app) and approve/reject them.
+  { label: "Resignations", icon: LogOut, path: "/hrmlayout/resignations", adminOnly: true, tabKey: "resignations" },
   // Super-admin only — manage which tabs each admin account can see.
   { label: "Admin Permissions", icon: ShieldCheck, path: "/hrmlayout/permissions", adminOnly: true, superAdminOnly: true },
   // Staff self-service — each screen only ever shows the logged-in
   // account's own records.
   { label: "My Leave Requests", icon: CalendarPlus, path: "/hrmlayout/my-leave-requests", adminOnly: false, hideForSuperAdmin: true },
   { label: "My Payslips", icon: FileText, path: "/hrmlayout/my-payslips", adminOnly: false, hideForSuperAdmin: true },
+  { label: "My Resignation", icon: LogOut, path: "/hrmlayout/my-resignation", adminOnly: false, hideForSuperAdmin: true },
 ];
 
 const Sidebar = ({ isOpen, toggleSidebar, isMobile = false }) => {

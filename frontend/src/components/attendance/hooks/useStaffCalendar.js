@@ -3,11 +3,14 @@ import { useState, useEffect, useCallback } from "react";
 import { attendanceService } from "../../../services/attendanceService";
 import { showToast } from "../../../utils/toast";
 
-export const useMRCalendar = (staffId) => {
-  const now = new Date();
+export const useMRCalendar = (staffId, defaultDate) => {
+  // Defaults to today, but a relieved staff member's calendar should open
+  // on the month they actually left instead — landing on "today" would
+  // usually show a blank month with nothing to see.
+  const initial = defaultDate ? new Date(defaultDate) : new Date();
   const [viewMode, setViewMode] = useState("monthly"); // "monthly" | "annual"
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth());
+  const [year, setYear] = useState(initial.getFullYear());
+  const [month, setMonth] = useState(initial.getMonth());
   const [calendar, setCalendar] = useState(null);
   const [loading, setLoading] = useState(false);
   const [selectedDay, setSelectedDay] = useState(null);
@@ -57,6 +60,15 @@ export const useMRCalendar = (staffId) => {
   const goToPrevYear = useCallback(() => setYear((y) => y - 1), []);
   const goToNextYear = useCallback(() => setYear((y) => y + 1), []);
 
+  // Jump straight to a chosen month/year from a quick-pick dropdown,
+  // instead of clicking the prev/next arrows one step at a time to reach a
+  // date months or years back (e.g. a staff member's June 2025 history).
+  const goToMonth = useCallback((newYear, newMonth) => {
+    setYear(newYear);
+    setMonth(newMonth);
+  }, []);
+  const goToYear = useCallback((newYear) => setYear(newYear), []);
+
   return {
     viewMode,
     setViewMode,
@@ -70,6 +82,8 @@ export const useMRCalendar = (staffId) => {
     goToNextMonth,
     goToPrevYear,
     goToNextYear,
+    goToMonth,
+    goToYear,
     fetchCalendar,
   };
 };

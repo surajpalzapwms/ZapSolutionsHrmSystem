@@ -1,15 +1,18 @@
 // src/components/attendance/index.jsx
 import React, { useState, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Clock, Menu } from "lucide-react";
+import { Clock, Menu, Upload } from "lucide-react";
 import { useAttendance } from "./hooks/useAttendance";
 import { useStaffSummary } from "./hooks/useStaffSummary";
 import StaffList from "./StaffList";
 import StaffCalendarView from "./StaffCalendarView";
+import AttendanceHolidayList from "./AttendanceHolidayList";
 import EarlySignOutPanel from "./EarlySignOutPanel";
 import AttendanceModal from "./AttendanceModal";
 import ConvertExtraHoursModal from "./ConvertExtraHoursModal";
 import ExtraHoursModal from "./ExtraHoursModal";
+import AttendanceExcelImport from "./AttendanceExcelImport";
+import LeaveExcelImport from "./LeaveExcelImport";
 import Sidebar from "../common/Sidebar";
 import Spinner from "../common/Spinner";
 
@@ -20,6 +23,8 @@ const Attendance = () => {
   const [calendarRefreshKey, setCalendarRefreshKey] = useState(0);
   const [activeUserId, setActiveUserId] = useState(null);
   const [convertModalOpen, setConvertModalOpen] = useState(false);
+  const [attendanceImportOpen, setAttendanceImportOpen] = useState(false);
+  const [leaveImportOpen, setLeaveImportOpen] = useState(false);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -59,13 +64,31 @@ const Attendance = () => {
 
   const attendanceStaffOptions = useMemo(
     () =>
-      staffList.map((mr) => ({
-        value: mr.attendanceUserId || "",
-        label: mr.attendanceUserId
-          ? mr.staffName
-          : `${mr.staffName} (no login linked)`,
-        disabled: !mr.attendanceUserId,
-      })),
+      staffList.map((mr) => {
+        const hasLogin = !!mr.attendanceUserId;
+        // A staff member who has left can still have attendance
+        // marked/imported for the dates they actually worked (the backend
+        // enforces the real joining-date → relieving-date window) — so
+        // this label is informational only, it no longer disables the
+        // option. Only a genuinely missing login account (nothing to
+        // attach an Attendance record to) blocks selection.
+        const hasLeft = mr.canMarkAttendance === false;
+        let label = mr.staffName;
+        if (hasLeft) label = `${mr.staffName} (left organization)`;
+        else if (!hasLogin) label = `${mr.staffName} (no login linked)`;
+        return {
+          value: mr.attendanceUserId || "",
+          label,
+          disabled: !hasLogin,
+        };
+      }),
+    [staffList],
+  );
+
+  // Leave.userId points directly at Staff (unlike Attendance, which points
+  // at the linked login User) — a separate options list keyed by staffId.
+  const leaveStaffOptions = useMemo(
+    () => staffList.map((mr) => ({ value: mr.staffId, label: mr.staffName })),
     [staffList],
   );
 
@@ -121,7 +144,27 @@ const Attendance = () => {
             Attendance & Leaves
           </h1>
         </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setAttendanceImportOpen(true)}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
+          >
+            <Upload size={16} />
+            Import Attendance
+          </button>
+          <button
+            onClick={() => setLeaveImportOpen(true)}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
+          >
+            <Upload size={16} />
+            Import Leaves
+          </button>
+        </div>
       </div>
+
+      {/* Same holidays as the Holiday tab, filtered down to this month
+          (passed + upcoming) so they're visible right here on Attendance. */}
+      <AttendanceHolidayList holidays={holidays} />
 
       {staffLoading && !staffList.length ? (
         <Spinner />
@@ -171,6 +214,20 @@ const Attendance = () => {
         isOpen={extraHoursModal.isOpen}
         onClose={extraHoursModal.close}
         userId={activeUserId}
+      />
+
+      <AttendanceExcelImport
+        isOpen={attendanceImportOpen}
+        onClose={() => setAttendanceImportOpen(false)}
+        staffOptions={attendanceStaffOptions}
+        onSuccess={refreshAll}
+      />
+
+      <LeaveExcelImport
+        isOpen={leaveImportOpen}
+        onClose={() => setLeaveImportOpen(false)}
+        staffOptions={leaveStaffOptions}
+        onSuccess={refreshAll}
       />
     </div>
   );

@@ -26,6 +26,11 @@ const validate = (form, isEdit) => {
   if (!isEdit && !validatePassword(form.password)) {
     errors.password = "Password must be at least 6 characters";
   }
+  // Relieving Date stays optional — at the point a staff member joins (or
+  // even the moment their status is first switched to "Relieving") the
+  // admin often doesn't know the exact last working day yet, so it can be
+  // filled in later rather than blocking the save. It's just never
+  // auto-filled with today's date on its own.
   return errors;
 };
 
@@ -99,6 +104,7 @@ const StaffForm = ({
       email: "",
       password: "",
       date: "", // Joining Date
+      dateOfBirth: "",
       status: "Probation",
       probationMonths: 3,
       probationEndDate: "",
@@ -188,6 +194,9 @@ const StaffForm = ({
         email: initialData.email || "",
         password: "",
         date: initialData.date ? initialData.date.slice(0, 10) : "",
+        dateOfBirth: initialData.dateOfBirth
+          ? initialData.dateOfBirth.slice(0, 10)
+          : "",
         status: initialData.status || "Probation",
         probationMonths: initialData.probationMonths ?? 3,
         probationEndDate: initialData.probationEndDate
@@ -278,14 +287,9 @@ const StaffForm = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.date, form.confirmationMonths, form.status, activeSection]);
 
-  // Relieving Date defaults to today the first time this status is chosen,
-  // but stays fully editable after that.
-  useEffect(() => {
-    if (activeSection === "status" && form.status === "Relieving" && !form.relievingDate) {
-      setFields({ relievingDate: todayStr() });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.status, activeSection]);
+  // Relieving Date is left blank until the admin actually picks one — it
+  // must never be silently defaulted to "today". validate() below requires
+  // it before the form can be submitted while Relieving is selected.
 
   // Project Start Date defaults to the Joining Date the first time an
   // employment type is picked, but the user can change it afterwards —
@@ -373,6 +377,16 @@ const StaffForm = ({
           label="Joining Date"
           name="date"
           value={form.date}
+          onChange={handleChange}
+        />
+      </div>
+
+      {/* Date of Birth */}
+      <div className="grid grid-cols-2 gap-4">
+        <DatePicker
+          label="Date of Birth"
+          name="dateOfBirth"
+          value={form.dateOfBirth}
           onChange={handleChange}
         />
       </div>
@@ -631,7 +645,9 @@ const StaffForm = ({
                       Information:
                     </p>
                     <p>
-                      Select the relieving date for this staff member. This
+                      Select the leaving date for this staff member once
+                      it's known — it won't be filled in automatically, and
+                      you can leave it blank for now and add it later. This
                       marks their last working day.
                     </p>
                   </div>

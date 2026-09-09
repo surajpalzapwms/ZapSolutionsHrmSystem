@@ -98,35 +98,87 @@ const calculateConfirmationDate = (joiningDate, months) => {
   return addMonths(joiningDate, months);
 };
 
-// Status and Employment Type are mutually exclusive in the UI — only one
-// card is active at a time — but a stray payload (an old client, a direct
-// API call, a partial update) could still send date fields that don't
-// belong to the active status/employmentType. This nulls out whichever
-// fields don't apply to `data.status` / `data.employmentType`, so the
-// record on disk never disagrees with what's actually selected.
+// Employment Type is a separate, independent choice from Status in the UI —
+// its two date fields (projectStartDate/projectEndDate) only apply when an
+// employmentType is actually selected. This nulls those two out whenever
+// employmentType is empty, so a stray payload (an old client, a direct API
+// call, a partial update) can't leave dates on disk for a type that isn't
+// selected.
+//
+// probationEndDate / confirmationDate / relievingDate are deliberately left
+// alone here — they're the staff member's lifecycle history (when
+// probation ended, when confirmation started, when they left), and the
+// "View" details panel needs all of them regardless of the current status.
+// Nulling the earlier ones out on every status change (the old behaviour)
+// meant that history was destroyed the moment probation turned into
+// confirmation, which is exactly what made the details view incomplete.
 //   - `explicitFields`: a set of field names the caller explicitly sent in
 //     THIS request — those are respected and never overridden. Only used
 //     by updateStaff, where an untouched field shouldn't be wiped just
 //     because a different field changed. createStaff/importStaff build a
 //     brand-new document each time, so they pass no exceptions.
 const applyStatusEmploymentExclusivity = (data, explicitFields = new Set()) => {
-  if (data.status !== "Probation" && !explicitFields.has("probationEndDate")) {
-    data.probationEndDate = null;
-  }
-  if (
-    data.status !== "Confirmation" &&
-    !explicitFields.has("confirmationDate")
-  ) {
-    data.confirmationDate = null;
-  }
-  if (data.status !== "Relieving" && !explicitFields.has("relievingDate")) {
-    data.relievingDate = null;
-  }
   if (!data.employmentType) {
     if (!explicitFields.has("projectStartDate")) data.projectStartDate = null;
     if (!explicitFields.has("projectEndDate")) data.projectEndDate = null;
   }
   return data;
+};
+
+// Once a staff member's probation period has actually elapsed, their
+// status should read "Confirmation" without an admin having to manually
+// open the record and re-save it. This checks a single staff doc and
+// returns the fields to update, or null if nothing is due yet.
+const getAutoConfirmUpdate = (staff) => {
+  if (staff.status !== "Probation" || !staff.probationEndDate) return null;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const endDate = new Date(staff.probationEndDate);
+  if (isNaN(endDate.getTime())) return null;
+  endDate.setHours(0, 0, 0, 0);
+
+  if (today <= endDate) return null; // still within probation
+
+  // Confirmation date = whatever it was already, else the standard
+  // joining-date + confirmationMonths calculation, else the day right
+  // after probation ended.
+  const confirmationDate =
+    staff.confirmationDate ||
+    calculateConfirmationDate(
+      staff.date,
+      staff.confirmationMonths || staff.probationMonths || 3,
+    ) ||
+    addDays(endDate, 1);
+
+  return { status: "Confirmation", confirmationDate };
+};
+
+// Applies getAutoConfirmUpdate() across a list of (lean) staff docs,
+// persisting whichever ones are due in a single bulk write, and returns the
+// list with those changes merged in — so callers get the corrected status
+// immediately, without a second round trip.
+const autoAdvanceStaffList = async (staffList) => {
+  const ops = [];
+  const result = staffList.map((staff) => {
+    const update = getAutoConfirmUpdate(staff);
+    if (!update) return staff;
+    ops.push({
+      updateOne: { filter: { _id: staff._id }, update: { $set: update } },
+    });
+    return { ...staff, ...update };
+  });
+  if (ops.length) await Staff.bulkWrite(ops);
+  return result;
+};
+
+// Same as above, for a single staff doc (getStaffById / getMyStaffProfile).
+const autoAdvanceStaff = async (staff) => {
+  if (!staff) return staff;
+  const update = getAutoConfirmUpdate(staff);
+  if (!update) return staff;
+  await Staff.updateOne({ _id: staff._id }, { $set: update });
+  return { ...staff, ...update };
 };
 
 /**
@@ -136,8 +188,8 @@ const applyStatusEmploymentExclusivity = (data, explicitFields = new Set()) => {
  */
 export const getMyStaffProfile = asyncHandler(async (req, res) => {
   const email = req.user?.email?.toLowerCase().trim();
-  const staff = email
-    ? await Staff.findOne({ email }).select("-password")
+  let staff = email
+    ? await Staff.findOne({ email }).select("-password").lean()
     : null;
 
   if (!staff) {
@@ -148,6 +200,7 @@ export const getMyStaffProfile = asyncHandler(async (req, res) => {
     });
   }
 
+  staff = await autoAdvanceStaff(staff);
   res.status(200).json({ success: true, data: staff });
 });
 
@@ -167,7 +220,10 @@ export const getAllStaff = asyncHandler(async (req, res) => {
     ];
   }
 
-  const staff = await Staff.find(filter).sort({ createdAt: -1 }).lean();
+  let staff = await Staff.find(filter).sort({ createdAt: -1 }).lean();
+  // Flip anyone whose probation period has elapsed over to "Confirmation"
+  // automatically, so the list always reflects today's real status.
+  staff = await autoAdvanceStaffList(staff);
   res.json({ success: true, count: staff.length, data: staff });
 });
 
@@ -182,8 +238,9 @@ export const getTeams = asyncHandler(async (req, res) => {
 /** GET /api/staff/:id — single staff member */
 export const getStaffById = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
-  const staff = await Staff.findById(req.params.id).lean();
+  let staff = await Staff.findById(req.params.id).lean();
   if (!staff) throw new ApiError(404, "Staff member not found");
+  staff = await autoAdvanceStaff(staff);
   res.json({ success: true, data: staff });
 });
 
@@ -218,6 +275,7 @@ export const createStaff = asyncHandler(async (req, res) => {
     email,
     password,
     date, // Joining Date
+    dateOfBirth,
     status = "Probation",
     probationMonths = 3,
     probationEndDate,
@@ -305,6 +363,7 @@ export const createStaff = asyncHandler(async (req, res) => {
     projectName: projectName?.trim() || "",
     contactNo: contactNo?.trim() || "",
     date: joiningDate,
+    dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
     status: status || "Probation",
     probationMonths: probationMonths || 3,
     probationEndDate: finalProbationEndDate || null,
@@ -394,6 +453,7 @@ export const updateStaff = asyncHandler(async (req, res) => {
     email,
     password,
     date, // Joining Date
+    dateOfBirth,
     status,
     probationMonths,
     probationEndDate,
@@ -435,6 +495,9 @@ export const updateStaff = asyncHandler(async (req, res) => {
   if (trimmedEmail) updateData.email = trimmedEmail;
   if (trimmedPassword) updateData.password = trimmedPassword;
   if (date !== undefined) updateData.date = new Date(date);
+  if (dateOfBirth !== undefined) {
+    updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
+  }
   if (status !== undefined) updateData.status = status;
   if (probationMonths !== undefined)
     updateData.probationMonths = probationMonths;
@@ -494,43 +557,31 @@ export const updateStaff = asyncHandler(async (req, res) => {
     );
   }
 
-  // If status is Relieving and relievingDate not set, default to today
-  if (
-    newStatus === "Relieving" &&
-    relievingDate === undefined &&
-    !existingStaff.relievingDate
-  ) {
-    updateData.relievingDate = new Date();
-  }
+  // Note: relievingDate is intentionally NOT auto-defaulted to "today" when
+  // status is switched to Relieving. The admin picks the actual last
+  // working day in the form; if it's left blank, it just stays blank
+  // rather than silently substituting today's date.
 
   // Status and Employment Type are mutually exclusive in the UI — only
   // enforce that here when this request is actually touching one of them.
   // Otherwise an unrelated update (e.g. just editing contactNo) would wipe
-  // out dates that were never part of this request.
+  // out dates that were never part of this request. Only the
+  // employmentType-linked project dates get cleared this way — probation
+  // end / confirmation start / relieving date are lifecycle history and
+  // are preserved regardless of the current status (see
+  // applyStatusEmploymentExclusivity above).
   if (status !== undefined || employmentType !== undefined) {
     const newEmploymentType =
       employmentType !== undefined ? employmentType : existingStaff.employmentType;
     applyStatusEmploymentExclusivity(
       { ...updateData, status: newStatus, employmentType: newEmploymentType },
       new Set([
-        probationEndDate !== undefined ? "probationEndDate" : null,
-        confirmationDate !== undefined ? "confirmationDate" : null,
-        relievingDate !== undefined ? "relievingDate" : null,
         projectStartDate !== undefined ? "projectStartDate" : null,
         projectEndDate !== undefined ? "projectEndDate" : null,
       ].filter(Boolean)),
     );
     // applyStatusEmploymentExclusivity mutates the object passed to it —
     // pull the (possibly nulled) date fields back out into updateData.
-    if (newStatus !== "Probation" && probationEndDate === undefined) {
-      updateData.probationEndDate = null;
-    }
-    if (newStatus !== "Confirmation" && confirmationDate === undefined) {
-      updateData.confirmationDate = null;
-    }
-    if (newStatus !== "Relieving" && relievingDate === undefined) {
-      updateData.relievingDate = null;
-    }
     if (!newEmploymentType) {
       if (projectStartDate === undefined) updateData.projectStartDate = null;
       if (projectEndDate === undefined) updateData.projectEndDate = null;
@@ -745,6 +796,7 @@ export const importStaff = asyncHandler(async (req, res) => {
       contactNo: row.contactNo?.trim() || "",
       ...(row.email?.trim() ? { email: row.email.trim() } : {}),
       date: joiningDate,
+      dateOfBirth: row.dateOfBirth ? new Date(row.dateOfBirth) : null,
       status: status,
       probationMonths: probationMonths,
       probationEndDate: probationEndDate,

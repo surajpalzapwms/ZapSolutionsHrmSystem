@@ -1,7 +1,27 @@
 import LeavePolicy from "../models/LeavePolicy.js";
 import Staff from "../models/Staff.js";
+import User from "../models/User.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import { computeLeaveBalances } from "../services/leaveBalance.js";
+import { cleanupAutoLeavesInUntrackedMonths } from "../services/leaveAutomation.js";
+
+// Resolves the Attendance-side User._id for a staff member (Attendance is
+// keyed by User, Leave/Staff balances are keyed by Staff._id) and, while
+// we're there, clears out any stale auto-generated "unpaid absence" Leave
+// left over from a month that turned out to have zero real attendance
+// tracked — see cleanupAutoLeavesInUntrackedMonths. Doing this inline here
+// (rather than only in the daily /reconcile-absences job) means a staff
+// member's displayed balance self-corrects the moment their page is
+// loaded, instead of staying wrong until an admin remembers to run the
+// reconciliation endpoint by hand.
+const resolveAttendanceUserAndClean = async (staff) => {
+  const user = staff.email
+    ? await User.findOne({ email: staff.email.toLowerCase() }).select("_id").lean()
+    : null;
+  const attendanceUserId = user?._id || null;
+  await cleanupAutoLeavesInUntrackedMonths(staff, attendanceUserId);
+  return attendanceUserId;
+};
 
 // GET /api/hrm/leave-policy
 // Return the org-wide leave allowances (creating defaults on first access).
@@ -66,7 +86,14 @@ export const getAllStaffLeaveBalances = asyncHandler(async (req, res) => {
 
   const data = await Promise.all(
     staffList.map(async (staff) => {
-      const balances = await computeLeaveBalances(staff._id, staff.date, policy);
+      await resolveAttendanceUserAndClean(staff);
+      const balances = await computeLeaveBalances(
+        staff._id,
+        staff.date,
+        policy,
+        new Date(),
+        staff.status === "Relieving" ? staff.relievingDate : null,
+      );
       return {
         staffId: staff._id,
         staffName: staff.staffName,
@@ -96,7 +123,14 @@ export const getMyLeaveBalance = asyncHandler(async (req, res) => {
   }
 
   const policy = await LeavePolicy.getSingleton();
-  const balances = await computeLeaveBalances(staff._id, staff.date, policy);
+  await resolveAttendanceUserAndClean(staff);
+  const balances = await computeLeaveBalances(
+    staff._id,
+    staff.date,
+    policy,
+    new Date(),
+    staff.status === "Relieving" ? staff.relievingDate : null,
+  );
   res.json({
     success: true,
     data: {

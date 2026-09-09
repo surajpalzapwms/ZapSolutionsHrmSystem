@@ -26,6 +26,7 @@ export const TAB_TREE = [
   },
   { key: "advance", label: "Advance" },
   { key: "expenses", label: "Expenses" },
+  { key: "resignations", label: "Resignations" },
 ];
 
 export const ALL_TAB_KEYS = TAB_TREE.flatMap((tab) => [

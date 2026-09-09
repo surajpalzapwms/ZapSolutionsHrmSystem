@@ -26,7 +26,8 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
   const validate = (form) => {
     const errors = {};
     if (!validateRequired(form.userId)) errors.userId = "Please select an MR";
-    if (!validateRequired(form.loginTime)) errors.loginTime = "Login time is required";
+    // Login/logout time are optional — left blank, they default to the
+    // office's standard shift (10:00 AM–6:30 PM) on save.
     const blockedReason = getBlockedDayReason(form.date, holidays);
     if (blockedReason) errors.date = `${blockedReason} — attendance can't be marked on this day`;
     return errors;
@@ -54,6 +55,10 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
       setIsSubmitting(true);
       const payload = {
         userId: form.userId,
+        // Always send the raw date too — if login/logout are left blank,
+        // the backend uses it to default them to the standard shift
+        // (10:00 AM–6:30 PM) instead of rejecting the record.
+        date: form.date,
         loginTime: combineDateTime(form.date, form.loginTime),
         logoutTime: combineDateTime(form.date, form.logoutTime),
         workingHoursPerDay: form.attendanceType === ATTENDANCE_TYPES.HALF ? 4 : 8,
@@ -96,7 +101,6 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
             value={form.loginTime}
             onChange={handleChange}
             error={errors.loginTime}
-            required
             disabled={!!blockedReason}
           />
           <InputField
@@ -108,6 +112,9 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
             disabled={!!blockedReason}
           />
         </div>
+        <p className="text-xs text-gray-500 -mt-2">
+          Leave a time blank to default it to the standard shift (10:00 AM–6:30 PM).
+        </p>
         <Dropdown
           label="Attendance Type"
           value={form.attendanceType}

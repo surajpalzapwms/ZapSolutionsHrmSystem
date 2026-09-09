@@ -5,6 +5,7 @@ import { useStaff } from "./hooks/useStaff";
 import StaffList from "./StaffList";
 import StaffForm from "./StaffForm";
 import StaffDashboard from "./StaffDashboard";
+import StaffDetailsModal from "./StaffDetailsModal";
 import SearchBar from "../common/SearchBar";
 import Button from "../common/Button";
 import Modal from "../common/Modal";
@@ -50,6 +51,10 @@ const Staff = () => {
   // Shown in the modal header, next to the X, via Modal's headerRight slot.
   const [modalStaffId, setModalStaffId] = useState("");
 
+  // The staff member currently shown in the read-only "View" details modal
+  // (probation start/end, confirmation start, leaving date, all at once).
+  const [viewingStaff, setViewingStaff] = useState(null);
+
   React.useEffect(() => {
     const checkMobile = () => setIsMobileView(window.innerWidth < 768);
     checkMobile();
@@ -66,6 +71,10 @@ const Staff = () => {
   const handleOpenAddModal = () => {
     setModalStaffId("");
     addModal.open();
+  };
+
+  const handleView = (member) => {
+    setViewingStaff(member);
   };
 
   const handleDelete = async (member) => {
@@ -165,9 +174,16 @@ const Staff = () => {
         onEdit={handleEdit}
         onDelete={handleDelete}
         onToggleStatus={toggleStatus}
+        onView={handleView}
         currentPage={currentPage}
         totalPages={totalPages}
         onPageChange={setCurrentPage}
+      />
+
+      <StaffDetailsModal
+        isOpen={!!viewingStaff}
+        onClose={() => setViewingStaff(null)}
+        staff={viewingStaff}
       />
 
       <Modal

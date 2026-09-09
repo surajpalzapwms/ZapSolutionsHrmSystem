@@ -35,12 +35,175 @@ export const formatMinutesToTimeString = (minutes) => {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
 };
 
-export const getAttendanceType = (totalMinutesWorked) => {
-  if (totalMinutesWorked >= 7 * 60)
+// Real Saturday office hours, confirmed against the actual login/logout
+// data on file: staff sign in ~9:30–10:15 AM and sign out at 4:00 PM. This
+// used to be hardcoded as a 4:00 PM – 5:30 PM (90-minute) evening window,
+// which never matched how Saturdays are actually punched — a normal ~6
+// hour Saturday shift (10:00 AM start, 4:00 PM close) was being scored
+// against a 90-minute "expected" shift, so hundreds of legitimate worked
+// minutes were misread as "extra hours earned" and inflated the
+// extra-hours bank (see calculateExtraHoursSummary) far beyond what the
+// punch times justify. Weekdays are completely unaffected — this only
+// ever applies when `referenceDate` (the login time) falls on a Saturday
+// in IST **on or after SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM**. Before that
+// date Saturdays were normal full working days (same hours as a weekday).
+export const SATURDAY_SHIFT_START = "10:00";
+export const SATURDAY_SHIFT_END = "16:00";
+// Net minutes expected for a full Saturday: 10:00 AM – 4:00 PM (360 min)
+// minus the 1:30–2:15 PM lunch overlap (45 min) = 315 net minutes.
+const SATURDAY_SHIFT_MINUTES = 6 * 60 - 45; // 315
+const SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM = new Date(Date.UTC(2026, 3, 1)); // Apr 1, 2026
+const isShortSaturday = (referenceDate) =>
+  !!referenceDate &&
+  toIST(referenceDate).getUTCDay() === 6 &&
+  toIST(referenceDate) >= SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM;
+
+// Worked-time thresholds (weekdays):
+//   > 5h worked  → full day
+//   4h–5h worked → half day
+//   < 4h worked  → short/absent
+// `expectedMinutes` stays anchored to the nominal 4h/8h shift lengths (used
+// downstream to compute extraHoursInMinutes — see buildAttendanceFields /
+// checkOut), it's only the full/half/short cutoffs above that changed.
+const FULL_DAY_THRESHOLD_MINUTES = 5 * 60;
+const HALF_DAY_THRESHOLD_MINUTES = 4 * 60;
+
+export const getAttendanceType = (totalMinutesWorked, referenceDate = null) => {
+  if (isShortSaturday(referenceDate)) {
+    // Saturday is optional — any recorded attendance (any positive worked
+    // time) counts as a full day, no half/short tiers. Only time worked
+    // beyond the real Saturday window (10:00 AM – 4:00 PM) is extra.
+    if (totalMinutesWorked > 0) {
+      return { type: "full", expectedMinutes: SATURDAY_SHIFT_MINUTES };
+    }
+  }
+  if (totalMinutesWorked > FULL_DAY_THRESHOLD_MINUTES)
     return { type: "full", expectedMinutes: 8 * 60 };
-  if (totalMinutesWorked >= 4 * 60)
+  if (totalMinutesWorked >= HALF_DAY_THRESHOLD_MINUTES)
     return { type: "half", expectedMinutes: 4 * 60 };
   return { type: "short", expectedMinutes: 8 * 60 };
+};
+
+/**
+ * Classifies a day's *effective* worked minutes (net shift time + any
+ * overtime, see getWorkedMinutesBreakdown) into full / half / short — same
+ * thresholds as getAttendanceType — but first tries to cover a shortfall
+ * out of the user's extra-hours bank (see getAvailableBankMinutes) before
+ * settling for a lower tier or "short".
+ *
+ *   > 5h worked alone       → full, bank untouched
+ *   worked + bank > 5h      → full, bank spends just enough to cross 5h
+ *   4h–5h worked alone      → half, bank untouched
+ *   worked + bank >= 4h     → half, bank spends just enough to cross 4h
+ *   otherwise               → short/absent, bank can't help
+ *
+ * A day only ever earns extra minutes (extraMinutesEarned, added to the
+ * bank via extraHoursInMinutes on save) when it reaches full/half purely on
+ * its own worked time — a day that needed the bank to reach its tier can't
+ * also feed the bank in the same breath.
+ */
+export const classifyWorkedMinutes = (
+  effectiveMinutes,
+  availableBankMinutes = 0,
+  referenceDate = null,
+) => {
+  if (isShortSaturday(referenceDate)) {
+    // Same rule as getAttendanceType: any recorded Saturday attendance is
+    // a full day, and only time beyond the real 10:00 AM – 4:00 PM window
+    // is credited as extra.
+    if (effectiveMinutes > 0) {
+      return {
+        type: "full",
+        bankMinutesUsed: 0,
+        extraMinutesEarned: Math.max(
+          0,
+          effectiveMinutes - SATURDAY_SHIFT_MINUTES,
+        ),
+      };
+    }
+    // No worked time at all (e.g. an "absent" marker on a Saturday) —
+    // fall through to the normal thresholds below, same as any other day.
+  }
+
+  const bank = Math.max(0, Math.floor(availableBankMinutes || 0));
+
+  if (effectiveMinutes > FULL_DAY_THRESHOLD_MINUTES) {
+    return {
+      type: "full",
+      bankMinutesUsed: 0,
+      extraMinutesEarned: Math.max(0, effectiveMinutes - 8 * 60),
+    };
+  }
+
+  const neededForFull = FULL_DAY_THRESHOLD_MINUTES + 1 - effectiveMinutes;
+  if (neededForFull <= bank) {
+    return { type: "full", bankMinutesUsed: neededForFull, extraMinutesEarned: 0 };
+  }
+
+  if (effectiveMinutes >= HALF_DAY_THRESHOLD_MINUTES) {
+    return { type: "half", bankMinutesUsed: 0, extraMinutesEarned: 0 };
+  }
+
+  const neededForHalf = HALF_DAY_THRESHOLD_MINUTES - effectiveMinutes;
+  if (neededForHalf <= bank) {
+    return { type: "half", bankMinutesUsed: neededForHalf, extraMinutesEarned: 0 };
+  }
+
+  return { type: "short", bankMinutesUsed: 0, extraMinutesEarned: 0 };
+};
+
+/**
+ * Total minutes currently sitting in a user's extra-hours bank: the sum of
+ * extraHoursInMinutes across their attendance records, excluding leave
+ * days. This is what classifyWorkedMinutes draws on to cover a shortfall,
+ * and what deductFromExtraHoursBank spends once a day actually uses it.
+ */
+export const getAvailableBankMinutes = async (userId) => {
+  const result = await Attendance.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(userId),
+        isLeaveDay: { $ne: true },
+        extraHoursInMinutes: { $gt: 0 },
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$extraHoursInMinutes" } } },
+  ]);
+  return result[0]?.total || 0;
+};
+
+/**
+ * Spends `minutesToDeduct` out of a user's extra-hours bank, oldest banked
+ * minutes first — the same FIFO convention already used by the "convert
+ * extra hours to swap leave" flow elsewhere in this codebase. Reduces
+ * extraHoursInMinutes (and the matching extraHours display string) on each
+ * source record in turn until the requested amount is accounted for.
+ */
+export const deductFromExtraHoursBank = async (userId, minutesToDeduct) => {
+  let remaining = Math.max(0, Math.floor(minutesToDeduct || 0));
+  if (remaining <= 0) return;
+
+  const records = await Attendance.find({
+    userId,
+    isLeaveDay: { $ne: true },
+    extraHoursInMinutes: { $gt: 0 },
+  }).sort({ loginTime: 1 });
+
+  for (const rec of records) {
+    if (remaining <= 0) break;
+    const original = rec.extraHoursInMinutes || 0;
+    if (original <= 0) continue;
+    const deduction = Math.min(original, remaining);
+    const newMinutes = original - deduction;
+    rec.extraHoursInMinutes = newMinutes;
+    rec.extraHours = formatMinutesToTimeString(newMinutes);
+    await rec.save();
+    remaining -= deduction;
+  }
+  // If `remaining` is still > 0 here, the bank had less available than the
+  // caller believed — shouldn't happen since callers always check
+  // getAvailableBankMinutes first, but it's not fatal: whatever the bank
+  // actually had gets spent, and nothing throws.
 };
 
 // ─── "YYYY-MM-DD" → { year, month (1-12), day } ────────────────────────────
@@ -117,8 +280,19 @@ export const isHolidayOrSunday = async (date) => {
   s.setUTCHours(0, 0, 0, 0);
   const e = new Date(checkDate);
   e.setUTCHours(23, 59, 59, 999);
+  // Match any day WITHIN a declared holiday's startDate..endDate span, not
+  // just a day that happens to equal startDate exactly — the previous
+  // `startDate: { $gte: s, $lte: e }` (plus a `date` field the Holiday
+  // schema doesn't even have) only ever matched the first day of a
+  // multi-day holiday, silently treating day 2/3/etc. of it as an ordinary
+  // working day everywhere this helper is used (absence auto-marking,
+  // sandwich bridging, sign-in blocking, the invalid-leave cleanup). This
+  // now matches the same range check buildMonthDays and the Holiday model's
+  // own `isHoliday` static already use.
   const holiday = await Holiday.findOne({
-    $or: [{ date: { $gte: s, $lte: e } }, { startDate: { $gte: s, $lte: e } }],
+    enabled: true,
+    startDate: { $lte: e },
+    endDate: { $gte: s },
   });
   if (holiday) return { isHoliday: true, reason: holiday.name };
 
@@ -160,12 +334,26 @@ export const enforceExtraHoursConsistency = async (userId, session = null) => {
     })
       .sort({ leaveDate: 1 })
       .session(session);
-    const maxAllowed = Math.floor(totalExtraMinutes / 480);
-    if (swapLeaves.length > maxAllowed) {
-      const toDelete = swapLeaves.slice(-(swapLeaves.length - maxAllowed));
-      await Leave.deleteMany({
-        _id: { $in: toDelete.map((l) => l._id) },
-      }).session(session);
+    // Compare against the total DAY VALUE actually banked/used, not just
+    // the record count — a swapleave record can represent more than one
+    // day (dayValue: 1.5, 2, ...) when it was created from a fractional
+    // convertExtraHoursToLeave conversion, so counting records alone would
+    // under-trim (or over-trim) whenever any record isn't worth exactly 1
+    // day. `maxAllowedDays` is intentionally not floored — the bank is
+    // compared in the same fractional units the records themselves use.
+    const maxAllowedDays = totalExtraMinutes / 480;
+    let cumulativeDays = 0;
+    const toDelete = [];
+    for (const l of swapLeaves) {
+      const recordDays = l.dayValue ?? 1;
+      if (cumulativeDays + recordDays > maxAllowedDays + 1e-9) {
+        toDelete.push(l._id);
+      } else {
+        cumulativeDays += recordDays;
+      }
+    }
+    if (toDelete.length > 0) {
+      await Leave.deleteMany({ _id: { $in: toDelete } }).session(session);
     }
   } catch (err) {
     console.error("Error enforcing extra hours consistency:", err);
@@ -188,8 +376,20 @@ export const calculateExtraHoursSummary = async (userId) => {
         (new Date(rec.logoutTime) - new Date(rec.loginTime)) / 60000,
       );
       totalWorkedMinutes += minutesWorked;
-      const { expectedMinutes } = getAttendanceType(minutesWorked);
-      const extra = Math.max(0, minutesWorked - expectedMinutes);
+      // Use the stored, already-adjusted extraHoursInMinutes — it reflects
+      // any hours already redeemed via "Convert Extra Hours to Leave".
+      // Recomputing from raw login/logout every time ignored those past
+      // conversions, so the total only ever grew and never went back down
+      // (the source of inflated totals like "37d 5h 25m"). Older records
+      // saved before this field existed fall back to the raw calculation.
+      const extra =
+        typeof rec.extraHoursInMinutes === "number"
+          ? Math.max(0, rec.extraHoursInMinutes)
+          : Math.max(
+              0,
+              minutesWorked -
+                getAttendanceType(minutesWorked, rec.loginTime).expectedMinutes,
+            );
       if (extra > 0) {
         totalExtraMinutes += extra;
         recordsWithExtra.push({
@@ -253,8 +453,17 @@ export const calculateMonthlyExtraHoursSummary = async (
         (new Date(rec.logoutTime) - new Date(rec.loginTime)) / 60000,
       );
       monthlyWorkedMinutes += minutesWorked;
-      const { expectedMinutes } = getAttendanceType(minutesWorked);
-      const extra = Math.max(0, minutesWorked - expectedMinutes);
+      // Same fix as calculateExtraHoursSummary: prefer the stored,
+      // already-adjusted extraHoursInMinutes so past conversions are
+      // respected instead of recomputed away.
+      const extra =
+        typeof rec.extraHoursInMinutes === "number"
+          ? Math.max(0, rec.extraHoursInMinutes)
+          : Math.max(
+              0,
+              minutesWorked -
+                getAttendanceType(minutesWorked, rec.loginTime).expectedMinutes,
+            );
       if (extra > 0) {
         monthlyExtraMinutes += extra;
         monthlyRecordsWithExtra.push({
@@ -589,11 +798,83 @@ export const getClampedWorkingMinutes = (
   return Math.max(0, grossMinutes - lunchMinutes);
 };
 
+/**
+ * Same worked-time math as getClampedWorkingMinutes, but reports minutes
+ * worked past shift end separately instead of discarding them at the
+ * boundary. `netMinutes` is time inside the shift window with lunch
+ * subtracted (identical to getClampedWorkingMinutes). `overtimeMinutes` is
+ * time worked after shift end — if login itself is after shift end, the
+ * whole login→logout span counts as overtime and netMinutes is 0, so the
+ * two never double-count the same minute.
+ */
+export const getWorkedMinutesBreakdown = (
+  loginTime,
+  logoutTime,
+  shiftStartTime = DEFAULT_SHIFT_START,
+  shiftEndTime = DEFAULT_SHIFT_END,
+) => {
+  const netMinutes = getClampedWorkingMinutes(
+    loginTime,
+    logoutTime,
+    shiftStartTime,
+    shiftEndTime,
+  );
+
+  const loginIST = toIST(loginTime);
+  const logoutIST = toIST(logoutTime);
+  const { hour: endH, minute: endM } = parseHM(shiftEndTime, DEFAULT_SHIFT_END);
+  const windowEnd = istClockOn(loginIST, endH, endM);
+
+  const overtimeStart = loginIST > windowEnd ? loginIST : windowEnd;
+  const overtimeMinutes =
+    logoutIST > overtimeStart
+      ? Math.floor((logoutIST - overtimeStart) / 60000)
+      : 0;
+
+  return { netMinutes, overtimeMinutes };
+};
+
 /** Resolves the shift window to use for a user, falling back to the office default. */
 export const getUserShift = (user) => ({
   shiftStartTime: user?.shiftStartTime || DEFAULT_SHIFT_START,
   shiftEndTime: user?.shiftEndTime || DEFAULT_SHIFT_END,
 });
+
+/**
+ * Resolves the shift window to use for computing worked minutes on a given
+ * calendar day: the real Saturday office hours (10:00 AM – 4:00 PM, see
+ * SATURDAY_SHIFT_START/END above) for a qualifying Saturday, otherwise the
+ * normal weekday/user shift passed in. Centralizing this means every place
+ * that measures worked minutes for manual entry, imports, and admin edits
+ * agrees on which window applies to a Saturday, instead of only the final
+ * full/half/short classification knowing about it while the underlying
+ * minutes were clamped against the wrong (weekday) window.
+ */
+export const resolveEffectiveShift = (
+  referenceDate,
+  shiftStartTime = DEFAULT_SHIFT_START,
+  shiftEndTime = DEFAULT_SHIFT_END,
+) => {
+  if (isShortSaturday(referenceDate)) {
+    return { shiftStartTime: SATURDAY_SHIFT_START, shiftEndTime: SATURDAY_SHIFT_END };
+  }
+  return { shiftStartTime, shiftEndTime };
+};
+
+// A Saturday with NO attendance record at all, from March 2026 onward, is
+// treated as an (unplanned) company holiday instead of being left blank or
+// ever risking being read as an absence — Saturdays here are optional
+// working days, so nobody showing up means the office was effectively
+// closed that day, not that staff were absent. `dateObj` should be a pure
+// calendar-day Date (midnight UTC on the intended day, e.g. built with
+// Date.UTC(year, monthIndex, day)) rather than a login/logout timestamp
+// that would need IST correction.
+export const UNWORKED_SATURDAY_HOLIDAY_EFFECTIVE_FROM = new Date(
+  Date.UTC(2026, 2, 1),
+); // Mar 1, 2026
+
+export const isUnworkedSaturdayHoliday = (dateObj) =>
+  dateObj.getUTCDay() === 6 && dateObj >= UNWORKED_SATURDAY_HOLIDAY_EFFECTIVE_FROM;
 
 /** The signed-in-but-not-yet-signed-out record for this user, if any. */
 export const findOpenAttendance = (userId) =>
@@ -625,5 +906,155 @@ export const findOpenAttendanceForDate = (userId, dateString) =>
     date: dateString,
     logoutTime: { $exists: false },
   });
+
+// ── Manual / import attendance field builder ────────────────────────────
+// Used by recordAttendance() and importAttendance() in controllers/leave.js
+// to turn a (userId, date, loginTime/logoutTime OR marker status) input
+// into a full Attendance field set, using the same worked-minutes math as
+// the self sign-in/out flow (see checkOut() above) so manually entered and
+// imported records stay consistent with self-tracked ones.
+export const buildAttendanceFields = ({
+  userId,
+  dateString,
+  status,
+  loginTime,
+  logoutTime,
+  source = "manual",
+  bankMinutesAvailable = 0,
+}) => {
+  // If the admin (manual entry) or an imported row doesn't specify a time,
+  // fall back to the office's default shift window — the real Saturday
+  // hours (10:00 AM–4:00 PM) for a qualifying Saturday, otherwise the
+  // normal 10:00 AM–6:30 PM window — instead of rejecting the record.
+  const fallbackShift = resolveEffectiveShift(new Date(`${dateString}T00:00:00`));
+  if (!loginTime) loginTime = new Date(`${dateString}T${fallbackShift.shiftStartTime}:00`);
+  if (!logoutTime && status !== "absent" && status !== "half-day") {
+    logoutTime = new Date(`${dateString}T${fallbackShift.shiftEndTime}:00`);
+  }
+
+  // "absent" / "half-day" marker rows have no real login/logout pair —
+  // just a date and a status picked by the admin.
+  if (status === "absent") {
+    return {
+      userId,
+      date: dateString,
+      loginTime,
+      totalTime: "00:00:00",
+      sessionMinutes: 0,
+      attendanceType: "absent",
+      extraHours: "00:00:00",
+      extraHoursInMinutes: 0,
+      status: "absent",
+      source,
+    };
+  }
+
+  if (status === "half-day") {
+    const halfDayMinutes = 4 * 60;
+    return {
+      userId,
+      date: dateString,
+      loginTime,
+      totalTime: formatMinutesToTimeString(halfDayMinutes),
+      sessionMinutes: halfDayMinutes,
+      attendanceType: "half",
+      extraHours: "00:00:00",
+      extraHoursInMinutes: 0,
+      status: "present",
+      source,
+    };
+  }
+
+  // Normal case: real login/logout times — compute worked minutes (net
+  // shift time + overtime) the same way checkOut() does for self sign-out,
+  // then classify using whatever bank minutes are available to cover a
+  // shortfall.
+  const { shiftStartTime, shiftEndTime } = resolveEffectiveShift(loginTime);
+  const { netMinutes, overtimeMinutes } = getWorkedMinutesBreakdown(
+    loginTime,
+    logoutTime,
+    shiftStartTime,
+    shiftEndTime,
+  );
+  const effectiveMinutes = netMinutes + overtimeMinutes;
+  const totalTime = formatMinutesToTimeString(effectiveMinutes);
+  const { type: attendanceType, bankMinutesUsed, extraMinutesEarned } =
+    classifyWorkedMinutes(effectiveMinutes, bankMinutesAvailable, loginTime);
+
+  return {
+    userId,
+    date: dateString,
+    loginTime,
+    logoutTime,
+    totalTime,
+    sessionMinutes: effectiveMinutes,
+    attendanceType,
+    extraHours: formatMinutesToTimeString(extraMinutesEarned),
+    extraHoursInMinutes: extraMinutesEarned,
+    bankMinutesUsed,
+    status: "present",
+    source,
+  };
+};
+
+// ── Staff email -> login User._id resolver ──────────────────────────────
+// Attendance.userId points at the login User account while Leave.userId
+// points directly at Staff — the only reliable bridge between the two is
+// email (same approach getAllAttendance() above uses in the other
+// direction). Takes a list of staff emails and returns a lowercase
+// email -> User._id map; missing/unmatched emails are simply absent from
+// the result.
+export const resolveUserIdByEmail = async (emails) => {
+  const normalized = [
+    ...new Set((emails || []).filter(Boolean).map((e) => String(e).toLowerCase())),
+  ];
+  if (normalized.length === 0) return {};
+
+  const users = await User.find({ email: { $in: normalized } })
+    .select("email")
+    .lean();
+
+  const userIdByEmail = {};
+  users.forEach((u) => {
+    if (u.email) userIdByEmail[u.email.toLowerCase()] = String(u._id);
+  });
+  return userIdByEmail;
+};
+
+// ── Staff email -> Staff._id resolver ────────────────────────────────────
+// Leave.userId points directly at the Staff record (not the login User —
+// see resolveUserIdByEmail above for that side). Takes a list of staff
+// emails and returns a lowercase email -> Staff._id map so importLeaves()
+// can accept a "Staff Email" column instead of requiring a pre-picked
+// staff for the whole file.
+export const resolveStaffIdByEmail = async (emails) => {
+  const normalized = [
+    ...new Set((emails || []).filter(Boolean).map((e) => String(e).toLowerCase())),
+  ];
+  if (normalized.length === 0) return {};
+
+  // Staff.email has no `lowercase: true` schema option (unlike User.email),
+  // so matching is done in JS rather than assuming DB values are already
+  // normalized.
+  const staffList = await Staff.find({ email: { $exists: true, $ne: null } })
+    .select("email")
+    .lean();
+
+  const staffIdByEmail = {};
+  staffList.forEach((s) => {
+    if (s.email && normalized.includes(s.email.toLowerCase())) {
+      staffIdByEmail[s.email.toLowerCase()] = String(s._id);
+    }
+  });
+  return staffIdByEmail;
+};
+
+export const resolveStaffIdByUserId = async (userId) => {
+  if (!userId) return null;
+  const user = await User.findById(userId).select("email").lean();
+  if (!user?.email) return null;
+  const map = await resolveStaffIdByEmail([user.email]);
+  return map[user.email.toLowerCase()] || null;
+};
 
 export { Attendance, Leave, Holiday, Staff, mongoose };

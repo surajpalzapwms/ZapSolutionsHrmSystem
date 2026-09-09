@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Staff from "../models/Staff.js";
 import { validationResult } from "express-validator";
 import { isAdminRole } from "../config/permissions.js";
 
@@ -28,6 +29,31 @@ export const protect = async (req, res, next) => {
         message: "Not authorized, user not found",
         code: "TOKEN_INVALID",
       });
+    }
+
+    // A plain staff login (role "user") that has since been marked
+    // "Relieving" (past relieving date) shouldn't be able to keep using an
+    // already-issued token either — otherwise blocking login alone would
+    // only stop a *new* sign-in, not someone still signed in from before
+    // they left. Scoped to role "user" only, so this extra lookup never
+    // runs on admin/super-admin requests.
+    if (user.role === "user" && user.email) {
+      const staff = await Staff.findOne({ email: user.email.toLowerCase().trim() })
+        .select("status relievingDate")
+        .lean();
+      if (staff?.status === "Relieving" && staff.relievingDate) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const relievingDate = new Date(staff.relievingDate);
+        relievingDate.setHours(0, 0, 0, 0);
+        if (relievingDate <= today) {
+          return res.status(403).json({
+            success: false,
+            message: "You are not allowed to login because admin has deactivated you.",
+            code: "STAFF_RELIEVED",
+          });
+        }
+      }
     }
 
     req.user = user;

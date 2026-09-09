@@ -4,11 +4,10 @@ import {
   ChevronRight,
   Trash2,
   ShieldCheck,
-  ShieldOff,
 } from "lucide-react";
 import Button from "../common/Button";
 import Spinner from "../common/Spinner";
-import { useMRCalendar } from "./hooks/useStaffCalendar";
+import { useMRCalendar } from "./hooks/useMRCalendar";
 import { SHORT_DAYS, MONTHS } from "../../utils/constants";
 import { showToast } from "../../utils/toast";
 import { attendanceService } from "../../services/attendanceService";
@@ -18,6 +17,8 @@ const STATUS_STYLES = {
   half: "bg-orange-400 text-white border-orange-400",
   swap: "bg-purple-500 text-white border-purple-500",
   paid: "bg-blue-500 text-white border-blue-500",
+  sick: "bg-teal-500 text-white border-teal-500",
+  casual: "bg-pink-500 text-white border-pink-500",
   unpaid: "bg-red-600 text-white border-red-600",
   holiday: "bg-yellow-400 text-gray-900 border-yellow-400",
 };
@@ -27,6 +28,8 @@ const LEGEND = [
   { label: "Half Day", className: "bg-orange-400" },
   { label: "Swap Leave", className: "bg-purple-500" },
   { label: "Paid Leave", className: "bg-blue-500" },
+  { label: "Sick Leave", className: "bg-teal-500" },
+  { label: "Casual Leave", className: "bg-pink-500" },
   { label: "Unpaid Leave", className: "bg-red-600" },
   { label: "Holiday", className: "bg-yellow-400" },
   { label: "Today", className: "bg-white border-2 border-indigo-400" },
@@ -39,26 +42,32 @@ const formatTime = (value) => {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 };
 
-const formatDuration = (totalMinutes) => {
-  const mins = Math.max(0, Math.floor(totalMinutes || 0));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${h}h ${String(m).padStart(2, "0")}m`;
-};
-
-// Statuses that should be hoverable/clickable in the calendar grid, and what
-// each non-attendance status should say in the hover tooltip.
 const TOOLTIP_STATUSES = [
   "present",
   "half",
   "holiday",
   "paid",
+  "sick",
+  "casual",
+  "unpaid",
+  "swap",
+];
+
+// "holiday" is deliberately excluded from DELETABLE_STATUSES
+const DELETABLE_STATUSES = [
+  "present",
+  "half",
+  "paid",
+  "sick",
+  "casual",
   "unpaid",
   "swap",
 ];
 
 const LEAVE_LABELS = {
   paid: "Paid Leave",
+  sick: "Sick Leave",
+  casual: "Casual Leave",
   unpaid: "Unpaid Leave",
   swap: "Swap Leave",
 };
@@ -90,7 +99,10 @@ const DayTooltip = ({ info }) => {
       ) : (
         <div className="flex items-center gap-1.5">
           <span className="font-semibold text-gray-300">Leave:</span>
-          <span>{LEAVE_LABELS[info.status] || "Leave"}</span>
+          <span>
+            {LEAVE_LABELS[info.status] || "Leave"}
+            {info.isHalfDay ? " (Half Day)" : ""}
+          </span>
         </div>
       )}
       <div
@@ -101,7 +113,11 @@ const DayTooltip = ({ info }) => {
   );
 };
 
+// FIXED: Holiday status takes absolute precedence
 const dayCellClasses = (status, isToday, isSelected) => {
+  if (status === "holiday") {
+    return STATUS_STYLES.holiday; // Always yellow, ignore rings
+  }
   const base =
     STATUS_STYLES[status] || "bg-white text-gray-600 border-gray-200";
   const todayRing = isToday ? "ring-2 ring-indigo-400 ring-offset-1" : "";
@@ -109,7 +125,15 @@ const dayCellClasses = (status, isToday, isSelected) => {
   return `${base} ${todayRing} ${selectedRing}`;
 };
 
-const MiniMonth = ({ year, month, days, isCurrentMonth, today }) => {
+const MiniMonth = ({
+  year,
+  month,
+  days,
+  isCurrentMonth,
+  today,
+  selectedDay,
+  onDayClick,
+}) => {
   const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
   const daysInMonth = Object.keys(days).length;
   const cells = [
@@ -131,18 +155,34 @@ const MiniMonth = ({ year, month, days, isCurrentMonth, today }) => {
         {cells.map((day, idx) => {
           const info = day ? days[day] : null;
           const hasTooltip = info && TOOLTIP_STATUSES.includes(info.status);
+          const isDeletable = info && DELETABLE_STATUSES.includes(info.status);
           const isToday = isCurrentMonth && today === day;
+          const isSelected = isDeletable && selectedDay === day;
+
           return (
-            <div key={idx} className="relative group">
-              <div
-                className={`aspect-square rounded text-[10px] flex items-center justify-center border ${
+            <div key={`${year}-${month}-${day || idx}`} className="relative group">
+              <button
+                type="button"
+                disabled={!isDeletable}
+                onClick={() => isDeletable && onDayClick?.(day)}
+                className={`w-full aspect-square rounded text-[10px] flex items-center justify-center border ${
                   day
-                    ? dayCellClasses(info?.status, isToday, false)
+                    ? dayCellClasses(info?.status, isToday, isSelected)
                     : "border-transparent"
-                } ${hasTooltip ? "cursor-pointer" : "cursor-default"}`}
+                } ${isDeletable ? "cursor-pointer" : "cursor-default"}`}
               >
                 {day || ""}
-              </div>
+              </button>
+              {info?.isHalfDay && (
+                <span
+                  className="pointer-events-none absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full
+                    bg-white text-[7px] font-bold leading-none flex items-center justify-center
+                    border border-gray-400 text-gray-700"
+                  title="Half Day"
+                >
+                  ½
+                </span>
+              )}
               {hasTooltip && <DayTooltip info={info} />}
             </div>
           );
@@ -153,6 +193,16 @@ const MiniMonth = ({ year, month, days, isCurrentMonth, today }) => {
 };
 
 const MRCalendarView = ({ staff, onBack, onDeleted }) => {
+  const isRelieved = staff.status === "Relieving" && !!staff.relievingDate;
+  const relievingDateObj = isRelieved ? new Date(staff.relievingDate) : null;
+  const maxYear = relievingDateObj ? relievingDateObj.getFullYear() : null;
+  const maxMonth = relievingDateObj ? relievingDateObj.getMonth() : null;
+  const defaultCalendarDate = isRelieved ? staff.relievingDate : undefined;
+
+  const joinDateObj = staff.date ? new Date(staff.date) : null;
+  const minYear = joinDateObj ? joinDateObj.getFullYear() : null;
+  const minMonth = joinDateObj ? joinDateObj.getMonth() : null;
+
   const {
     viewMode,
     setViewMode,
@@ -166,12 +216,67 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     goToNextMonth,
     goToPrevYear,
     goToNextYear,
+    goToMonth,
+    goToYear,
     fetchCalendar,
-  } = useMRCalendar(staff.staffId);
+  } = useMRCalendar(staff.staffId, defaultCalendarDate);
+
+  const yearOptions = useMemo(() => {
+    const nowYear = new Date().getFullYear();
+    const all = Array.from({ length: 12 }, (_, i) => nowYear - 8 + i);
+    return all.filter(
+      (y) => (maxYear == null || y <= maxYear) && (minYear == null || y >= minYear),
+    );
+  }, [maxYear, minYear]);
+
+  const monthOptions = useMemo(() => {
+    return MONTHS.map((m, idx) => ({ m, idx })).filter(({ idx }) => {
+      if (maxYear != null && year === maxYear && idx > maxMonth) return false;
+      if (minYear != null && year === minYear && idx < minMonth) return false;
+      return true;
+    });
+  }, [year, maxYear, maxMonth, minYear, minMonth]);
+
+  const atMaxMonth = maxYear != null && year === maxYear && month === maxMonth;
+  const atMaxYear = maxYear != null && year >= maxYear;
+  const atMinMonth = minYear != null && year === minYear && month === minMonth;
+  const atMinYear = minYear != null && year <= minYear;
+
+  const handleNextMonth = () => {
+    if (atMaxMonth) return;
+    goToNextMonth();
+  };
+  const handleNextYear = () => {
+    if (atMaxYear) return;
+    goToNextYear();
+  };
+  const handlePrevMonth = () => {
+    if (atMinMonth) return;
+    goToPrevMonth();
+  };
+  const handlePrevYear = () => {
+    if (atMinYear) return;
+    goToPrevYear();
+  };
+
+  const visibleMonths = useMemo(() => {
+    if (!calendar?.months) return calendar?.months;
+    return calendar.months.filter((m) => {
+      if (isRelieved && year === maxYear && m.month > maxMonth) return false;
+      if (minYear != null && year === minYear && m.month < minMonth) return false;
+      return true;
+    });
+  }, [calendar, isRelieved, year, maxYear, maxMonth, minYear, minMonth]);
 
   const [openRecord, setOpenRecord] = useState(null);
   const [openRecordLoading, setOpenRecordLoading] = useState(true);
   const [signOutBusy, setSignOutBusy] = useState(false);
+  const [reconcileBusy, setReconcileBusy] = useState(false);
+
+  const [selectedAnnualCell, setSelectedAnnualCell] = useState(null);
+  useEffect(() => {
+    setSelectedAnnualCell(null);
+  }, [year, viewMode]);
 
   const loadOpenRecord = useCallback(async () => {
     if (!calendar?.attendanceUserId) {
@@ -188,7 +293,7 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
       );
       setOpenRecord(mine || null);
     } catch (err) {
-      // Silent — this is a supplementary widget, not the main calendar data.
+      // Silent
     } finally {
       setOpenRecordLoading(false);
     }
@@ -211,10 +316,7 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
       showToast("success", res.data?.message || "Updated");
       await loadOpenRecord();
     } catch (err) {
-      showToast(
-        "error",
-        err.response?.data?.message || "Failed to update permission",
-      );
+      showToast("error", err.response?.data?.message || "Failed to update permission");
     } finally {
       setSignOutBusy(false);
     }
@@ -233,29 +335,57 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
   const handleDayClick = (day) => {
     if (!day) return;
     const info = calendar.days[day];
-    if (!info || !["present", "half"].includes(info.status)) return;
+    if (!info || !DELETABLE_STATUSES.includes(info.status)) return;
     setSelectedDay(selectedDay === day ? null : day);
   };
 
+  const handleAnnualDayClick = (month, day) => {
+    if (!day) return;
+    setSelectedAnnualCell((prev) =>
+      prev && prev.month === month && prev.day === day
+        ? null
+        : { month, day },
+    );
+  };
+
   const handleDeleteAttendance = async () => {
-    if (!selectedDay) {
-      showToast(
-        "error",
-        "Click a Present/Half Day date on the calendar first, then delete it.",
-      );
+    const isAnnual = viewMode === "annual";
+    const info = isAnnual
+      ? selectedAnnualCell &&
+        calendar?.months?.[selectedAnnualCell.month]?.days?.[
+          selectedAnnualCell.day
+        ]
+      : selectedDay && calendar?.days?.[selectedDay];
+
+    if (!info) {
+      showToast("error", "Click a date on the calendar first, then delete it");
       return;
     }
     if (!calendar?.attendanceUserId) {
-      showToast(
-        "error",
-        "This Staff has no linked login account, so attendance can't be recorded or deleted.",
-      );
+      showToast("error", "This Staff has no linked login account, so attendance can't be recorded or deleted.");
       return;
     }
-    const info = calendar.days[selectedDay];
     await onDeleted(calendar.attendanceUserId, info.date);
     setSelectedDay(null);
+    setSelectedAnnualCell(null);
     fetchCalendar();
+  };
+
+  const handleFixSandwichLeave = async () => {
+    setReconcileBusy(true);
+    try {
+      const res = await attendanceService.reconcileSandwichLeave(staff.staffId);
+      const count = res.data?.created ?? 0;
+      showToast("success", count > 0
+        ? `Fixed ${count} day(s) — Sundays/holidays inside a leave range are now counted as leave.`
+        : "No sandwiched Sunday/holiday days found — nothing to fix."
+      );
+      await fetchCalendar();
+    } catch (err) {
+      showToast("error", err.response?.data?.message || "Failed to reconcile sandwich leave");
+    } finally {
+      setReconcileBusy(false);
+    }
   };
 
   return (
@@ -265,27 +395,37 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
           <Button variant="secondary" size="sm" onClick={onBack}>
             <ChevronLeft size={16} className="mr-1" /> Back to Staff List
           </Button>
-          <Button variant="danger" size="sm" onClick={handleDeleteAttendance}>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={handleDeleteAttendance}
+            title="Click a Present/Half Day/Leave date on the calendar below, then click here to delete it"
+          >
             <Trash2 size={16} className="mr-1" /> Delete Attendance
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleFixSandwichLeave}
+            disabled={reconcileBusy}
+            title="Bridge Sunday/holiday days that sit between two approved leaves but weren't counted as leave"
+          >
+            <ShieldCheck size={16} className="mr-1" />
+            {reconcileBusy ? "Fixing..." : "Fix Sandwiched Holidays"}
           </Button>
         </div>
         <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden">
           <button
             onClick={() => setViewMode("monthly")}
             className={`px-4 py-1.5 text-sm font-medium cursor-pointer ${
-              viewMode === "monthly"
-                ? "bg-blue-600 text-white"
-                : "bg-white text-gray-600 hover:bg-gray-50"
+              viewMode === "monthly" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
             }`}
           >
-            Monthly
-          </button>
+            Monthly          </button>
           <button
             onClick={() => setViewMode("annual")}
             className={`px-4 py-1.5 text-sm font-medium border-l border-gray-300 cursor-pointer ${
-              viewMode === "annual"
-                ? "bg-blue-600 text-white"
-                : "bg-white text-gray-600 hover:bg-gray-50"
+              viewMode === "annual" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
             }`}
           >
             Annual
@@ -298,23 +438,55 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
           <h3 className="text-lg font-bold text-gray-800">
             {staff.staffName} - Calendar View{" "}
             <span className="text-indigo-600 font-medium text-base">
-              (Unpaid: {calendar?.unpaidCount ?? 0}, Swap:{" "}
-              {calendar?.swapCount ?? 0})
+              (Paid: {calendar?.paidCount ?? 0}, Sick: {calendar?.sickCount ?? 0}, Casual: {calendar?.casualCount ?? 0},
+              Unpaid: {calendar?.unpaidCount ?? 0}, Swap: {calendar?.swapCount ?? 0})
+            </span>
+            <span className="block text-emerald-700 font-medium text-sm mt-1">
+              Total Working Days: {calendar?.totalWorkingDays ?? 0}{" "}
+              <span className="text-gray-400 font-normal">
+                (Days Elapsed: {calendar?.elapsedCalendarDays ?? 0} − Unpaid Leave: {calendar?.totalLeaveTaken ?? 0}; Present: {calendar?.presentCount ?? 0}
+                {calendar?.halfCount ? ` + Half Day: ${calendar.halfCount}` : ""})
+              </span>
             </span>
           </h3>
           <div className="flex items-center gap-2">
             <button
-              onClick={viewMode === "annual" ? goToPrevYear : goToPrevMonth}
-              className="p-2 rounded-full hover:bg-gray-100"
+              onClick={viewMode === "annual" ? handlePrevYear : handlePrevMonth}
+              disabled={viewMode === "annual" ? atMinYear : atMinMonth}
+              className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <ChevronLeft size={18} />
             </button>
-            <span className="font-semibold text-gray-700 w-28 text-center">
-              {viewMode === "annual" ? year : `${MONTHS[month]} ${year}`}
-            </span>
+
+            {viewMode === "monthly" && (
+              <select
+                value={month}
+                onChange={(e) => goToMonth(year, Number(e.target.value))}
+                className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                aria-label="Jump to month"
+              >
+                {monthOptions.map(({ m, idx }) => (
+                  <option key={m} value={idx}>{m}</option>
+                ))}
+              </select>
+            )}
+            <select
+              value={year}
+              onChange={(e) =>
+                viewMode === "annual" ? goToYear(Number(e.target.value)) : goToMonth(Number(e.target.value), month)
+              }
+              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+              aria-label="Jump to year"
+            >
+              {yearOptions.map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+
             <button
-              onClick={viewMode === "annual" ? goToNextYear : goToNextMonth}
-              className="p-2 rounded-full hover:bg-gray-100"
+              onClick={viewMode === "annual" ? handleNextYear : handleNextMonth}
+              disabled={viewMode === "annual" ? atMaxYear : atMaxMonth}
+              className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <ChevronRight size={18} />
             </button>
@@ -325,14 +497,16 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
           <Spinner />
         ) : viewMode === "annual" ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {calendar?.months?.map((m) => (
+            {visibleMonths?.map((m) => (
               <MiniMonth
-                key={m.month}
+                key={`${year}-${m.month}`}
                 year={year}
                 month={m.month}
                 days={m.days}
                 isCurrentMonth={m.isCurrentMonth}
                 today={m.today}
+                selectedDay={selectedAnnualCell?.month === m.month ? selectedAnnualCell.day : null}
+                onDayClick={(day) => handleAnnualDayClick(m.month, day)}
               />
             ))}
           </div>
@@ -340,35 +514,33 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
           <>
             <div className="grid grid-cols-7 gap-2 text-center text-sm font-medium text-gray-500 mb-2">
               {SHORT_DAYS.map((d) => (
-                <div key={d} className={d === "Sun" ? "text-red-500" : ""}>
-                  {d}
-                </div>
+                <div key={d} className={d === "Sun" ? "text-red-500" : ""}>{d}</div>
               ))}
             </div>
             <div className="grid grid-cols-7 gap-2">
               {cells.map((day, idx) => {
                 const info = day ? calendar.days[day] : null;
-                const isToday =
-                  calendar?.isCurrentMonth && calendar?.today === day;
-                const hasTooltip =
-                  info && TOOLTIP_STATUSES.includes(info.status);
+                const isToday = calendar?.isCurrentMonth && calendar?.today === day;
+                const hasTooltip = info && TOOLTIP_STATUSES.includes(info.status);
                 return (
-                  <div key={idx} className="relative group">
+                  <div key={`${year}-${month}-${day || idx}`} className="relative group">
                     <button
                       onClick={() => handleDayClick(day)}
                       disabled={!day}
                       className={`w-full min-h-[52px] rounded-lg border font-medium text-sm transition-colors ${
-                        day
-                          ? dayCellClasses(
-                              info?.status,
-                              isToday,
-                              selectedDay === day,
-                            )
-                          : "border-transparent"
+                        day ? dayCellClasses(info?.status, isToday, selectedDay === day) : "border-transparent"
                       } ${hasTooltip ? "cursor-pointer" : "cursor-default"}`}
                     >
                       {day || ""}
                     </button>
+                    {info?.isHalfDay && (
+                      <span
+                        className="pointer-events-none absolute top-1 right-1 w-4 h-4 rounded-full bg-white text-[9px] font-bold leading-none flex items-center justify-center border border-gray-400 text-gray-700"
+                        title="Half Day"
+                      >
+                        ½
+                      </span>
+                    )}
                     {hasTooltip && <DayTooltip info={info} />}
                   </div>
                 );

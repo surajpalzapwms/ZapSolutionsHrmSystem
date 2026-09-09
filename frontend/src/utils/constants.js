@@ -60,7 +60,7 @@ export const ITEMS_PER_PAGE = {
 };
 
 export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
-console.log('values of BACKEND_URL', BACKEND_URL);
+
 
 export const MONTHS = [
   "January", "February", "March", "April", "May", "June",

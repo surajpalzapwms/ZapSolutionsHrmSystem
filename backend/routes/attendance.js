@@ -5,6 +5,7 @@ import { protect,allowAdminOnly } from "../middleware/auth.js";
 import { validateRequest } from "../middleware/auth.js";
 import { bulkOperationLimiter, writeOperationLimiter } from "../middleware/rateLimiter.js";
 
+
 import {
   getAllAttendance,
   getTodayAttendance,
@@ -14,6 +15,7 @@ import {
   updateAttendance,
   deleteAttendance,
   importAttendance,
+  getMyMonthCalendar,
   getAttendanceSummary,
 } from "../controllers/attendance.js";
 
@@ -25,6 +27,16 @@ const router = express.Router();
 // member; lock these down further with a "self or admin" check in
 // getAllAttendance if employees should only see their own records.
 router.use(protect);
+
+router.get(
+  "/me/month",
+  [
+    query("year").isInt({ min: 2000, max: 2100 }).withMessage("Valid year is required"),
+    query("month").isInt({ min: 1, max: 12 }).withMessage("Valid month (1-12) is required"),
+  ],
+  validateRequest,
+  getMyMonthCalendar,
+);
 
 router.get(
   "/",

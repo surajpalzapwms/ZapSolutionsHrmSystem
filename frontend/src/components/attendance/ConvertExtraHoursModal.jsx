@@ -14,7 +14,10 @@ const validate = (form) => {
   const errors = {};
   if (!validateRequired(form.userId)) errors.userId = "Please select an MR";
   if (!validateRequired(form.date)) errors.date = "Date is required";
-  if (!form.leaveDays || Number(form.leaveDays) < 1) errors.leaveDays = "Enter at least 1 day";
+  if (!form.leaveDays || Number(form.leaveDays) < 0.5)
+    errors.leaveDays = "Enter at least 0.5 day";
+  else if (Math.round(Number(form.leaveDays) * 2) !== Number(form.leaveDays) * 2)
+    errors.leaveDays = "Enter in steps of 0.5 (e.g. 0.5, 1, 1.5, 2)";
   return errors;
 };
 
@@ -50,6 +53,7 @@ const ConvertExtraHoursModal = ({ isOpen, onClose, onSubmit, staffOptions = [] }
       <form onSubmit={handleSubmit} className="space-y-4">
         <p className="text-sm text-gray-500">
           Every 8 hours of accumulated extra time converts into 1 day of swap leave.
+          You can enter a half-day amount too (e.g. 1.5).
         </p>
         <Dropdown
           label="Staff"
@@ -72,7 +76,8 @@ const ConvertExtraHoursModal = ({ isOpen, onClose, onSubmit, staffOptions = [] }
           label="Number of Days"
           name="leaveDays"
           type="number"
-          min={1}
+          min={0.5}
+          step={0.5}
           value={form.leaveDays}
           onChange={(e) => setField("leaveDays", e.target.value)}
           error={errors.leaveDays}

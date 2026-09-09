@@ -4,6 +4,7 @@ import StaffBasicPayroll from "../models/StaffBasicPayroll.js";
 import StaffAdvance from "../models/StaffAdvance.js";
 import Attendance from "../models/Attendance.js";
 import Leave from "../models/Leave.js";
+import User from "../models/User.js";
 
 export class PayrollService {
   static async calculateSalary(employeeId, period, session = null) {
@@ -48,7 +49,54 @@ export class PayrollService {
           }).session(session)
         : [];
 
-    const unpaidLeaveDays = leaves.length;
+    // Attendance.userId points at the login User account, not the Staff
+    // doc, so absent/half-day marks recorded there wouldn't be found by
+    // filtering on employeeId directly — resolve the linked User first.
+    const dateKey = (d) => {
+      const dt = new Date(d);
+      return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    };
+
+    // Previously, payroll only looked at approved unpaid Leave records and
+    // ignored the Attendance collection entirely — a day marked "absent" or
+    // "half day" via attendance (self-service, admin entry, or Excel import)
+    // never reduced pay unless someone *also* filed a matching Leave record.
+    // Now: merge unpaid-leave days with Attendance absent/half-day marks by
+    // calendar date so each day is deducted once, using whichever source
+    // has a stronger claim on it (a Leave record — explicit reason/approval
+    // — takes precedence over a same-day Attendance mark).
+    const deductionByDate = new Map();
+    // Use the leave's actual dayValue (0.5 for a half-day unpaid leave)
+    // instead of always charging a full day — `?? 1` covers records saved
+    // before dayValue existed.
+    leaves.forEach((l) =>
+      deductionByDate.set(dateKey(l.leaveDate), l.dayValue ?? 1),
+    );
+
+    if (payableDays > 0) {
+      const staffUser = await User.findOne({ email: employee.email })
+        .select("_id")
+        .session(session);
+      if (staffUser) {
+        const attendanceRecords = await Attendance.find({
+          userId: staffUser._id,
+          loginTime: { $gte: startDate, $lte: endDate },
+          $or: [{ status: "absent" }, { attendanceType: "half" }],
+        }).session(session);
+
+        attendanceRecords.forEach((rec) => {
+          const key = rec.date || dateKey(rec.loginTime);
+          if (deductionByDate.has(key)) return; // Leave record already covers this day
+          if (rec.status === "absent") deductionByDate.set(key, 1);
+          else if (rec.attendanceType === "half") deductionByDate.set(key, 0.5);
+        });
+      }
+    }
+
+    const unpaidLeaveDays = [...deductionByDate.values()].reduce(
+      (sum, d) => sum + d,
+      0,
+    );
     const leaveDeduction = unpaidLeaveDays * perDaySalary;
     const effectiveDays = Math.max(0, payableDays - unpaidLeaveDays);
     const netSalary = Math.max(0, perDaySalary * effectiveDays);

@@ -241,7 +241,9 @@ const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView }) => {
 
 const HolidayCalendar = ({ holidays, onView }) => {
   const today = useMemo(() => new Date(), []);
-  const [mode, setMode] = useState("monthly"); // "monthly" | "annual"
+  // Default to the annual view so the Holiday tab shows the whole year's
+  // holidays at a glance; the user can still switch to Monthly.
+  const [mode, setMode] = useState("annual"); // "monthly" | "annual"
   const [current, setCurrent] = useState(new Date());
   const [year, setYear] = useState(new Date().getFullYear());
   const [saturdayHolidays, setSaturdayHolidays] = useState([]);

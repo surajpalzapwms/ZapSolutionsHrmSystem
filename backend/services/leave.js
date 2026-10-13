@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 import Attendance from "../models/Attendance.js";
 import Leave from "../models/Leave.js";
 import Holiday from "../models/holiday.js";
-import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
+import SaturdayHolidayRule, {
+  SATURDAY_RULE_EFFECTIVE_FROM,
+} from "../models/saturdayHolidayRule.js";
 import Staff from "../models/Staff.js";
 import User from "../models/User.js";
 
@@ -268,6 +270,113 @@ export const getLeaveRangeFromDate = (dateObj) => {
   };
 };
 
+// isHolidayOrSunday is called once PER CALENDAR DAY by several range-walking
+// self-heal routines in services/leaveAutomation.js (e.g.
+// reconcileSandwichLeaveForRange loops every day of a ~1-year padded range).
+// Each call was previously a fresh Holiday.findOne (+ a SaturdayHolidayRule
+// query on Saturdays), awaited one day at a time — 350-400+ sequential DB
+// round trips on every single "My Attendance" / staff calendar page load,
+// which is the actual cause of the slow calendar load. Holidays and
+// Saturday-holiday rules are admin-managed and change rarely, so a short
+// in-memory cache keyed by calendar day removes nearly all of that DB
+// traffic (repeat lookups for the same day, which happen constantly across
+// the several self-heal passes run per calendar request, are served from
+// memory) without changing behavior — a holiday edit is visible to new
+// requests within CACHE_TTL_MS.
+const holidayCheckCache = new Map(); // "YYYY-MM-DD" -> { result, expiresAt }
+const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+// Call after any Holiday or SaturdayHolidayRule create/update/delete so an
+// admin's change is reflected immediately instead of waiting out the TTL.
+export const invalidateHolidayCheckCache = () => holidayCheckCache.clear();
+
+// ─── Holiday-window preload ────────────────────────────────────────────────
+// The cache above only helps once a day has actually been looked up once.
+// Several self-heal routines in services/leaveAutomation.js (reconciling
+// sandwich leave, cleaning up invalid leave, etc.) walk a calendar range
+// day-by-day and call isHolidayOrSunday for EVERY day in it — for a staff
+// member's Annual View that's 400+ *unique* days on a cold cache (first
+// load, or any load more than CACHE_TTL_MS after the last one), each one
+// previously triggering its own Holiday.findOne (+ a SaturdayHolidayRule
+// lookup on Saturdays), awaited one at a time. That's 400+ sequential DB
+// round trips on a single page load — the actual cause of the slow render.
+//
+// warmHolidayWindow fetches everything the whole range could possibly need
+// in a small, FIXED number of range queries (one for Holiday, one per
+// spanned year for SaturdayHolidayRule) and pre-fills holidayCheckCache for
+// every day in the range from that in-memory data. Any range-walking caller
+// that calls this once up front (see buildStaffCalendarPayload) turns its
+// day-by-day lookups into pure Map reads — no behavior change, since
+// computeIsHolidayOrSunday's actual holiday/Saturday-rule logic is
+// untouched; only where the underlying data comes from changes.
+export const warmHolidayWindow = async (fromDate, toDate) => {
+  const start = new Date(fromDate);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(toDate);
+  end.setUTCHours(23, 59, 59, 999);
+  if (end < start) return;
+
+  const years = [];
+  for (let y = start.getUTCFullYear(); y <= end.getUTCFullYear(); y++) years.push(y);
+
+  const [holidays, ...ruleSets] = await Promise.all([
+    Holiday.find({
+      enabled: true,
+      startDate: { $lte: end },
+      endDate: { $gte: start },
+    })
+      .select("name startDate endDate")
+      .lean(),
+    ...years.map((year) => SaturdayHolidayRule.find({ year }).lean()),
+  ]);
+
+  const rulesByYearMonth = new Map();
+  ruleSets.flat().forEach((r) => rulesByYearMonth.set(`${r.year}-${r.month}`, r.occurrences || []));
+
+  const expiresAt = Date.now() + CACHE_TTL_MS;
+  for (
+    let cursor = new Date(start);
+    cursor <= end;
+    cursor = new Date(cursor.getTime() + 86400000)
+  ) {
+    const istDate = toIST(cursor);
+    const cacheKey = istDate.toISOString().slice(0, 10);
+    // Don't clobber a value someone else already cached for this exact day
+    // (e.g. an overlapping in-flight request) — first one in wins, same as
+    // before; this is purely a bulk pre-fill, not a source of truth change.
+    if (holidayCheckCache.has(cacheKey)) continue;
+
+    let result;
+    if (istDate.getUTCDay() === 0) {
+      result = { isHoliday: true, reason: "Sunday" };
+    } else {
+      const s = new Date(cursor);
+      s.setUTCHours(0, 0, 0, 0);
+      const e = new Date(cursor);
+      e.setUTCHours(23, 59, 59, 999);
+      const holiday = holidays.find(
+        (h) => new Date(h.startDate) <= e && new Date(h.endDate) >= s,
+      );
+      if (holiday) {
+        result = { isHoliday: true, reason: holiday.name };
+      } else if (istDate.getUTCDay() === 6) {
+        const occurrence = SaturdayHolidayRule.getOccurrenceOfDate(cursor);
+        const occurrences =
+          occurrence && cursor >= SATURDAY_RULE_EFFECTIVE_FROM
+            ? rulesByYearMonth.get(`${cursor.getUTCFullYear()}-${cursor.getUTCMonth() + 1}`) || []
+            : [];
+        result =
+          occurrence && occurrences.includes(occurrence)
+            ? { isHoliday: true, reason: SATURDAY_ORDINAL[occurrence] || "Saturday holiday" }
+            : { isHoliday: false, reason: null };
+      } else {
+        result = { isHoliday: false, reason: null };
+      }
+    }
+    holidayCheckCache.set(cacheKey, { result, expiresAt });
+  }
+};
+
 export const isHolidayOrSunday = async (date) => {
   const checkDate = new Date(date);
   // Use the IST calendar day-of-week, not the server's local/UTC day —
@@ -275,11 +384,32 @@ export const isHolidayOrSunday = async (date) => {
   // check is wrong for roughly 5.5 hours around every IST midnight (e.g. it
   // would treat early Monday-IST hours as still Sunday and block sign-in).
   const istDate = toIST(checkDate);
+
+  const cacheKey = istDate.toISOString().slice(0, 10);
+  const cached = holidayCheckCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
+
+  const result = await computeIsHolidayOrSunday(checkDate, istDate);
+  holidayCheckCache.set(cacheKey, { result, expiresAt: Date.now() + CACHE_TTL_MS });
+  return result;
+};
+
+const computeIsHolidayOrSunday = async (checkDate, istDate) => {
   if (istDate.getUTCDay() === 0) return { isHoliday: true, reason: "Sunday" };
-  const s = new Date(checkDate);
-  s.setUTCHours(0, 0, 0, 0);
-  const e = new Date(checkDate);
-  e.setUTCHours(23, 59, 59, 999);
+  // BUGFIX: the day window must be the INDIA calendar day — the same day
+  // the result is cached under (cacheKey above). It used to be the UTC day
+  // of `checkDate`, so a check made between 00:00 and 05:30 IST (e.g. the
+  // midnight absence job, or a date saved as IST midnight = 18:30 UTC the
+  // day before) looked up YESTERDAY's holiday and cached that answer as
+  // today's. A holiday could then be treated as a normal working day for
+  // the rest of the cache lifetime, and payroll deducted it as absent
+  // ("all present, but ₹29,000 instead of ₹30,000").
+  const s = new Date(
+    Date.UTC(istDate.getUTCFullYear(), istDate.getUTCMonth(), istDate.getUTCDate()),
+  );
+  const e = new Date(s.getTime() + 86400000 - 1);
   // Match any day WITHIN a declared holiday's startDate..endDate span, not
   // just a day that happens to equal startDate exactly — the previous
   // `startDate: { $gte: s, $lte: e }` (plus a `date` field the Holiday
@@ -298,7 +428,7 @@ export const isHolidayOrSunday = async (date) => {
 
   if (istDate.getUTCDay() === 6) {
     const { isHoliday: isSaturdayHoliday, occurrence } =
-      await SaturdayHolidayRule.isSaturdayHoliday(checkDate);
+      await SaturdayHolidayRule.isSaturdayHoliday(s);
     if (isSaturdayHoliday) {
       return {
         isHoliday: true,
@@ -366,7 +496,13 @@ export const calculateExtraHoursSummary = async (userId) => {
       userId,
       logoutTime: { $exists: true },
       isLeaveDay: { $ne: true },
-    }).sort({ loginTime: -1 });
+    })
+      // PERFORMANCE: only the fields used below, as plain objects — this
+      // runs once per staff member on every Staff List load, over their
+      // entire attendance history, so full Mongoose documents were costly.
+      .select("loginTime logoutTime extraHoursInMinutes totalTime attendanceType")
+      .sort({ loginTime: -1 })
+      .lean();
     let totalExtraMinutes = 0,
       totalWorkedMinutes = 0;
     const recordsWithExtra = [];
@@ -518,38 +654,45 @@ export const findExistingAttendance = async (
     dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   }
 
+  const applySession = (q) => (session ? q.session(session) : q);
+
+  // Primary, unambiguous check: every record created since the `date`
+  // field was added (see models/Attendance.js) carries the exact IST
+  // calendar day it belongs to, set once at creation time. Matching on it
+  // directly can never confuse two different days with each other.
+  const byDateField = await applySession(
+    Attendance.findOne({ userId, date: dateStr }),
+  );
+  if (byDateField) return byDateField;
+
+  // Legacy fallback, for older records saved before the `date` field
+  // existed. Only records that still lack a `date` are considered here —
+  // a record for an adjacent day now always carries its own correct
+  // `date` and so can never be mismatched onto this one just because its
+  // loginTime happens to fall inside the padded lookup window. Only the
+  // IST calendar day is checked (the app's single source of truth for
+  // "which day" an attendance record belongs to everywhere else) instead
+  // of also checking the raw UTC day and the server's local timezone,
+  // either of which could disagree with IST and match the wrong day.
   const { year, month, day } = parseDateString(dateStr);
   const { start, end } = getWideDayRange(dateStr);
-
-  const applySession = (q) => (session ? q.session(session) : q);
-  const candidates = await applySession(
-    Attendance.find({ userId, loginTime: { $gte: start, $lte: end } }),
-  );
-
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+  const candidates = await applySession(
+    Attendance.find({
+      userId,
+      $or: [{ date: { $exists: false } }, { date: null }, { date: "" }],
+      loginTime: { $gte: start, $lte: end },
+    }),
+  );
 
   for (const rec of candidates) {
     const login = new Date(rec.loginTime);
-
-    if (
-      login.getUTCFullYear() === year &&
-      login.getUTCMonth() + 1 === month &&
-      login.getUTCDate() === day
-    )
-      return rec;
-
     const ist = new Date(login.getTime() + IST_OFFSET_MS);
     if (
       ist.getUTCFullYear() === year &&
       ist.getUTCMonth() + 1 === month &&
       ist.getUTCDate() === day
-    )
-      return rec;
-
-    if (
-      login.getFullYear() === year &&
-      login.getMonth() + 1 === month &&
-      login.getDate() === day
     )
       return rec;
   }
@@ -599,37 +742,26 @@ export const findExistingLeave = async (userId, dateStr, session = null) => {
   return null;
 };
 
-// ─── Paid leaves available in the current calendar year (1 day/month) ────────
-export const getAvailablePaidLeaves = async (userId, joinDate) => {
-  if (!joinDate) return 0;
-  const today = new Date();
-  const currentYear = today.getFullYear();
-  const join = new Date(joinDate);
-
-  let startMonth = join.getFullYear() === currentYear ? join.getMonth() : 0;
-  const currentMonth = today.getMonth();
-  let monthsWorked = currentMonth - startMonth + 1;
-  if (monthsWorked < 0) monthsWorked = 0;
-  const totalEligible = monthsWorked;
-
-  const startOfYear = new Date(Date.UTC(currentYear, 0, 1, 0, 0, 0, 0));
-  const endOfYear = new Date(Date.UTC(currentYear, 11, 31, 23, 59, 59, 999));
-  const takenPaidLeaves = await Leave.countDocuments({
-    userId,
-    leaveType: "paid",
-    status: "approved",
-    leaveDate: { $gte: startOfYear, $lte: endOfYear },
-  });
-
-  return Math.max(0, totalEligible - takenPaidLeaves);
-};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data-access / orchestration functions used directly by the controller
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getAllAttendance = async () => {
-  const records = await Attendance.find().sort({ loginTime: -1 }).lean();
+// Optional { from, to } ("YYYY-MM-DD", IST calendar days, inclusive) narrow
+// the query to a date window. Without them every record ever saved is
+// returned (old behaviour) — which grows forever, so callers like the
+// dashboard should pass a range.
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const getAllAttendance = async ({ from, to } = {}) => {
+  const filter = {};
+  if (DAY_RE.test(from || "") || DAY_RE.test(to || "")) {
+    filter.loginTime = {};
+    if (DAY_RE.test(from || ""))
+      filter.loginTime.$gte = new Date(`${from}T00:00:00.000+05:30`);
+    if (DAY_RE.test(to || ""))
+      filter.loginTime.$lte = new Date(`${to}T23:59:59.999+05:30`);
+  }
+  const records = await Attendance.find(filter).sort({ loginTime: -1 }).lean();
   if (records.length === 0) return records;
 
   // Attendance.userId points at the login User account, which is a separate
@@ -670,16 +802,146 @@ export const getAttendanceForDay = async (dateInput) => {
   return Attendance.find({ loginTime: { $gte: start, $lte: end } });
 };
 
-export const getHolidays = () => Holiday.find().sort({ date: 1 });
+// Holiday has no `date` field — sort by startDate (the old sort on `date`
+// was a no-op). .lean() returns plain objects, which is much faster to
+// build and serialise than full Mongoose documents for read-only lists.
+export const getHolidays = () => Holiday.find().sort({ startDate: 1 }).lean();
 
-export const getLeaves = ({ leaveType, status } = {}) => {
+// Leave.leaveDate is stored as UTC midnight of the calendar day.
+export const getLeaves = ({ leaveType, status, from, to } = {}) => {
   const filter = {};
   if (leaveType) filter.leaveType = leaveType;
   if (status) filter.status = status;
-  return Leave.find(filter).sort({ leaveDate: -1 });
+  if (DAY_RE.test(from || "") || DAY_RE.test(to || "")) {
+    filter.leaveDate = {};
+    if (DAY_RE.test(from || ""))
+      filter.leaveDate.$gte = new Date(`${from}T00:00:00.000Z`);
+    if (DAY_RE.test(to || ""))
+      filter.leaveDate.$lte = new Date(`${to}T23:59:59.999Z`);
+  }
+  return Leave.find(filter).sort({ leaveDate: -1 }).lean();
 };
 
 export const getStaffById = (userId) => Staff.findById(userId).lean();
+
+// ─── Probation / confirmation gating ──────────────────────────────────────
+// A staff member should not be able to apply for ANY leave type (paid,
+// unpaid, sick, casual, or swap) until their probation period is over and
+// they've actually been confirmed. e.g. joining 1 Nov 2025 with a 3-month
+// probation means leave only becomes applicable from 1 Feb 2026 onward.
+//
+// Mirrors the same joining-date + months calculation staffController.js
+// uses to auto-flip a staff member from "Probation" to "Confirmation"
+// (see calculateConfirmationDate/getAutoConfirmUpdate there) — kept here so
+// the leave-apply endpoints can reuse it without importing a controller.
+const addMonthsToDate = (dateInput, months) => {
+  if (!dateInput || !months) return null;
+  const d = new Date(dateInput);
+  if (isNaN(d.getTime())) return null;
+  d.setMonth(d.getMonth() + months);
+  return d;
+};
+
+// Staff lifecycle is Internship -> Probation -> Confirmation. Probation (and
+// so confirmation) counts from the day AFTER the internship ends. Staff with
+// no internship on record still count from their joining date, as before.
+const getProbationStartDate = (staff) => {
+  if (staff.internshipEndDate) {
+    const d = new Date(staff.internshipEndDate);
+    if (!isNaN(d.getTime())) {
+      d.setDate(d.getDate() + 1);
+      return d;
+    }
+  }
+  // Currently an intern but the end date was never stored — derive it.
+  if (staff.status === "Internship" && staff.date && staff.internshipMonths) {
+    return addMonthsToDate(staff.date, staff.internshipMonths);
+  }
+  return staff.date ? new Date(staff.date) : null;
+};
+
+/**
+ * Returns the effective confirmation date for a staff member — the date on
+ * or after which they're allowed to apply for leave — or null if it can't
+ * be determined (no joining date on file, in which case the check is
+ * skipped rather than blocking everyone).
+ *
+ * Uses whatever confirmationDate is already stored, falling back to
+ * probation start date (the day after the internship ends, or the joining
+ * date when there was no internship) + confirmationMonths (or
+ * probationMonths, or a default of 3 months) — the exact same fallback chain getAutoConfirmUpdate() in
+ * staffController.js uses, so this always agrees with what the staff
+ * record's own status/confirmationDate will eventually show.
+ */
+export const getEffectiveConfirmationDate = (staff) => {
+  if (!staff) return null;
+  if (staff.confirmationDate) return new Date(staff.confirmationDate);
+  const probationStart = getProbationStartDate(staff);
+  if (!probationStart) return null;
+  return addMonthsToDate(
+    probationStart,
+    staff.confirmationMonths || staff.probationMonths || 3,
+  );
+};
+
+/**
+ * Throws-free check: returns null if `checkDate` is on/after the staff
+ * member's confirmation date (leave is allowed), or a ready-to-use error
+ * message string if it falls before that date (still on probation).
+ * `checkDate` should be a Date/parsable date for the specific leave day
+ * being validated.
+ */
+export const getProbationLeaveBlockMessage = (staff, checkDate) => {
+  const confirmationDate = getEffectiveConfirmationDate(staff);
+  if (!confirmationDate) return null; // no joining date on file — don't block
+
+  // Compare India (IST) calendar days, not server-local midnights. A
+  // confirmation date saved as "2026-08-19T18:30:00Z" is 20 Aug in India;
+  // the old setHours(0) comparison on a UTC server read it as 19 Aug and
+  // let 19 Aug through as "confirmed".
+  if (istDayKey(checkDate) >= istDayKey(confirmationDate)) return null;
+
+  const formatted = new Date(confirmationDate).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  });
+  return `Leave cannot be applied during internship or probation. This staff member becomes eligible for leave from ${formatted} onward (after confirmation).`;
+};
+
+/**
+ * Returns true if `checkDate` falls strictly before the staff member's
+ * effective confirmation date (still on probation), false otherwise
+ * (confirmed, or no joining date on file to determine probation from).
+ *
+ * Before confirmation there is NO Paid / Sick / Casual entitlement, so any
+ * leave on such a day must be Unpaid.
+ */
+export const isBeforeConfirmation = (staff, checkDate) => {
+  const confirmationDate = getEffectiveConfirmationDate(staff);
+  if (!confirmationDate) return false; // no joining date on file — don't restrict
+  return istDayKey(checkDate) < istDayKey(confirmationDate);
+};
+
+// "YYYY-MM-DD" of the India calendar day a Date / date string falls on.
+// A plain "YYYY-MM-DD" string is returned as-is.
+export const istDayKey = (value) => {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const ist = new Date(new Date(value).getTime() + 5.5 * 60 * 60 * 1000);
+  return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    ist.getUTCDate(),
+  ).padStart(2, "0")}`;
+};
+
+// Which calendar day an Attendance record belongs to. Every record saved
+// since the `date` field was added carries the exact IST day; older ones
+// fall back to the IST day of loginTime. NEVER use loginTime's UTC day —
+// a Half Day / Absent marker is stored with a login of 00:00 IST, which is
+// 18:30 UTC on the PREVIOUS day (6 Aug half day showed up on 5 Aug).
+export const attendanceDayKey = (rec) =>
+  (rec?.date && /^\d{4}-\d{2}-\d{2}$/.test(rec.date) ? rec.date : null) ||
+  istDayKey(rec.loginTime);
 
 export const getUserAttendanceRange = (userId, startDate, endDate) => {
   const query = { userId };
@@ -875,16 +1137,6 @@ export const UNWORKED_SATURDAY_HOLIDAY_EFFECTIVE_FROM = new Date(
 
 export const isUnworkedSaturdayHoliday = (dateObj) =>
   dateObj.getUTCDay() === 6 && dateObj >= UNWORKED_SATURDAY_HOLIDAY_EFFECTIVE_FROM;
-
-/** The signed-in-but-not-yet-signed-out record for this user, if any. */
-export const findOpenAttendance = (userId) =>
-  Attendance.findOne({
-    userId,
-    loginTime: { $exists: true },
-    logoutTime: { $exists: false },
-  }).sort({
-    loginTime: -1,
-  });
 
 // ── Deterministic (non-heuristic) lookups used by self sign-in/out ─────────
 // findExistingAttendance() above re-derives "which calendar day is this

@@ -7,6 +7,7 @@ import { bulkOperationLimiter, writeOperationLimiter } from "../middleware/rateL
 import {
   getAllAdvances,
   getAdvanceById,
+  getOutstandingAdvance,
   createAdvance,
   updateAdvance,
   updateAdvanceStatus,
@@ -26,11 +27,17 @@ const advanceBodyRules = [
   body("amount").isFloat({ gt: 0 }).withMessage("amount must be a positive number"),
   body("date").isISO8601().withMessage("A valid date is required"),
   body("reason").optional().trim().isLength({ max: 250 }),
-  body("remarks").optional().trim().isLength({ max: 500 }),
   body("sourceAccountId").optional().isMongoId().withMessage("Invalid sourceAccountId"),
 ];
 
 router.get("/", getAllAdvances);
+
+router.get(
+  "/outstanding/:employeeId",
+  [param("employeeId").isMongoId().withMessage("Invalid employeeId")],
+  validateRequest,
+  getOutstandingAdvance,
+);
 
 router.get(
   "/:id",
@@ -83,7 +90,6 @@ router.put(
     body("amount").optional().isFloat({ gt: 0 }),
     body("date").optional().isISO8601(),
     body("reason").optional().trim().isLength({ max: 250 }),
-    body("remarks").optional().trim().isLength({ max: 500 }),
   ],
   validateRequest,
   updateAdvance,

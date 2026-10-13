@@ -6,7 +6,6 @@ const expenseCategorySchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      unique: true,
     },
     isDefault: {
       type: Boolean,
@@ -17,8 +16,6 @@ const expenseCategorySchema = new mongoose.Schema(
     timestamps: true,
   }
 );
-
-expenseCategorySchema.index({ name: 1 }, { unique: true });
 
 // Categories the app should always offer out of the box. Seeded once, the
 // first time anything touches this collection, so a brand-new install
@@ -38,6 +35,8 @@ expenseCategorySchema.statics.ensureDefaults = async function () {
     DEFAULT_CATEGORY_NAMES.map((name) => ({ name, isDefault: true }))
   );
 };
+
+expenseCategorySchema.index({ name: 1 }, { unique: true });
 
 const ExpenseCategory = mongoose.model("ExpenseCategory", expenseCategorySchema);
 export default ExpenseCategory;

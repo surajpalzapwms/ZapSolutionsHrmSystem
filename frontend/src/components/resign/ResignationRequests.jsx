@@ -13,6 +13,7 @@ import Button from "../common/Button";
 import Spinner from "../common/Spinner";
 import { resignationService } from "../../services/resignationService";
 import { showToast } from "../../utils/toast";
+import { refreshSidebarCounts } from "../../hooks/useSidebarCounts";
 
 // Same badge styling as the staff self-service screen (Myresignation.jsx)
 // so a request looks identical whether the staff member or an admin is
@@ -94,6 +95,7 @@ const ResignationRequests = () => {
       await resignationService.approve(r._id);
       showToast("success", `${getStaffName(r)}'s resignation approved`);
       await fetchAll();
+      refreshSidebarCounts();
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to approve request");
     } finally {
@@ -107,6 +109,7 @@ const ResignationRequests = () => {
       await resignationService.reject(r._id);
       showToast("success", `${getStaffName(r)}'s resignation rejected`);
       await fetchAll();
+      refreshSidebarCounts();
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to reject request");
     } finally {

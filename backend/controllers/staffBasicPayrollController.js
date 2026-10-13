@@ -174,11 +174,22 @@ export const addSalaryRevision = asyncHandler(async (req, res) => {
 
   const newEffectiveFrom = new Date(effectiveFrom);
 
-  record.salaryHistory.push({
-    basicSalary: Number(basicSalary),
-    effectiveFrom: newEffectiveFrom,
-    remarks: remarks || "",
-  });
+  // If a revision already exists for this exact effective date, correct it
+  // in place instead of pushing a duplicate entry (which would otherwise
+  // show the same date twice in the history list).
+  const sameDateEntry = record.salaryHistory.find(
+    (h) => new Date(h.effectiveFrom).toDateString() === newEffectiveFrom.toDateString(),
+  );
+  if (sameDateEntry) {
+    sameDateEntry.basicSalary = Number(basicSalary);
+    if (remarks !== undefined) sameDateEntry.remarks = remarks;
+  } else {
+    record.salaryHistory.push({
+      basicSalary: Number(basicSalary),
+      effectiveFrom: newEffectiveFrom,
+      remarks: remarks || "",
+    });
+  }
 
   // Keep the "current" fields pointing at whichever revision has the
   // latest effectiveFrom date (handles back-dated / future-dated entries).
@@ -198,6 +209,92 @@ export const addSalaryRevision = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: "Salary revision added successfully",
+    data: flatten(populated),
+  });
+});
+
+/** PUT /api/hrm/staff-basic-payrolls/:id/salary/:historyId — edit one existing salary revision entry */
+export const updateSalaryRevision = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  if (!mongoose.Types.ObjectId.isValid(req.params.historyId)) {
+    throw new ApiError(400, "Invalid salary revision ID");
+  }
+  const { basicSalary, effectiveFrom, remarks } = req.body;
+
+  if (basicSalary === undefined || Number(basicSalary) < 0) {
+    throw new ApiError(400, "A valid basicSalary is required");
+  }
+  if (!effectiveFrom || isNaN(new Date(effectiveFrom).getTime())) {
+    throw new ApiError(400, "A valid effectiveFrom date is required");
+  }
+
+  const record = await StaffBasicPayroll.findById(req.params.id);
+  if (!record) throw new ApiError(404, "Staff basic payroll record not found");
+
+  const entry = record.salaryHistory.id(req.params.historyId);
+  if (!entry) throw new ApiError(404, "Salary revision not found");
+
+  entry.basicSalary = Number(basicSalary);
+  entry.effectiveFrom = new Date(effectiveFrom);
+  if (remarks !== undefined) entry.remarks = remarks;
+
+  // Keep the "current" fields pointing at whichever revision now has the
+  // latest effectiveFrom date, same as addSalaryRevision does.
+  const latest = record.salaryHistory.reduce((a, b) =>
+    new Date(b.effectiveFrom) >= new Date(a.effectiveFrom) ? b : a,
+  );
+  record.currentBasicSalary = latest.basicSalary;
+  record.currentEffectiveFrom = latest.effectiveFrom;
+
+  await record.save();
+
+  const populated = await StaffBasicPayroll.findById(record._id)
+    .populate("employeeId", "staffName email projectName staffId")
+    .lean();
+
+  res.json({
+    success: true,
+    message: "Salary revision updated successfully",
+    data: flatten(populated),
+  });
+});
+
+/** DELETE /api/hrm/staff-basic-payrolls/:id/salary/:historyId — remove one salary revision entry */
+export const deleteSalaryRevision = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  if (!mongoose.Types.ObjectId.isValid(req.params.historyId)) {
+    throw new ApiError(400, "Invalid salary revision ID");
+  }
+
+  const record = await StaffBasicPayroll.findById(req.params.id);
+  if (!record) throw new ApiError(404, "Staff basic payroll record not found");
+
+  const entry = record.salaryHistory.id(req.params.historyId);
+  if (!entry) throw new ApiError(404, "Salary revision not found");
+
+  if (record.salaryHistory.length <= 1) {
+    throw new ApiError(400, "Cannot delete the only salary revision on record");
+  }
+
+  record.salaryHistory.pull({ _id: req.params.historyId });
+
+  // Re-point "current" fields at whichever revision is now the latest,
+  // in case the deleted entry was the one currently in effect.
+  const latest = record.salaryHistory.reduce((a, b) =>
+    new Date(b.effectiveFrom) >= new Date(a.effectiveFrom) ? b : a,
+  );
+  record.currentBasicSalary = latest.basicSalary;
+  record.currentEffectiveFrom = latest.effectiveFrom;
+
+  await record.save();
+
+  const populated = await StaffBasicPayroll.findById(record._id)
+    .populate("employeeId", "staffName email projectName staffId")
+    .lean();
+
+  res.json({
+    success: true,
+    message: "Salary revision deleted successfully",
     data: flatten(populated),
   });
 });

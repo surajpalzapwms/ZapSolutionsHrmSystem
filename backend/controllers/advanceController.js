@@ -1,5 +1,7 @@
 // controllers/advanceController.js
 import mongoose from "mongoose";
+import Staff from "../models/Staff.js";
+import { isAdminRole } from "../config/permissions.js";
 import StaffAdvance from "../models/StaffAdvance.js";
 import Account from "../models/Account.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
@@ -21,9 +23,42 @@ export const getAllAdvances = asyncHandler(async (req, res) => {
   const filter = {};
   if (status) filter.status = status;
   if (employeeId && mongoose.Types.ObjectId.isValid(employeeId)) filter.employeeId = employeeId;
+  // Staff logins only ever get their own advances.
+  if (!isAdminRole(req.user?.role)) {
+    const email = req.user?.email?.toLowerCase().trim();
+    const own = email ? await Staff.findOne({ email }).select("_id").lean() : null;
+    filter.employeeId = own ? own._id : null;
+  }
 
   const advances = await StaffAdvance.find(filter).sort({ date: -1, createdAt: -1 }).lean();
   res.json({ success: true, count: advances.length, data: advances });
+});
+
+/** GET /api/hrm/advances/outstanding/:employeeId — advance balance still owed */
+export const getOutstandingAdvance = asyncHandler(async (req, res) => {
+  const { employeeId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError(400, "Invalid employeeId");
+  }
+  const advances = await StaffAdvance.find({
+    employeeId,
+    status: { $in: ["pending", "approved"] },
+  })
+    .sort({ date: 1, createdAt: 1 })
+    .lean();
+
+  const withBalance = advances
+    .map((a) => ({
+      ...a,
+      balance: Math.max(0, toExactAmount(a.amount) - toExactAmount(a.repaidAmount)),
+    }))
+    .filter((a) => a.balance > 0);
+  const totalOutstanding = withBalance.reduce((sum, a) => sum + a.balance, 0);
+
+  res.json({
+    success: true,
+    data: { employeeId, totalOutstanding, advances: withBalance },
+  });
 });
 
 /** GET /api/hrm/advances/:id — single advance */
@@ -36,7 +71,7 @@ export const getAdvanceById = asyncHandler(async (req, res) => {
 
 /** POST /api/hrm/advances — create an advance */
 export const createAdvance = asyncHandler(async (req, res) => {
-  const { employeeId, employeeName, amount, date, reason, remarks, sourceAccountId } = req.body;
+  const { employeeId, employeeName, amount, date, reason, sourceAccountId } = req.body;
 
   if (!employeeId || !mongoose.Types.ObjectId.isValid(employeeId)) {
     throw new ApiError(400, "A valid employeeId is required");
@@ -73,7 +108,6 @@ export const createAdvance = asyncHandler(async (req, res) => {
     sourceAccount,
     date: new Date(date),
     reason: reason?.trim() || "",
-    remarks: remarks?.trim() || "",
     status: "pending",
   });
 
@@ -83,13 +117,40 @@ export const createAdvance = asyncHandler(async (req, res) => {
 /** PUT /api/hrm/advances/:id — update an advance */
 export const updateAdvance = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
-  const { employeeId, employeeName, amount, date, reason, remarks } = req.body;
+  const { employeeId, employeeName, amount, date, reason } = req.body;
 
   if (employeeId && !mongoose.Types.ObjectId.isValid(employeeId)) {
     throw new ApiError(400, "Invalid employeeId");
   }
   if (amount !== undefined && Number(amount) <= 0) {
     throw new ApiError(400, "amount must be a positive number");
+  }
+
+  const existing = await StaffAdvance.findById(req.params.id);
+  if (!existing) throw new ApiError(404, "Advance not found");
+
+  // If the amount changed, keep the source account balance in sync
+  if (amount !== undefined) {
+    const newAmount = Number(amount);
+
+    if (newAmount < toExactAmount(existing.repaidAmount)) {
+      throw new ApiError(
+        400,
+        `Amount cannot be less than the already repaid amount (${existing.repaidAmount})`,
+      );
+    }
+
+    const diff = toExactAmount(newAmount - existing.amount);
+    if (diff !== 0 && existing.sourceAccount?.accountId) {
+      const account = await Account.findById(existing.sourceAccount.accountId);
+      if (account) {
+        if (diff > 0 && account.totalAmount < diff) {
+          throw new ApiError(400, `Insufficient balance in ${account.name}`);
+        }
+        account.totalAmount = toExactAmount(account.totalAmount - diff);
+        await account.save();
+      }
+    }
   }
 
   const updated = await StaffAdvance.findByIdAndUpdate(
@@ -100,12 +161,10 @@ export const updateAdvance = asyncHandler(async (req, res) => {
       ...(amount !== undefined && { amount: Number(amount) }),
       ...(date !== undefined && { date: new Date(date) }),
       ...(reason !== undefined && { reason: reason.trim() }),
-      ...(remarks !== undefined && { remarks: remarks.trim() }),
     },
     { new: true, runValidators: true, context: "query" },
   );
 
-  if (!updated) throw new ApiError(404, "Advance not found");
   res.json({ success: true, message: "Advance updated successfully", data: updated });
 });
 
@@ -122,8 +181,7 @@ export const updateAdvanceStatus = asyncHandler(async (req, res) => {
   if (!advance) throw new ApiError(404, "Advance not found");
 
   const update = { status };
-  // Marking as repaid without a prior partial-repayment record settles the
-  // full amount, so the outstanding balance calculation on the dashboard
+  // Marking as repaid settles the full amount, so the outstanding balance
   // (amount - repaidAmount) comes out to zero.
   if (status === "repaid") {
     update.repaidAmount = advance.amount;
@@ -179,7 +237,18 @@ export const deleteManyAdvances = asyncHandler(async (req, res) => {
     throw new ApiError(400, "ids must be a non-empty array");
   }
   const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
-  const result = await StaffAdvance.deleteMany({ _id: { $in: validIds } });
+  const advances = await StaffAdvance.find({ _id: { $in: validIds } });
+
+  // Refund each advance back to its source account (same as single delete)
+  for (const adv of advances) {
+    if (adv.sourceAccount?.accountId) {
+      await Account.findByIdAndUpdate(adv.sourceAccount.accountId, {
+        $inc: { totalAmount: adv.amount },
+      });
+    }
+  }
+
+  const result = await StaffAdvance.deleteMany({ _id: { $in: advances.map((a) => a._id) } });
   res.json({
     success: true,
     message: `${result.deletedCount} advance(s) deleted successfully`,

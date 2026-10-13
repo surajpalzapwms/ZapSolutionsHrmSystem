@@ -41,6 +41,10 @@ export const submitResignation = async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(lastWorkingDay)) {
       return res.status(400).json({ success: false, message: "Invalid date. Use YYYY-MM-DD" });
     }
+    const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    if (lastWorkingDay < todayIST) {
+      return res.status(400).json({ success: false, message: "Last working day can't be in the past" });
+    }
     const active = await Resignation.findOne({
       userId: staff._id,
       status: { $in: ["pending", "approved"] },
@@ -116,8 +120,26 @@ export const approveResignation = async (req, res) => {
         message: `This request is already ${resignation.status}`,
       });
     }
+    // The admin may move the last working day while approving.
+    const override = req.body?.lastWorkingDay;
+    if (override) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(override)) {
+        return res.status(400).json({ success: false, message: "Invalid date. Use YYYY-MM-DD" });
+      }
+      resignation.lastWorkingDay = new Date(`${override}T00:00:00.000Z`);
+    }
     resignation.status = "approved";
     await resignation.save();
+
+    // The staff member's Relieved date = the LAST WORKING DAY they asked for
+    // (not the day the request was approved). Until that day they are on
+    // notice period and keep working normally; from the day after, the app
+    // treats them as having left the organization.
+    await Staff.updateOne(
+      { _id: resignation.userId },
+      { $set: { status: "Relieved", relievingDate: resignation.lastWorkingDay } },
+    );
+
     res.json({ success: true, message: "Resignation approved", data: resignation });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server error: " + error.message });

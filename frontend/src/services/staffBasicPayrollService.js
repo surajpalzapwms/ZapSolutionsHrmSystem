@@ -18,4 +18,8 @@ export const staffBasicPayrollService = {
     }),
   getHistory: (staffId) => api.get(`/api/hrm/staff-basic-payrolls/${staffId}/history`),
   addSalary: (staffId, data) => api.post(`/api/hrm/staff-basic-payrolls/${staffId}/salary`, data),
+  updateSalary: (staffId, historyId, data) =>
+    api.put(`/api/hrm/staff-basic-payrolls/${staffId}/salary/${historyId}`, data),
+  deleteSalary: (staffId, historyId) =>
+    api.delete(`/api/hrm/staff-basic-payrolls/${staffId}/salary/${historyId}`),
 };

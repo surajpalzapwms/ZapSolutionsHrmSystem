@@ -14,13 +14,24 @@ export class PayrollService {
     const basicPayroll = await StaffBasicPayroll.findOne({ employeeId }).session(session);
     if (!basicPayroll) throw new Error("Basic payroll not found");
 
-    const fullBasicSalary = parseFloat(basicPayroll.currentBasicSalary || 0);
     const [year, month] = period.split("-").map(Number);
-    const totalDaysInMonth = new Date(year, month, 0).getDate();
-    const perDaySalary = fullBasicSalary / totalDaysInMonth;
-
     const periodStart = new Date(year, month - 1, 1);
     const periodEnd = new Date(year, month, 0);
+
+    // Use the salary revision that was actually in effect during this
+    // period, not just whatever the current/latest amount is today.
+    const history = Array.isArray(basicPayroll.salaryHistory)
+      ? basicPayroll.salaryHistory
+      : [];
+    const applicable = history
+      .filter((h) => h && h.effectiveFrom && new Date(h.effectiveFrom) <= periodEnd)
+      .sort((a, b) => new Date(b.effectiveFrom) - new Date(a.effectiveFrom));
+    const fullBasicSalary = applicable.length > 0
+      ? parseFloat(applicable[0].basicSalary || 0)
+      : parseFloat(basicPayroll.currentBasicSalary || 0);
+
+    const totalDaysInMonth = new Date(year, month, 0).getDate();
+    const perDaySalary = fullBasicSalary / totalDaysInMonth;
 
     // If this staff member's last working day falls inside (or before) this
     // period, only pay through that date instead of the full month.
@@ -72,6 +83,23 @@ export class PayrollService {
     leaves.forEach((l) =>
       deductionByDate.set(dateKey(l.leaveDate), l.dayValue ?? 1),
     );
+
+    // A Half Day topped up with Paid/Sick/Casual (Edit Day Status) is a
+    // COMPENSATED day off for the other half, not an unpaid one — the
+    // staff member is still paid for it via that leave balance. Mark it as
+    // zero deduction up front so the Attendance loop below (which only
+    // knows "half" attendance, not what covered the other half) doesn't
+    // wrongly dock 0.5 day's salary for it.
+    const topUpLeaves =
+      payableDays > 0
+        ? await Leave.find({
+            userId: employeeId,
+            leaveDate: { $gte: startDate, $lte: endDate },
+            status: "approved",
+            isHalfDayTopUp: true,
+          }).session(session)
+        : [];
+    topUpLeaves.forEach((l) => deductionByDate.set(dateKey(l.leaveDate), 0));
 
     if (payableDays > 0) {
       const staffUser = await User.findOne({ email: employee.email })

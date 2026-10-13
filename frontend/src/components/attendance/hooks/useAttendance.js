@@ -1,5 +1,5 @@
 // src/components/attendance/hooks/useAttendance.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { attendanceService } from "../../../services/attendanceService";
 import { holidayService } from "../../../services/holidayService";
 import { useModal } from "../../../hooks/useModal";
@@ -22,7 +22,11 @@ export const useAttendance = () => {
   const extraHoursModal = useModal();
   const deleteModal = useModal();
 
+  // Set once the attendance list has actually been requested by a screen.
+  const attendanceLoadedRef = useRef(false);
+
   const fetchAttendance = useCallback(async () => {
+    attendanceLoadedRef.current = true;
     try {
       setLoading(true);
       const res = await attendanceService.getAttendance({ month: monthFilter });
@@ -57,10 +61,8 @@ export const useAttendance = () => {
   }, []);
 
   useEffect(() => {
-    fetchAttendance();
-    fetchLeaves();
     fetchHolidays();
-  }, [fetchAttendance, fetchLeaves, fetchHolidays]);
+  }, [fetchHolidays]);
 
   const { searchTerm, setSearchTerm, filteredData } = useSearch(attendance, [
     "userId",
@@ -92,7 +94,11 @@ export const useAttendance = () => {
       try {
         await attendanceService.recordAttendance(data);
         showToast("success", "Attendance recorded successfully");
-        await fetchAttendance();
+        // PERFORMANCE: only reload the attendance list if something has
+        // actually loaded it — the Attendance & Leaves page never shows it,
+        // so this used to download every staff member's attendance for the
+        // month after each save for nothing.
+        if (attendanceLoadedRef.current) await fetchAttendance();
         return true;
       } catch (err) {
         showToast("error", err.response?.data?.message || "Failed to record attendance");
@@ -121,7 +127,7 @@ export const useAttendance = () => {
       try {
         await attendanceService.deleteByDate(userId, date);
         showToast("success", "Attendance record deleted");
-        await fetchAttendance();
+        if (attendanceLoadedRef.current) await fetchAttendance();
       } catch (err) {
         showToast("error", err.response?.data?.message || "Failed to delete attendance");
       }

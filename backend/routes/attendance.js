@@ -22,10 +22,13 @@ import {
 const router = express.Router();
 
 // Attendance is HR-sensitive data end-to-end: every route requires a
-// valid session, and every WRITE additionally requires admin. Read routes
-// (list/today/yesterday/summary) are open to any authenticated staff
-// member; lock these down further with a "self or admin" check in
-// getAllAttendance if employees should only see their own records.
+// valid session, and every WRITE requires admin. Cross-staff READ routes
+// (list/today/yesterday/summary/by-id) now also require admin — without
+// that, any logged-in staff member could see another staff member's
+// attendance simply by passing their userId/record id (e.g. Akash viewing
+// Ravi's calendar and vice versa). /me/month is the one exception: it is
+// always scoped to the caller's own req.user.id, so any authenticated
+// staff member can safely call it for themselves.
 router.use(protect);
 
 router.get(
@@ -40,6 +43,7 @@ router.get(
 
 router.get(
   "/",
+  allowAdminOnly,
   [
     query("userId").optional().isMongoId(),
     query("from").optional().isISO8601(),
@@ -51,11 +55,12 @@ router.get(
   getAllAttendance,
 );
 
-router.get("/today", getTodayAttendance);
-router.get("/yesterday", getYesterdayAttendance);
+router.get("/today", allowAdminOnly, getTodayAttendance);
+router.get("/yesterday", allowAdminOnly, getYesterdayAttendance);
 
 router.get(
   "/summary/:userId",
+  allowAdminOnly,
   [param("userId").isMongoId().withMessage("Invalid user ID")],
   validateRequest,
   getAttendanceSummary,
@@ -63,6 +68,7 @@ router.get(
 
 router.get(
   "/:id",
+  allowAdminOnly,
   [param("id").isMongoId().withMessage("Invalid attendance record ID")],
   validateRequest,
   getAttendanceById,

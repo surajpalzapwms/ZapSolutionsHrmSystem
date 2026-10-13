@@ -32,6 +32,19 @@ const DatePicker = ({
     if (!disabled) setIsOpen(true);
   };
 
+  // The calendar popup isn't rendered in a portal (popperProps={strategy:
+  // "fixed"} only changes its CSS positioning, not its place in the DOM
+  // tree), so it's still a child of the wrapping <div> below. That means a
+  // click on a day cell bubbles all the way up to that div's onClick too.
+  // Without this guard, every date selection would fire ReactDatePicker's
+  // onChange (which correctly closes the calendar) and then, in the same
+  // event, this wrapper's onClick would reopen it again — so the calendar
+  // never actually closed and the field looked like it never updated.
+  const handleWrapperClick = (e) => {
+    if (e.target.closest(".react-datepicker")) return;
+    openCalendar();
+  };
+
   const handleChange = (date) => {
     if (!date) {
       onChange?.({ target: { name, value: "" } });
@@ -56,7 +69,7 @@ const DatePicker = ({
           focus handler) means clicking anywhere in the box — the empty
           padding, the area around the calendar icon, not just the exact
           text cursor spot — opens the calendar. */}
-      <div className="relative" onClick={openCalendar}>
+      <div className="relative" onClick={handleWrapperClick}>
         <ReactDatePicker
           selected={selected}
           onChange={handleChange}
@@ -68,6 +81,27 @@ const DatePicker = ({
           dateFormat={dateFormat}
           placeholderText={placeholder}
           disabled={disabled}
+          // The field used to be freely typeable. That let a partially
+          // overwritten default value (e.g. this form pre-fills today's
+          // date) leave stray leftover characters behind — you'd type
+          // "10 Oct 2025" over a pre-filled "17 Sep 2026" and, depending on
+          // where the caret landed, the day/month would update but a
+          // digit from the old year would survive, silently saving 2026
+          // instead of 2025. Forcing selection through the calendar only
+          // removes that whole class of "picked X, saved Y" bugs.
+          //
+          // IMPORTANT: this is NOT done via the `readOnly` prop.
+          // react-datepicker's own handleSelect — the function that runs
+          // when a calendar day is clicked — starts with
+          // `if (props.readOnly) return;`, so setting `readOnly` on this
+          // component doesn't just block typing, it silently no-ops every
+          // date click too (which was the actual "I pick a date and it
+          // doesn't change" bug). Blocking keystrokes/paste ourselves gets
+          // the same "can't type" behavior without disabling selection.
+          onKeyDown={(e) => {
+            if (!["Tab", "Escape"].includes(e.key)) e.preventDefault();
+          }}
+          onPaste={(e) => e.preventDefault()}
           minDate={minDate}
           maxDate={maxDate}
           // Reaching a date months/years back used to mean clicking the
@@ -82,7 +116,7 @@ const DatePicker = ({
           yearDropdownItemNumber={30}
           scrollableYearDropdown
           wrapperClassName="block w-full"
-          className={`border rounded-md pl-3 pr-9 py-2 w-full ${className} ${
+          className={`border rounded-md pl-3 pr-9 py-2 w-full cursor-pointer ${className} ${
             error ? "border-red-500" : "border-gray-300"
           } ${disabled ? "bg-gray-100" : ""} focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:border-indigo-500`}
           autoComplete="off"

@@ -44,7 +44,7 @@ export const useImport = (importFn, options = {}) => {
           setParsedData(finalData);
           if (options.onParse) options.onParse(finalData);
           showToast("success", `Parsed ${finalData.length} record(s)`);
-        } catch (error) {
+        } catch {
           showToast("error", "Failed to parse file");
         }
       };

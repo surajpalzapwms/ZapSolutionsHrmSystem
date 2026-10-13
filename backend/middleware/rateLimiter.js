@@ -9,6 +9,9 @@ import { env } from "../config.js";
 export const loginRateLimiter = rateLimit({
   windowMs: env.loginRateLimit.windowMs,
   max: env.loginRateLimit.max,
+  // Only failed attempts count toward the limit, so a user who logs in
+  // successfully is never locked out by normal use.
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: {

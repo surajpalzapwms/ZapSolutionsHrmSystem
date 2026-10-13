@@ -1,10 +1,11 @@
 // src/components/staff/StaffForm.jsx
 import React, { useEffect, useState } from "react";
-import { Eye, EyeOff, RefreshCw, Copy, Check } from "lucide-react";
+import { Eye, EyeOff, RefreshCw, Copy, Check, RotateCcw } from "lucide-react";
 import { useForm } from "../../hooks/useForm";
 import { staffService } from "../../services/staffService";
 import InputField from "../common/InputField";
 import DatePicker from "../common/DatePicker";
+import Select from "../common/Select";
 import Button from "../common/Button";
 import { showToast } from "../../utils/toast";
 import {
@@ -26,19 +27,37 @@ const validate = (form, isEdit) => {
   if (!isEdit && !validatePassword(form.password)) {
     errors.password = "Password must be at least 6 characters";
   }
-  // Relieving Date stays optional — at the point a staff member joins (or
-  // even the moment their status is first switched to "Relieving") the
-  // admin often doesn't know the exact last working day yet, so it can be
-  // filled in later rather than blocking the save. It's just never
-  // auto-filled with today's date on its own.
+  // Confirmation can never be before the joining date.
+  if (form.date && form.confirmationDate && form.confirmationDate < form.date) {
+    errors.confirmationDate = "Confirmation Date can't be before Joining Date";
+  }
+  if (form.date && form.probationEndDate && form.probationEndDate < form.date) {
+    errors.probationEndDate = "Probation End Date can't be before Joining Date";
+  }
+  // Internship (optional — only when the "has internship" box is ticked).
+  // Joining Date -> Internship End -> Probation End.
+  if (form.hasInternship && form.status === "Internship" && !form.internshipEndDate) {
+    errors.internshipEndDate = "Internship End Date is required";
+  }
+  if (form.date && form.internshipEndDate && form.internshipEndDate < form.date) {
+    errors.internshipEndDate = "Internship End Date can't be before Joining Date";
+  }
+  if (
+    form.internshipEndDate &&
+    form.probationEndDate &&
+    form.probationEndDate < form.internshipEndDate
+  ) {
+    errors.probationEndDate =
+      "Probation End Date can't be before Internship End Date";
+  }
+  // Relieved Date stays optional — it can be filled in later.
   return errors;
 };
 
 // New staff IDs start at ZS010 and count up from there.
 const STAFF_ID_PREFIX = "ZS";
 const STAFF_ID_START = 10;
-
-const STATUS_OPTIONS = ["Probation", "Confirmation", "Relieving"];
+const STATUS_OPTIONS = ["Internship", "Probation", "Confirmation", "Relieved"];
 
 const EMPLOYMENT_TYPE_OPTIONS = ["Project Basic", "Outsource Base"];
 
@@ -46,45 +65,86 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Adds `months` calendar months to a "YYYY-MM-DD" string and returns the
-// result in the same format. Used to auto-derive the Probation End Date
-// and Confirmation Date from the Joining Date + No. of Months.
-function addMonths(dateStr, months) {
-  if (!dateStr) return "";
-  const n = Number(months);
-  if (!Number.isFinite(n)) return "";
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setMonth(d.getMonth() + n);
-  return d.toISOString().slice(0, 10);
+// All date math below is done in UTC on "YYYY-MM-DD" strings so the result
+// never shifts by a day because of the browser's timezone (e.g. IST).
+function parseYMD(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}/.test(dateStr)) return null;
+  const [y, m, d] = dateStr.slice(0, 10).split("-").map(Number);
+  return { y, m, d };
 }
 
-// Add days to a date
+function toYMD(dateObj) {
+  return dateObj.toISOString().slice(0, 10);
+}
+
+// Adds `months` calendar months. 26 Jun 2025 + 3 = 26 Sep 2025.
+// If the target month is shorter (31 Jan + 1), it clamps to the month end.
+function addMonths(dateStr, months) {
+  const p = parseYMD(dateStr);
+  const n = Number(months);
+  if (!p || !Number.isFinite(n)) return "";
+  const targetMonthIndex = p.m - 1 + n;
+  const lastDay = new Date(Date.UTC(p.y, targetMonthIndex + 1, 0)).getUTCDate();
+  return toYMD(
+    new Date(Date.UTC(p.y, targetMonthIndex, Math.min(p.d, lastDay))),
+  );
+}
+
 function addDays(dateStr, days) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const p = parseYMD(dateStr);
+  if (!p) return "";
+  return toYMD(new Date(Date.UTC(p.y, p.m - 1, p.d + days)));
 }
 
 function formatDisplayDate(dateStr) {
-  if (!dateStr) return "—";
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, {
+  const p = parseYMD(dateStr);
+  if (!p) return "—";
+  return new Date(Date.UTC(p.y, p.m - 1, p.d)).toLocaleDateString(undefined, {
     day: "numeric",
     month: "short",
     year: "numeric",
+    timeZone: "UTC",
   });
 }
+
+// A date "has passed" if it's strictly before today. Today itself counts
+// as NOT passed — the status change is treated as happening right now.
+function isDatePassed(dateStr) {
+  if (!dateStr) return false;
+  return dateStr.slice(0, 10) < todayStr();
+}
+
+// Internship starts on the joining date. Probation then starts the day AFTER
+// the internship ends. With no internship, probation starts on the joining
+// date (the original behaviour).
+const probationBase = (joinDate, internshipEndDate) =>
+  internshipEndDate ? addDays(internshipEndDate, 1) : joinDate;
+
+// Default (auto) dates. `startDate` for probation/confirmation is the
+// probation start date — see probationBase().
+const autoInternshipEndDate = (joinDate, months) => {
+  const afterMonths = addMonths(joinDate, months);
+  return afterMonths ? addDays(afterMonths, -1) : "";
+};
+const autoConfirmationDate = (startDate, months) => addMonths(startDate, months);
+const autoProbationEndDate = (startDate, months) => {
+  const afterMonths = addMonths(startDate, months);
+  return afterMonths ? addDays(afterMonths, -1) : "";
+};
+
+// Random 10-char login password (no look-alike characters such as 0/O, 1/l).
+const makePassword = () => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = new Uint32Array(10);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join("");
+};
 
 const StaffForm = ({
   initialData = null,
   onSubmit,
   onCancel,
   isEdit = false,
-
   onStaffIdChange,
 }) => {
   const {
@@ -102,17 +162,26 @@ const StaffForm = ({
       lastName: "",
       contactNo: "",
       email: "",
-      password: "",
+      // New staff get a password generated up front (admin can still
+      // change it); it is saved with the record and shown in History.
+      password: isEdit ? "" : makePassword(),
       date: "", // Joining Date
       dateOfBirth: "",
+      gender: "", // Male -> "Mr.", Female -> "Ms."
+      designation: "",
+      department: "",
+      address: "",
+      currentAddress: "",
+      workSchedule: "",
       status: "Probation",
+      hasInternship: false, // checkbox: does this staff member have an internship?
+      internshipMonths: 3,
+      internshipEndDate: "",
       probationMonths: 3,
       probationEndDate: "",
       confirmationMonths: 3,
       confirmationDate: "",
       relievingDate: "",
-      // Independent of `status` — an optional employment type, chosen via
-      // radio buttons, that adds its own start/end date pair.
       employmentType: "", // "" | "Project Basic" | "Outsource Base"
       projectStartDate: "",
       projectEndDate: "",
@@ -120,29 +189,22 @@ const StaffForm = ({
     (f) => validate(f, isEdit),
   );
 
-  const [showPassword, setShowPassword] = useState(false);
+  const [showPassword, setShowPassword] = useState(!isEdit);
   const [justGenerated, setJustGenerated] = useState(false);
   const [copied, setCopied] = useState(false);
-  // Cosmetic preview only — the backend assigns the real ID at save time,
-  // so this can occasionally be off by one if staff are added concurrently.
   const [previewId, setPreviewId] = useState("");
-
-  // Status and Employment Type are mutually exclusive for a staff member —
-  // only one of the two cards is active/editable at a time. The toggle
-  // switch sitting on the right of the card header flips between them.
   const [activeSection, setActiveSection] = useState("status"); // "status" | "employment"
 
-  // Passwords are hashed one-way on the server (bcrypt) — there is no stored
-  // plaintext to fetch back and display. The only safe way to show an admin
-  // a real password is to generate a brand new one right here, reveal it
-  // once so they can copy it, then let the normal save flow hash it.
+  // true = admin picked the date on the calendar, so it must NOT be
+  // recalculated when the joining date or months change.
+  // Example: joined 26 Jun 2025, auto confirmation 26 Sep 2025, but the
+  // admin actually confirmed on 1 Oct 2025 → stays 1 Oct 2025.
+  const [confirmationManual, setConfirmationManual] = useState(false);
+  const [probationEndManual, setProbationEndManual] = useState(false);
+  const [internshipEndManual, setInternshipEndManual] = useState(false);
+
   const generatePassword = () => {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-    let pwd = "";
-    for (let i = 0; i < 10; i++) {
-      pwd += chars[Math.floor(Math.random() * chars.length)];
-    }
-    handleChange({ target: { name: "password", value: pwd } });
+    handleChange({ target: { name: "password", value: makePassword() } });
     setShowPassword(true);
     setJustGenerated(true);
     setCopied(false);
@@ -158,9 +220,6 @@ const StaffForm = ({
     }
   };
 
-  // Flip between the Status card and the Employment Type card. Whichever
-  // side you're leaving gets its own fields cleared so a staff record never
-  // ends up submitting stale data for the mode that's no longer active.
   const handleSectionToggle = () => {
     setActiveSection((prev) => {
       const next = prev === "status" ? "employment" : "status";
@@ -177,51 +236,89 @@ const StaffForm = ({
     });
   };
 
+  // ── Load existing record (edit mode) ────────────────────────────────────
+  // Saved dates are shown exactly as stored — nothing is recalculated on
+  // load. If a saved date differs from the auto value, it was set by hand,
+  // so it is marked as manual and kept on future joining-date edits.
   useEffect(() => {
-    if (initialData) {
-      // Staff records only store a single combined name — split it back
-      // into first/last for the two edit fields. Single-word names leave
-      // lastName blank rather than repeating the first name.
-      const nameParts = (initialData.staffName || "").trim().split(/\s+/);
-      const firstName = nameParts[0] || "";
-      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
+    if (!initialData) return;
+    const nameParts = (initialData.staffName || "").trim().split(/\s+/);
+    const firstName = nameParts[0] || "";
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-      setFields({
-        staffId: initialData.staffId || "",
-        firstName,
-        lastName,
-        contactNo: initialData.contactNo || "",
-        email: initialData.email || "",
-        password: "",
-        date: initialData.date ? initialData.date.slice(0, 10) : "",
-        dateOfBirth: initialData.dateOfBirth
-          ? initialData.dateOfBirth.slice(0, 10)
-          : "",
-        status: initialData.status || "Probation",
-        probationMonths: initialData.probationMonths ?? 3,
-        probationEndDate: initialData.probationEndDate
-          ? initialData.probationEndDate.slice(0, 10)
-          : "",
-        confirmationMonths: initialData.confirmationMonths ?? 3,
-        confirmationDate: initialData.confirmationDate
-          ? initialData.confirmationDate.slice(0, 10)
-          : "",
-        relievingDate: initialData.relievingDate
-          ? initialData.relievingDate.slice(0, 10)
-          : "",
-        employmentType: initialData.employmentType || "",
-        projectStartDate: initialData.projectStartDate
-          ? initialData.projectStartDate.slice(0, 10)
-          : "",
-        projectEndDate: initialData.projectEndDate
-          ? initialData.projectEndDate.slice(0, 10)
-          : "",
-      });
+    const joinDate = initialData.date ? initialData.date.slice(0, 10) : "";
+    const internshipMonths = initialData.internshipMonths ?? 3;
+    const probationMonths = initialData.probationMonths ?? 3;
+    const confirmationMonths = initialData.confirmationMonths ?? 3;
+    // Ticked for anyone who has/had an internship — an end date on file, or
+    // currently in the Internship status.
+    const hasInternship =
+      !!initialData.internshipEndDate || initialData.status === "Internship";
+    const savedInternshipEnd = initialData.internshipEndDate
+      ? initialData.internshipEndDate.slice(0, 10)
+      : hasInternship
+        ? autoInternshipEndDate(joinDate, internshipMonths)
+        : "";
+    // Probation / confirmation count from the day after the internship.
+    const startDate = probationBase(joinDate, savedInternshipEnd);
+    const savedProbationEnd = initialData.probationEndDate
+      ? initialData.probationEndDate.slice(0, 10)
+      : "";
+    const savedConfirmation = initialData.confirmationDate
+      ? initialData.confirmationDate.slice(0, 10)
+      : "";
 
-      // If the record being edited already has an employment type, open the
-      // form on that card instead of defaulting to Status.
-      setActiveSection(initialData.employmentType ? "employment" : "status");
-    }
+    setFields({
+      staffId: initialData.staffId || "",
+      firstName,
+      lastName,
+      contactNo: initialData.contactNo || "",
+      email: initialData.email || "",
+      password: "",
+      date: joinDate,
+      dateOfBirth: initialData.dateOfBirth
+        ? initialData.dateOfBirth.slice(0, 10)
+        : "",
+      gender: initialData.gender || "",
+      designation: initialData.designation || "",
+      department: initialData.department || "",
+      address: initialData.address || "",
+      currentAddress: initialData.currentAddress || "",
+      workSchedule: initialData.workSchedule || "",
+      status: initialData.status || "Probation",
+      hasInternship,
+      internshipMonths,
+      internshipEndDate: savedInternshipEnd,
+      probationMonths,
+      probationEndDate: savedProbationEnd,
+      confirmationMonths,
+      confirmationDate: savedConfirmation,
+      relievingDate: initialData.relievingDate
+        ? initialData.relievingDate.slice(0, 10)
+        : "",
+      employmentType: initialData.employmentType || "",
+      projectStartDate: initialData.projectStartDate
+        ? initialData.projectStartDate.slice(0, 10)
+        : "",
+      projectEndDate: initialData.projectEndDate
+        ? initialData.projectEndDate.slice(0, 10)
+        : "",
+    });
+
+    setInternshipEndManual(
+      !!savedInternshipEnd &&
+        savedInternshipEnd !== autoInternshipEndDate(joinDate, internshipMonths),
+    );
+    setConfirmationManual(
+      !!savedConfirmation &&
+        savedConfirmation !== autoConfirmationDate(startDate, confirmationMonths),
+    );
+    setProbationEndManual(
+      !!savedProbationEnd &&
+        savedProbationEnd !== autoProbationEndDate(startDate, probationMonths),
+    );
+
+    setActiveSection(initialData.employmentType ? "employment" : "status");
   }, [initialData, setFields]);
 
   useEffect(() => {
@@ -245,57 +342,241 @@ const StaffForm = ({
     };
   }, [isEdit]);
 
-  // Push the Staff ID to display up to whoever owns the header (see
-  // `onStaffIdChange` above) — the real id while editing, otherwise the
-  // generated preview for a new staff member.
   useEffect(() => {
     if (!onStaffIdChange) return;
     onStaffIdChange(isEdit ? form.staffId : previewId);
   }, [isEdit, form.staffId, previewId, onStaffIdChange]);
 
-  // Calculate Probation End Date = Joining Date + No. of Months - 1 day
-  // Example: Joining Date: 1 Nov 2025 + 3 months = 1 Feb 2026 - 1 day = 31 Jan 2026
+  // ── Date handlers (recalculate only on a real user change) ──────────────
+
+  // Date on which probation starts: the day after the internship ends, or
+  // the joining date if there is no internship.
+  const hasInternship = !!form.hasInternship;
+  const startDate = probationBase(
+    form.date,
+    hasInternship ? form.internshipEndDate : "",
+  );
+
+  // Probation End / Confirmation dates that follow from a (new) internship
+  // end date — only the ones the admin hasn't set by hand.
+  const dependentDates = (internshipEnd, joinDate = form.date) => {
+    const base = probationBase(joinDate, internshipEnd);
+    const updates = {};
+    if (!probationEndManual) {
+      updates.probationEndDate = autoProbationEndDate(
+        base,
+        form.probationMonths,
+      );
+    }
+    if (!confirmationManual) {
+      updates.confirmationDate = autoConfirmationDate(
+        base,
+        form.confirmationMonths,
+      );
+    }
+    return updates;
+  };
+
+  const handleJoiningDateChange = (e) => {
+    const joinDate = e.target.value;
+    const updates = { date: joinDate };
+    // Internship (when there is one) starts on the joining date.
+    const internshipEnd =
+      internshipEndManual || !hasInternship
+        ? form.internshipEndDate
+        : autoInternshipEndDate(joinDate, form.internshipMonths);
+    updates.internshipEndDate = internshipEnd;
+    const base = probationBase(joinDate, internshipEnd);
+    if (!confirmationManual) {
+      updates.confirmationDate = autoConfirmationDate(
+        base,
+        form.confirmationMonths,
+      );
+    }
+    if (!probationEndManual) {
+      updates.probationEndDate = confirmationManual
+        ? form.probationEndDate
+        : autoProbationEndDate(base, form.probationMonths);
+    }
+    setFields(updates);
+  };
+
+  const handleInternshipMonthsChange = (e) => {
+    const months = e.target.value;
+    setInternshipEndManual(false);
+    const internshipEnd = autoInternshipEndDate(form.date, months);
+    setFields({
+      internshipMonths: months,
+      internshipEndDate: internshipEnd,
+      ...dependentDates(internshipEnd),
+    });
+  };
+
+  const handleInternshipEndPick = (e) => {
+    const picked = e.target.value;
+    setInternshipEndManual(!!picked);
+    setFields({
+      internshipEndDate: picked,
+      ...dependentDates(picked),
+    });
+  };
+
+  const resetInternshipEndToAuto = () => {
+    setInternshipEndManual(false);
+    const internshipEnd = autoInternshipEndDate(
+      form.date,
+      form.internshipMonths,
+    );
+    setFields({
+      internshipEndDate: internshipEnd,
+      ...dependentDates(internshipEnd),
+    });
+  };
+
+  // "Has internship" checkbox. Ticked: internship dates are set up and
+  // probation/confirmation move to start after it. Unticked: internship is
+  // dropped and probation counts from the joining date again.
+  const handleInternshipToggle = (e) => {
+    const checked = e.target.checked;
+    setInternshipEndManual(false);
+    if (checked) {
+      const internshipEnd = form.date
+        ? autoInternshipEndDate(form.date, form.internshipMonths)
+        : "";
+      const updates = {
+        hasInternship: true,
+        internshipEndDate: internshipEnd,
+        ...dependentDates(internshipEnd),
+      };
+      // Only a staff member still at the start of their lifecycle becomes an
+      // intern — an already Confirmed/Relieved staff keeps their status.
+      if (form.status === "Probation") updates.status = "Internship";
+      setFields(updates);
+    } else {
+      const updates = {
+        hasInternship: false,
+        internshipEndDate: "",
+        ...dependentDates(""),
+      };
+      if (form.status === "Internship") updates.status = "Probation";
+      setFields(updates);
+    }
+  };
+
+  const handleProbationMonthsChange = (e) => {
+    const months = e.target.value;
+    setProbationEndManual(false);
+    setFields({
+      probationMonths: months,
+      probationEndDate: autoProbationEndDate(startDate, months),
+    });
+  };
+
+  const handleConfirmationMonthsChange = (e) => {
+    const months = e.target.value;
+    setConfirmationManual(false);
+    setFields({
+      confirmationMonths: months,
+      confirmationDate: autoConfirmationDate(startDate, months),
+    });
+  };
+
+  // Admin picks the actual confirmation date on the calendar. Probation
+  // then ends the day before it (e.g. confirmed 1 Oct → probation ends
+  // 30 Sep), unless the probation end date was also set by hand.
+  //
+  // If the picked date is still in the future (or today), the confirmation
+  // is treated as happening now, so status is promoted to "Confirmation"
+  // along with it. If the picked date is already in the past — e.g.
+  // backfilling history — only the date itself is changed; the current
+  // status is left as-is.
+  const handleConfirmationDatePick = (e) => {
+    const picked = e.target.value;
+    setConfirmationManual(!!picked);
+    const updates = { confirmationDate: picked };
+    if (!probationEndManual && picked) {
+      updates.probationEndDate = addDays(picked, -1);
+    }
+    if (picked && !isDatePassed(picked)) {
+      updates.status = "Confirmation";
+    }
+    setFields(updates);
+  };
+
+  const handleProbationEndPick = (e) => {
+    const picked = e.target.value;
+    setProbationEndManual(!!picked);
+    setFields({ probationEndDate: picked });
+  };
+
+  // Same passed-vs-not-passed rule as the Confirmation Date picker above:
+  // a future/today Relieved Date means the change is effective now, so
+  // status is promoted to "Relieved" alongside it. A past Relieved Date
+  // (backfilling history) only updates the date and leaves status as-is.
+  const handleRelievingDatePick = (e) => {
+    const picked = e.target.value;
+    const updates = { relievingDate: picked };
+    if (picked && !isDatePassed(picked)) {
+      updates.status = "Relieved";
+    }
+    setFields(updates);
+  };
+
+  const resetConfirmationToAuto = () => {
+    setConfirmationManual(false);
+    const updates = {
+      confirmationDate: autoConfirmationDate(startDate, form.confirmationMonths),
+    };
+    if (!probationEndManual) {
+      updates.probationEndDate = autoProbationEndDate(
+        startDate,
+        form.probationMonths,
+      );
+    }
+    setFields(updates);
+  };
+
+  const resetProbationEndToAuto = () => {
+    setProbationEndManual(false);
+    setFields({
+      probationEndDate: autoProbationEndDate(startDate, form.probationMonths),
+    });
+  };
+
+  // Fill empty dates once when a new staff member's joining date exists.
   useEffect(() => {
-    if (activeSection !== "status" || form.status !== "Probation") return;
-    if (!form.date) {
-      setFields({ probationEndDate: "" });
-      return;
+    if (isEdit || !form.date) return;
+    const updates = {};
+    // New intern: fill the internship end date first — probation and
+    // confirmation dates below count from the day after it.
+    let internshipEnd = form.internshipEndDate;
+    if (!internshipEnd && form.hasInternship && !internshipEndManual) {
+      internshipEnd = autoInternshipEndDate(form.date, form.internshipMonths);
+      updates.internshipEndDate = internshipEnd;
     }
-    // Calculate date after adding months, then subtract 1 day
-    const dateAfterMonths = addMonths(form.date, form.probationMonths);
-    if (dateAfterMonths) {
-      const endDate = addDays(dateAfterMonths, -1);
-      if (endDate !== form.probationEndDate) {
-        setFields({ probationEndDate: endDate });
-      }
+    const base = probationBase(form.date, internshipEnd);
+    if (!form.confirmationDate && !confirmationManual) {
+      updates.confirmationDate = autoConfirmationDate(
+        base,
+        form.confirmationMonths,
+      );
     }
+    if (!form.probationEndDate && !probationEndManual) {
+      updates.probationEndDate = autoProbationEndDate(
+        base,
+        form.probationMonths,
+      );
+    }
+    if (Object.keys(updates).length) setFields(updates);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.date, form.probationMonths, form.status, activeSection]);
+  }, [form.date, isEdit]);
 
-  // Calculate Confirmation Date = Joining Date + No. of Months
-  // Example: Joining Date: 1 Nov 2025 + 3 months = 1 Feb 2026
   useEffect(() => {
-    if (activeSection !== "status" || form.status !== "Confirmation") return;
-    if (!form.date) {
-      setFields({ confirmationDate: "" });
-      return;
-    }
-    const computed = addMonths(form.date, form.confirmationMonths);
-    if (computed !== form.confirmationDate) {
-      setFields({ confirmationDate: computed });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.date, form.confirmationMonths, form.status, activeSection]);
-
-  // Relieving Date is left blank until the admin actually picks one — it
-  // must never be silently defaulted to "today". validate() below requires
-  // it before the form can be submitted while Relieving is selected.
-
-  // Project Start Date defaults to the Joining Date the first time an
-  // employment type is picked, but the user can change it afterwards —
-  // this effect never overwrites a value that's already been set.
-  useEffect(() => {
-    if (activeSection === "employment" && form.employmentType && !form.projectStartDate) {
+    if (
+      activeSection === "employment" &&
+      form.employmentType &&
+      !form.projectStartDate
+    ) {
       setFields({ projectStartDate: form.date || todayStr() });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -310,8 +591,14 @@ const StaffForm = ({
       const payload = { ...form };
       if (isEdit && !payload.password) delete payload.password;
 
-      // Only the active section's data is meaningful — strip the other
-      // side out of the payload rather than sending stale values.
+      // No internship for this staff member: make sure none is saved (this
+      // also clears an internship that was removed while editing).
+      if (!payload.hasInternship) {
+        payload.internshipEndDate = "";
+        if (payload.status === "Internship") payload.status = "Probation";
+      }
+      delete payload.hasInternship; // UI-only flag
+
       if (activeSection === "status") {
         payload.employmentType = "";
         payload.projectStartDate = "";
@@ -336,10 +623,101 @@ const StaffForm = ({
     }
   };
 
-  // Handle status selection
   const handleStatusSelect = (status) => {
-    setFields({ status });
+    const updates = { status };
+    // Switching to Internship: make sure it has an end date (and that the
+    // probation / confirmation dates follow from it).
+    if (status === "Internship" && form.date && !form.internshipEndDate) {
+      const internshipEnd = autoInternshipEndDate(
+        form.date,
+        form.internshipMonths,
+      );
+      setInternshipEndManual(false);
+      Object.assign(updates, {
+        internshipEndDate: internshipEnd,
+        ...dependentDates(internshipEnd),
+      });
+    }
+    setFields(updates);
   };
+
+  // ── Reusable date blocks ────────────────────────────────────────────────
+
+  const ResetLink = ({ onClick, label }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-1 inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+    >
+      <RotateCcw size={12} />
+      {label}
+    </button>
+  );
+
+  const confirmationDateBlock = (
+    <div>
+      <DatePicker
+        label="Confirmation Date"
+        name="confirmationDate"
+        value={form.confirmationDate}
+        onChange={handleConfirmationDatePick}
+      />
+      {errors.confirmationDate && (
+        <p className="text-xs text-red-600 mt-1">{errors.confirmationDate}</p>
+      )}
+      {confirmationManual ? (
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-amber-600 mt-1">
+            Set by admin (auto date:{" "}
+            {formatDisplayDate(
+              autoConfirmationDate(startDate, form.confirmationMonths),
+            )}
+            )
+          </p>
+          <ResetLink onClick={resetConfirmationToAuto} label="Use auto date" />
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500 mt-1">
+          Auto: {hasInternship ? "Probation Start Date" : "Joining Date"} +{" "}
+          {form.confirmationMonths} months. Pick a date to change it.
+        </p>
+      )}
+    </div>
+  );
+
+  const internshipEndBlock = (
+    <div>
+      <DatePicker
+        label="Internship End Date"
+        name="internshipEndDate"
+        value={form.internshipEndDate}
+        onChange={handleInternshipEndPick}
+      />
+      {errors.internshipEndDate && (
+        <p className="text-xs text-red-600 mt-1">{errors.internshipEndDate}</p>
+      )}
+      {internshipEndManual && (
+        <ResetLink onClick={resetInternshipEndToAuto} label="Use auto date" />
+      )}
+    </div>
+  );
+
+  const probationEndBlock = (
+    <div>
+      <DatePicker
+        label="Probation End Date"
+        name="probationEndDate"
+        value={form.probationEndDate}
+        onChange={handleProbationEndPick}
+      />
+      {errors.probationEndDate && (
+        <p className="text-xs text-red-600 mt-1">{errors.probationEndDate}</p>
+      )}
+      {probationEndManual && (
+        <ResetLink onClick={resetProbationEndToAuto} label="Use auto date" />
+      )}
+    </div>
+  );
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -377,17 +755,79 @@ const StaffForm = ({
           label="Joining Date"
           name="date"
           value={form.date}
-          onChange={handleChange}
+          onChange={handleJoiningDateChange}
         />
       </div>
 
-      {/* Date of Birth */}
+      {/* Date of Birth / Gender */}
       <div className="grid grid-cols-2 gap-4">
         <DatePicker
           label="Date of Birth"
           name="dateOfBirth"
           value={form.dateOfBirth}
           onChange={handleChange}
+        />
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Gender <span className="text-xs text-gray-400">(Mr. / Ms. on letters)</span>
+          </label>
+          <Select
+            name="gender"
+            value={form.gender}
+            onChange={handleChange}
+            placeholder="Select gender"
+            options={[
+              { value: "Male", label: "Male (Mr.)" },
+              { value: "Female", label: "Female (Ms.)" },
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* Letter details: designation / department */}
+      <div className="grid grid-cols-2 gap-4">
+        <InputField
+          label="Designation (Job Title)"
+          name="designation"
+          value={form.designation}
+          onChange={handleChange}
+          placeholder="e.g. Full Stack developer"
+        />
+        <InputField
+          label="Department / Team"
+          name="department"
+          value={form.department}
+          onChange={handleChange}
+          placeholder="e.g. CRM & app development department"
+        />
+      </div>
+
+      {/* Permanent / current address */}
+      <div className="grid grid-cols-2 gap-4">
+        <InputField
+          label="Address (Permanent)"
+          name="address"
+          value={form.address}
+          onChange={handleChange}
+          placeholder="e.g. Flat B-3, New Sanjay chawl, Dharavi, Mumbai 400 017"
+        />
+        <InputField
+          label="Address (Current)"
+          name="currentAddress"
+          value={form.currentAddress}
+          onChange={handleChange}
+          placeholder="Leave blank if same as permanent"
+        />
+      </div>
+
+      {/* Work schedule */}
+      <div className="grid grid-cols-1 gap-4">
+        <InputField
+          label="Work Schedule"
+          name="workSchedule"
+          value={form.workSchedule}
+          onChange={handleChange}
+          placeholder="e.g. Full time / Mon till Saturday / 10.00 AM till 6.30 PM"
         />
       </div>
 
@@ -417,13 +857,11 @@ const StaffForm = ({
                 handleChange(e);
               }}
               error={errors.password}
-              placeholder={
-                isEdit ? "Leave blank to keep current password" : ""
-              }
-              className={isEdit ? "pr-20" : "pr-10"}
+              placeholder={isEdit ? "Leave blank to keep current password" : ""}
+              className="pr-20"
             />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-              {isEdit && justGenerated && form.password && (
+              {(!isEdit || justGenerated) && form.password && (
                 <button
                   type="button"
                   onClick={copyPassword}
@@ -438,17 +876,15 @@ const StaffForm = ({
                   )}
                 </button>
               )}
-              {isEdit && (
-                <button
-                  type="button"
-                  onClick={generatePassword}
-                  title="Generate a new password"
-                  className="text-gray-400 hover:text-gray-600"
-                  tabIndex={-1}
-                >
-                  <RefreshCw size={16} />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={generatePassword}
+                title="Generate a new password"
+                className="text-gray-400 hover:text-gray-600"
+                tabIndex={-1}
+              >
+                <RefreshCw size={16} />
+              </button>
               <button
                 type="button"
                 onClick={() => setShowPassword((v) => !v)}
@@ -460,16 +896,15 @@ const StaffForm = ({
               </button>
             </div>
           </div>
-          {isEdit && justGenerated && form.password && (
-            <p className="text-xs text-amber-600 mt-1">
-              Copy this now — it won't be shown again once you save.
+          {form.password && (!isEdit || justGenerated) && (
+            <p className="text-xs text-gray-500 mt-1">
+              Saved with this staff member — view it any time from History.
             </p>
           )}
         </div>
       </div>
 
-      {/* Status / Employment Type — mutually exclusive, switched with the
-          toggle on the right of the card header. */}
+      {/* Status / Employment Type */}
       <div className="rounded-lg border border-gray-200 p-4 bg-gray-50">
         <div className="flex items-center justify-between mb-3">
           <label className="text-sm font-medium text-gray-700">
@@ -516,8 +951,25 @@ const StaffForm = ({
 
         {activeSection === "status" ? (
           <>
-            <div className="grid grid-cols-3 gap-3 mb-4">
-              {STATUS_OPTIONS.map((status) => (
+            <label className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                name="hasInternship"
+                checked={hasInternship}
+                onChange={handleInternshipToggle}
+                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              This staff member has an internship period
+            </label>
+
+            <div
+              className={`grid grid-cols-2 gap-3 mb-4 ${
+                hasInternship ? "sm:grid-cols-4" : "sm:grid-cols-3"
+              }`}
+            >
+              {STATUS_OPTIONS.filter(
+                (status) => hasInternship || status !== "Internship",
+              ).map((status) => (
                 <div
                   key={status}
                   onClick={() => handleStatusSelect(status)}
@@ -529,9 +981,7 @@ const StaffForm = ({
                 >
                   <span
                     className={`text-sm font-medium ${
-                      form.status === status
-                        ? "text-blue-700"
-                        : "text-gray-700"
+                      form.status === status ? "text-blue-700" : "text-gray-700"
                     }`}
                   >
                     {status}
@@ -541,6 +991,53 @@ const StaffForm = ({
             </div>
 
             <div className="rounded-lg border border-gray-200 p-4 bg-white">
+              {form.status === "Internship" && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        No. of Months
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        name="internshipMonths"
+                        value={form.internshipMonths}
+                        onChange={handleInternshipMonthsChange}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                      />
+                    </div>
+                    {internshipEndBlock}
+                  </div>
+                  <div className="text-xs text-gray-500 bg-purple-50 p-2 rounded border border-purple-100">
+                    <p className="font-medium text-purple-700">
+                      How it's calculated:
+                    </p>
+                    <p>
+                      Internship End Date = Joining Date +{" "}
+                      {form.internshipMonths} months - 1 day. Probation then
+                      starts the next day. You can also pick a different date.
+                    </p>
+                    {form.date && (
+                      <p className="mt-1">
+                        Example: {formatDisplayDate(form.date)} +{" "}
+                        {form.internshipMonths} months - 1 day ={" "}
+                        {formatDisplayDate(
+                          autoInternshipEndDate(
+                            form.date,
+                            form.internshipMonths,
+                          ),
+                        )}
+                        {form.internshipEndDate &&
+                          ` → Probation starts ${formatDisplayDate(
+                            addDays(form.internshipEndDate, 1),
+                          )}`}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {form.status === "Probation" && (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-4">
@@ -553,35 +1050,36 @@ const StaffForm = ({
                         min={1}
                         name="probationMonths"
                         value={form.probationMonths}
-                        onChange={handleChange}
+                        onChange={handleProbationMonthsChange}
                         className="w-full px-3 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                       />
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">
-                        Probation End Date
-                      </label>
-                      <div className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-600">
-                        {formatDisplayDate(form.probationEndDate)}
-                      </div>
-                    </div>
+                    {probationEndBlock}
                   </div>
                   <div className="text-xs text-gray-500 bg-blue-50 p-2 rounded border border-blue-100">
                     <p className="font-medium text-blue-700">
                       How it's calculated:
                     </p>
                     <p>
-                      Probation End Date = Joining Date +{" "}
-                      {form.probationMonths} months - 1 day
+                      Probation End Date ={" "}
+                      {hasInternship ? "Probation Start Date" : "Joining Date"}{" "}
+                      + {form.probationMonths} months - 1 day. You can also
+                      pick a different date.
                     </p>
-                    {form.date && form.probationEndDate && (
+                    {startDate && (
                       <p className="mt-1">
-                        Example: {formatDisplayDate(form.date)} +{" "}
-                        {form.probationMonths} months ={" "}
+                        Example: {formatDisplayDate(startDate)} +{" "}
+                        {form.probationMonths} months - 1 day ={" "}
                         {formatDisplayDate(
-                          addMonths(form.date, form.probationMonths),
-                        )}{" "}
-                        - 1 day = {formatDisplayDate(form.probationEndDate)}
+                          autoProbationEndDate(startDate, form.probationMonths),
+                        )}
+                      </p>
+                    )}
+                    {hasInternship && (
+                      <p className="mt-1">
+                        Internship: {formatDisplayDate(form.date)} –{" "}
+                        {formatDisplayDate(form.internshipEndDate)}. Probation
+                        starts {formatDisplayDate(startDate)}.
                       </p>
                     )}
                   </div>
@@ -600,55 +1098,57 @@ const StaffForm = ({
                         min={1}
                         name="confirmationMonths"
                         value={form.confirmationMonths}
-                        onChange={handleChange}
+                        onChange={handleConfirmationMonthsChange}
                         className="w-full px-3 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                       />
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">
-                        Confirmation Date
-                      </label>
-                      <div className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-600">
-                        {formatDisplayDate(form.confirmationDate)}
-                      </div>
-                    </div>
+                    {confirmationDateBlock}
                   </div>
                   <div className="text-xs text-gray-500 bg-green-50 p-2 rounded border border-green-100">
                     <p className="font-medium text-green-700">
                       How it's calculated:
                     </p>
                     <p>
-                      Confirmation Date = Joining Date +{" "}
-                      {form.confirmationMonths} months
+                      Confirmation Date ={" "}
+                      {hasInternship ? "Probation Start Date" : "Joining Date"}{" "}
+                      + {form.confirmationMonths} months. If the staff member was
+                      confirmed on a different day, pick that date instead.
                     </p>
-                    {form.date && form.confirmationDate && (
+                    {form.date && (
                       <p className="mt-1">
-                        Example: {formatDisplayDate(form.date)} +{" "}
+                        Example: {formatDisplayDate(startDate)} +{" "}
                         {form.confirmationMonths} months ={" "}
-                        {formatDisplayDate(form.confirmationDate)}
+                        {formatDisplayDate(
+                          autoConfirmationDate(
+                            startDate,
+                            form.confirmationMonths,
+                          ),
+                        )}
+                        {confirmationManual &&
+                          ` → changed to ${formatDisplayDate(form.confirmationDate)}`}
                       </p>
                     )}
                   </div>
                 </div>
               )}
 
-              {form.status === "Relieving" && (
+              {form.status === "Relieved" && (
                 <div className="space-y-3">
-                  <DatePicker
-                    label="Relieving Date"
-                    name="relievingDate"
-                    value={form.relievingDate}
-                    onChange={handleChange}
-                  />
+                  <div className="grid grid-cols-2 gap-4">
+                    {confirmationDateBlock}
+                    <DatePicker
+                      label="Relieved Date"
+                      name="relievingDate"
+                      value={form.relievingDate}
+                      onChange={handleRelievingDatePick}
+                    />
+                  </div>
                   <div className="text-xs text-gray-500 bg-orange-50 p-2 rounded border border-orange-100">
-                    <p className="font-medium text-orange-700">
-                      Information:
-                    </p>
+                    <p className="font-medium text-orange-700">Information:</p>
                     <p>
-                      Select the leaving date for this staff member once
-                      it's known — it won't be filled in automatically, and
-                      you can leave it blank for now and add it later. This
-                      marks their last working day.
+                      Relieved Date is the last working day. You can leave it
+                      blank and add it later. Confirmation Date controls when
+                      leave balance starts.
                     </p>
                   </div>
                 </div>

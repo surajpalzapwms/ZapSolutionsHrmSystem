@@ -8,7 +8,6 @@ const accountSchema = new mongoose.Schema(
     },
     code: {
       type: String,
-      unique: true,
     },
     totalAmount: {
       type: Number,
@@ -28,6 +27,8 @@ const accountSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+accountSchema.index({ code: 1 }, { unique: true, sparse: true });
 
 const Account = mongoose.model("Account", accountSchema);
 export default Account;

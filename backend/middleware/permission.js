@@ -22,5 +22,6 @@ export const requireTabAccess = (tabKey) => (req, res, next) => {
   return res.status(403).json({
     success: false,
     message: "You don't have permission to access this section",
+    code: "TAB_FORBIDDEN",
   });
 };

@@ -4,6 +4,57 @@ import Staff from "../models/Staff.js";
 import { validationResult } from "express-validator";
 import { isAdminRole } from "../config/permissions.js";
 
+// PERFORMANCE: every API request runs protect(), which looked the user up in
+// the database (plus a Staff lookup for plain staff logins). The dashboard
+// fires ~9 requests at once, so that was ~9-18 extra database round trips
+// per page load. The result is now kept for a short time per user id.
+// It is cleared on any write to auth/staff/HRM routes (see server.js), so a
+// role change, permission change or a staff member being relieved still
+// takes effect immediately; the TTL is only a safety net.
+const AUTH_CACHE_TTL_MS = 30 * 1000;
+const authUserCache = new Map(); // userId -> { user, blocked, expiresAt }
+
+export const clearAuthUserCache = () => authUserCache.clear();
+
+const loadAuthUser = async (userId) => {
+  const hit = authUserCache.get(userId);
+  if (hit && hit.expiresAt > Date.now()) return hit;
+
+  const user = await User.findById(userId).select("-password");
+  let blocked = false;
+  let inactive = false;
+  if (user && user.role !== "super-admin" && user.isActive === false) {
+    inactive = true;
+  }
+  if (user && user.role !== "super-admin" && user.email) {
+    const staffInactive = await Staff.findOne({ email: user.email.toLowerCase().trim() })
+      .select("enabled")
+      .lean();
+    if (staffInactive && staffInactive.enabled === false) inactive = true;
+  }
+  if (user && user.role === "user" && user.email) {
+    const staff = await Staff.findOne({ email: user.email.toLowerCase().trim() })
+      .select("status relievingDate enabled")
+      .lean();
+    // Active toggle wins: an explicitly Active staff is never "relieved-blocked".
+    if (
+      staff?.enabled !== true &&
+      staff?.status === "Relieved" &&
+      staff.relievingDate
+    ) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const relievingDate = new Date(staff.relievingDate);
+      relievingDate.setHours(0, 0, 0, 0);
+      blocked = relievingDate <= today;
+    }
+  }
+  const entry = { user, blocked, inactive, expiresAt: Date.now() + AUTH_CACHE_TTL_MS };
+  if (authUserCache.size > 1000) authUserCache.clear();
+  authUserCache.set(userId, entry);
+  return entry;
+};
+
 export const protect = async (req, res, next) => {
   try {
     let token;
@@ -21,7 +72,9 @@ export const protect = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select("-password");
+    const { user, blocked, inactive } = await loadAuthUser(
+      String(decoded.id),
+    );
 
     if (!user) {
       return res.status(401).json({
@@ -32,28 +85,23 @@ export const protect = async (req, res, next) => {
     }
 
     // A plain staff login (role "user") that has since been marked
-    // "Relieving" (past relieving date) shouldn't be able to keep using an
-    // already-issued token either — otherwise blocking login alone would
-    // only stop a *new* sign-in, not someone still signed in from before
-    // they left. Scoped to role "user" only, so this extra lookup never
-    // runs on admin/super-admin requests.
-    if (user.role === "user" && user.email) {
-      const staff = await Staff.findOne({ email: user.email.toLowerCase().trim() })
-        .select("status relievingDate")
-        .lean();
-      if (staff?.status === "Relieving" && staff.relievingDate) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const relievingDate = new Date(staff.relievingDate);
-        relievingDate.setHours(0, 0, 0, 0);
-        if (relievingDate <= today) {
-          return res.status(403).json({
-            success: false,
-            message: "You are not allowed to login because admin has deactivated you.",
-            code: "STAFF_RELIEVED",
-          });
-        }
-      }
+    // "Relieved" (past relieving date) can't keep using an already-issued
+    // token either.
+    // Set Inactive by an admin after the token was issued — stop it too.
+    if (inactive) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to login because admin has deactivated you.",
+        code: "STAFF_INACTIVE",
+      });
+    }
+
+    if (blocked) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to login because admin has deactivated you.",
+        code: "STAFF_RELIEVED",
+      });
     }
 
     req.user = user;

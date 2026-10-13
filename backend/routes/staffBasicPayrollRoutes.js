@@ -9,6 +9,8 @@ import {
   getSalaryHistory,
   createStaffBasicPayroll,
   addSalaryRevision,
+  updateSalaryRevision,
+  deleteSalaryRevision,
   updateStaffBasicPayroll,
   deleteStaffBasicPayroll,
   deleteManyStaffBasicPayrolls,
@@ -34,5 +36,7 @@ router.delete("/:id", allowAdminOnly, requireTabAccess("staffbasicpayroll"), del
 
 router.get("/:id/history", getSalaryHistory);
 router.post("/:id/salary", allowAdminOnly, requireTabAccess("staffbasicpayroll.add"), addSalaryRevision);
+router.put("/:id/salary/:historyId", allowAdminOnly, requireTabAccess("staffbasicpayroll"), updateSalaryRevision);
+router.delete("/:id/salary/:historyId", allowAdminOnly, requireTabAccess("staffbasicpayroll"), deleteSalaryRevision);
 
 export default router;

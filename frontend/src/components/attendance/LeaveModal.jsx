@@ -15,7 +15,9 @@ import { leavePolicyService } from "../../services/leavePolicyService";
 // Balance-tracked types first, in the priority this modal auto-suggests for
 // (every leave applied here is for a past-or-today date — the backend
 // rejects future dates on this endpoint — so Sick/Casual are always used up
-// before Paid). Unpaid/Swap are never balance-checked.
+// before Paid). Unpaid and Swap are never balance-checked, so they're
+// always available to pick directly — Unpaid is not gated behind the
+// other three.
 const typeOptions = [
   { value: LEAVE_TYPES.SICK, label: "Sick Leave", trackedKey: "sick" },
   { value: LEAVE_TYPES.CASUAL, label: "Casual Leave", trackedKey: "casual" },
@@ -34,14 +36,17 @@ const durationOptions = [
 // Same checkbox-pill picker used on the staff self-service leave form —
 // one type can be checked at a time, each shows its own remaining balance,
 // and depleted balance-tracked types are greyed out.
-const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType, disabled }) => (
+const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType, disabled }) => {
+  return (
   <div className="flex flex-wrap gap-2">
     {typeOptions.map((opt) => {
       const remaining = opt.trackedKey ? remainingByType?.[opt.trackedKey] : null;
-      // Only grey a type out once its balance is fully used up (0 or less)
-      // — a staff member with exactly 0.5 remaining still has a valid half
-      // day to take via the Half Day toggle below, so requiring a full 1.0
-      // remaining here would block them from using their last half day.
+      // Only grey a tracked type out once its own balance is fully used up
+      // (0 or less) — a staff member with exactly 0.5 remaining still has a
+      // valid half day to take via the Half Day toggle below, so requiring
+      // a full 1.0 remaining here would block them from using their last
+      // half day. Unpaid and Swap are never balance-tracked, so they're
+      // always selectable.
       const isDepleted = opt.trackedKey && remaining != null && remaining <= 0;
       const isChecked = value === opt.value;
       const isDisabled = disabled || isDepleted;
@@ -81,7 +86,8 @@ const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType, disabled }) 
       );
     })}
   </div>
-);
+  );
+};
 
 const LeaveModal = ({
   isOpen,
@@ -287,9 +293,10 @@ const LeaveModal = ({
             disabled={!!blockedReason}
           />
           <p className="text-xs text-gray-400 mt-1.5">
-            Sick and Casual leave are used first (they reset every year);
-            Paid leave carries forward, so it's used last. Pick a different
-            box to override.
+            Sick and Casual leave are suggested first (they reset every
+            year); Paid leave carries forward, so it's suggested last.
+            Pick a different box to override — Unpaid leave can be
+            selected directly at any time.
           </p>
         </div>
         {!isRange && (

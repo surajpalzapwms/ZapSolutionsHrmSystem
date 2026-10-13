@@ -1,6 +1,6 @@
 // src/components/attendance/MRList.jsx
-import React from "react";
-import { Clock, RefreshCcw, Eye } from "lucide-react";
+import React, { useMemo } from "react";
+import { Clock, Eye } from "lucide-react";
 import Table from "../common/Table";
 import Button from "../common/Button";
 
@@ -12,19 +12,7 @@ const Badge = ({ children, className = "" }) => (
   </span>
 );
 
-const formatExtraRemaining = (minutes = 0) => {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `${h}h ${m}m`;
-};
-
-const StaffList = ({
-  staffList,
-  onRecordAttendance,
-  onConvertExtraHours,
-  onView,
-  onViewExtraHours,
-}) => {
+const StaffList = ({ staffList, onRecordAttendance, onView }) => {
   const columns = [
     {
       key: "srNo",
@@ -76,39 +64,6 @@ const StaffList = ({
       ),
     },
     {
-      key: "extraHours",
-      header: "Extra Hours",
-      render: (row) => (
-        <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={() =>
-              row.attendanceUserId && onViewExtraHours?.(row.attendanceUserId)
-            }
-            disabled={!row.attendanceUserId}
-            className={`flex flex-col items-center justify-center gap-1 ${
-              row.attendanceUserId
-                ? "cursor-pointer"
-                : "cursor-default opacity-70"
-            }`}
-            title={
-              row.attendanceUserId
-                ? "View Extra Working Hours"
-                : "No login account linked"
-            }
-          >
-            <Badge className="bg-blue-100 text-blue-700 min-w-[60px] text-center">
-              {row.extraHoursDays}d
-            </Badge>
-
-            <Badge className="bg-yellow-100 text-yellow-700 min-w-[80px] text-center">
-              {formatExtraRemaining(row.extraHoursRemainingMinutes)}
-            </Badge>
-          </button>
-        </div>
-      ),
-    },
-    {
       key: "actions",
       header: "Actions",
       render: (row) => (
@@ -119,28 +74,28 @@ const StaffList = ({
     },
   ];
 
+  // Only rebuild the table rows when the list itself changes.
+  const rows = useMemo(
+    () =>
+      staffList.map((row, idx) => ({
+        ...row,
+        _id: row.staffId,
+        _idx: idx,
+      })),
+    [staffList],
+  );
+
   return (
     <div>
       <div className="flex flex-wrap gap-3 mb-4">
         <Button variant="success" size="sm" onClick={onRecordAttendance}>
           <Clock size={16} className="mr-1" /> Record Attendance
         </Button>
-        <Button
-          size="sm"
-          className="!bg-purple-600 hover:!bg-purple-700 text-white"
-          onClick={onConvertExtraHours}
-        >
-          <RefreshCcw size={16} className="mr-1" /> Convert Extra Hours
-        </Button>
       </div>
 
       <Table
         columns={columns}
-        data={staffList.map((row, idx) => ({
-          ...row,
-          _id: row.staffId,
-          _idx: idx,
-        }))}
+        data={rows}
         emptyMessage="No Staff records found"
       />
     </div>

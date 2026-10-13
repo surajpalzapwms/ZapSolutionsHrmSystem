@@ -1,4 +1,3 @@
-// src/components/attendance/AttendanceModal.jsx
 import React, { useEffect, useMemo } from "react";
 import { CalendarOff } from "lucide-react";
 import { useForm } from "../../hooks/useForm";
@@ -18,16 +17,12 @@ const typeOptions = Object.values(ATTENDANCE_TYPES)
     label: t.charAt(0).toUpperCase() + t.slice(1) + " Day",
   }));
 
-// AttendanceModal collects a date + separate HH:MM login/logout times, but the
-// backend expects full ISO datetimes for both — combine them before submit.
 const combineDateTime = (date, time) => (date && time ? `${date}T${time}:00` : "");
 
 const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holidays = [] }) => {
   const validate = (form) => {
     const errors = {};
     if (!validateRequired(form.userId)) errors.userId = "Please select an MR";
-    // Login/logout time are optional — left blank, they default to the
-    // office's standard shift (10:00 AM–6:30 PM) on save.
     const blockedReason = getBlockedDayReason(form.date, holidays);
     if (blockedReason) errors.date = `${blockedReason} — attendance can't be marked on this day`;
     return errors;
@@ -44,8 +39,6 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  // Re-derived on every render from the currently selected date so the
-  // banner updates the moment the user picks a different day.
   const blockedReason = useMemo(() => getBlockedDayReason(form.date, holidays), [form.date, holidays]);
 
   const handleSubmit = async (e) => {
@@ -55,9 +48,6 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
       setIsSubmitting(true);
       const payload = {
         userId: form.userId,
-        // Always send the raw date too — if login/logout are left blank,
-        // the backend uses it to default them to the standard shift
-        // (10:00 AM–6:30 PM) instead of rejecting the record.
         date: form.date,
         loginTime: combineDateTime(form.date, form.loginTime),
         logoutTime: combineDateTime(form.date, form.logoutTime),

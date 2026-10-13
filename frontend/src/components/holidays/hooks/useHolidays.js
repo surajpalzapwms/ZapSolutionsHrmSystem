@@ -1,6 +1,9 @@
 // src/components/holidays/hooks/useHolidays.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { holidayService } from "../../../services/holidayService";
+import { staffService } from "../../../services/staffService";
+import { getCurrentUser, isAdminUser } from "../../../utils/authUser";
+import { filterHolidaysFromJoiningDate } from "../../../utils/holidayHelpers";
 import { useModal } from "../../../hooks/useModal";
 import { usePagination } from "../../../hooks/usePagination";
 import { useSearch } from "../../../hooks/useSearch";
@@ -11,6 +14,9 @@ export const useHolidays = () => {
   const [holidays, setHolidays] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState([]);
+  // Plain staff only: the logged-in staff member's joining date, so holidays
+  // that ended before they joined can be hidden. Stays null for admins.
+  const [joiningDate, setJoiningDate] = useState(null);
 
   const addModal = useModal();
   const editModal = useModal();
@@ -33,7 +39,29 @@ export const useHolidays = () => {
     fetchHolidays();
   }, [fetchHolidays]);
 
-  const { searchTerm, setSearchTerm, filteredData } = useSearch(holidays, ["name", "description"]);
+  useEffect(() => {
+    if (isAdminUser(getCurrentUser())) return;
+    let cancelled = false;
+    staffService
+      .getMyProfile()
+      .then((res) => {
+        if (!cancelled) setJoiningDate(res.data?.data?.date || null);
+      })
+      .catch(() => {
+        /* no linked profile -> just show every holiday */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A staff member joined on 10 Jun 2025 has no use for a 1 Jan 2025 holiday.
+  const visibleHolidays = useMemo(
+    () => filterHolidaysFromJoiningDate(holidays, joiningDate),
+    [holidays, joiningDate],
+  );
+
+  const { searchTerm, setSearchTerm, filteredData } = useSearch(visibleHolidays, ["name", "description"]);
 
   const {
     currentPage,
@@ -85,7 +113,8 @@ export const useHolidays = () => {
   return {
     loading,
     currentData,
-    allHolidays: holidays,
+    allHolidays: visibleHolidays,
+    joiningDate,
     totalPages,
     currentPage,
     setCurrentPage,

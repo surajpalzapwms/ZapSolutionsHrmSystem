@@ -11,7 +11,7 @@ const userSchema = new mongoose.Schema(
     },
     lastName: {
       type: String,
-      required: [true, "Last name is required"],
+      required: false, // optional — e.g. a one-word name like "Zac"
       trim: true,
     },
     name: {

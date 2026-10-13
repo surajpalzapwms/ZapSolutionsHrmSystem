@@ -1,7 +1,7 @@
 {
-  "name": "Zap Solutionz HRM",
-  "short_name": "HC CRM",
-  "description": "Zap Solutionz Staff Management System",
+  "name": "HRM Portal",
+  "short_name": "HRM",
+  "description": "Staff Management System",
   "start_url": "/",
   "display": "standalone",
   "display_override": ["window-controls-overlay", "standalone"],

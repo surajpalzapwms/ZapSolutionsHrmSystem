@@ -2,9 +2,8 @@
 // Single source of truth for "who is logged in / what role are they" so
 // Sidebar, DashboardLayout, HrmDashboard, App, etc. all agree.
 //
-// Mirrors the same fallback logic already duplicated in App.jsx and
-// DashboardLayout.jsx: prefer the JSON "user" blob written by Login.jsx,
-// but fall back to the older flat "email"/"role"/"username" keys.
+// Prefers the JSON "user" blob written by Login.jsx, but falls back to the
+// older flat "email"/"role"/"username" keys.
 
 export const getCurrentUser = () => {
   try {
@@ -14,7 +13,11 @@ export const getCurrentUser = () => {
       if (
         parsed &&
         typeof parsed === "object" &&
-        (parsed._id || parsed.id || parsed.name || parsed.email)
+        (parsed._id ||
+          parsed.id ||
+          parsed.name ||
+          parsed.firstName ||
+          parsed.email)
       ) {
         return parsed;
       }

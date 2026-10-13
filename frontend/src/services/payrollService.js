@@ -6,12 +6,15 @@ export const payrollService = {
   getById: (id) => api.get(`/api/hrm/payroll/${id}`),
   create: (data) => api.post("/api/hrm/payroll", data),
   update: (id, data) => api.put(`/api/hrm/payroll/${id}`, data),
+  recalculate: (id) => api.put(`/api/hrm/payroll/${id}/recalculate`),
   delete: (id) => api.delete(`/api/hrm/payroll/${id}`),
-  deleteMany: (ids) => api.delete("/api/hrm/payroll", { data: { ids } }),
-  import: (data) => api.post("/api/hrm/payroll/import", data),
+  deleteMany: (ids) =>
+    Promise.all(ids.map((id) => api.delete(`/api/hrm/payroll/${id}`))),
   export: (params) =>
     api.get("/api/hrm/payroll/export/csv", { params, responseType: "blob" }),
   calculate: (staffId, period) =>
     api.get(`/api/hrm/payroll/calculate/${staffId}/${period}`),
-  bulkCreate: (data) => api.post("/api/hrm/payroll/bulk", data),
+  getPendingSummary: (params) =>
+    api.get("/api/hrm/payroll/pending-summary", { params }),
+
 };

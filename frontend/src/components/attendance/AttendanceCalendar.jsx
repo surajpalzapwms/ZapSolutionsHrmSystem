@@ -1,13 +1,8 @@
-// src/components/attendance/AttendanceCalendar.jsx
 import React, { useMemo } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCalendar } from "./hooks/useCalendar";
 import { SHORT_DAYS, MONTHS } from "../../utils/constants";
 
-// A handful of clicks to reach a date months/years back is slow — offer a
-// direct Month + Year jump alongside the prev/next arrows. Covers a wide
-// range around today so past staff history (e.g. a June 2025 join date)
-// is one or two selects away instead of dozens of clicks.
 const currentYear = new Date().getFullYear();
 const YEAR_OPTIONS = Array.from({ length: 12 }, (_, i) => currentYear - 8 + i);
 
@@ -38,6 +33,11 @@ const AttendanceCalendar = ({ attendance = [], leaves = [] }) => {
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow p-4">
+      {/* Full-width month name header banner */}
+      <div className="w-full text-center py-2 mb-3 rounded-lg bg-sky-100 text-sky-800 font-semibold text-base">
+        {MONTHS[month]} {year}
+      </div>
+
       <div className="flex items-center justify-between mb-4">
         <button onClick={goToPrevMonth} className="p-2 rounded-full hover:bg-gray-100">
           <ChevronLeft size={18} />
@@ -76,11 +76,13 @@ const AttendanceCalendar = ({ attendance = [], leaves = [] }) => {
           <ChevronRight size={18} />
         </button>
       </div>
-      <div className="grid grid-cols-7 gap-1 text-center text-xs font-medium text-gray-500 mb-2">
+
+      <div className="grid grid-cols-7 gap-1 text-center text-xs font-medium text-white mb-2 bg-sky-200 rounded-md py-1">
         {SHORT_DAYS.map((d) => (
-          <div key={d}>{d}</div>
+          <div key={d} className="text-sky-800">{d}</div>
         ))}
       </div>
+
       <div className="grid grid-cols-7 gap-1">
         {days.map((day, idx) => {
           const dayData = day ? recordsByDay[day.getDate()] : null;

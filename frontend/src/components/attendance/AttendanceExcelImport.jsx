@@ -78,8 +78,6 @@ const AttendanceExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }
         // using timezone-independent UTC math instead of trusting the Date
         // objects SheetJS would otherwise construct.
         const wb = XLSX.read(data, { type: "array" });
-        // "final"/"summary" sheets are hand-kept running totals, not a
-        // per-day sheet this importer can parse — offer everything else.
         const names = wb.SheetNames.filter((n) => !/^final$|summary/i.test(n.trim()));
         setWorkbook(wb);
         setSheetNames(names);

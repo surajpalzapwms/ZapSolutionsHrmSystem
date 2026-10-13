@@ -16,8 +16,8 @@ import {
  * used to reach the same pages.
  *
  * Pass `requiredTab` (see utils/permissionTabs.js) to also gate a promoted
- * admin by their granted permissions — a super admin always passes
- * regardless of `requiredTab`. Omit it for routes any admin can reach
+ * admin by their granted permissions — a super admin always passes.
+ * Omit it for routes any admin can reach
  * (e.g. the Permissions screen itself is superAdminOnly instead).
  */
 const AdminRoute = ({ children, requiredTab, superAdminOnly = false }) => {
@@ -31,7 +31,7 @@ const AdminRoute = ({ children, requiredTab, superAdminOnly = false }) => {
   if (superAdminOnly && !superAdmin) {
     return <Navigate to="/hrmlayout" replace />;
   }
-  if (requiredTab && !superAdmin && !hasTabAccess(requiredTab, user)) {
+  if (requiredTab && !hasTabAccess(requiredTab, user)) {
     return <Navigate to="/hrmlayout" replace />;
   }
   return children;

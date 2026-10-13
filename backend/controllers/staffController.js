@@ -3,6 +3,12 @@ import mongoose from "mongoose";
 import Staff from "../models/Staff.js";
 import User from "../models/User.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
+import { decryptPassword, encryptPassword } from "../utils/passwordVault.js";
+import { computeFinalSettlement } from "../services/settlementService.js";
+import BirthdayWish from "../models/BirthdayWish.js";
+import StaffDocument from "../models/StaffDocument.js";
+import { purgeStaff, previewStaffPurge } from "../services/staffPurge.js";
+import { photoUrlFor, withPhotoUrl } from "../utils/fileSigning.js";
 
 // Truthy-string-or-boolean helper — checkboxes serialize as real booleans
 // from JSON but as "true"/"on" strings from some form submissions.
@@ -45,6 +51,7 @@ const resolveNameParts = (staffName, firstName, lastName) => {
 const sanitize = (doc) => {
   const obj = doc.toObject ? doc.toObject() : doc;
   delete obj.password;
+  delete obj.passwordEncrypted;
   return obj;
 };
 
@@ -84,7 +91,24 @@ const addDays = (dateStr, days) => {
   return d;
 };
 
-// Calculate probation end date (joining date + months - 1 day)
+// Staff lifecycle: Internship -> Probation -> Confirmation -> Relieved.
+// Internship starts on the joining date; probation starts the day AFTER the
+// internship ends. A staff member with no internshipEndDate never had an
+// internship, so probation still starts on the joining date (old behaviour).
+
+// Calculate internship end date (joining date + months - 1 day)
+const calculateInternshipEndDate = (joiningDate, months) => {
+  if (!joiningDate || !months) return null;
+  const dateAfterMonths = addMonths(joiningDate, months);
+  if (!dateAfterMonths) return null;
+  return addDays(dateAfterMonths, -1);
+};
+
+// The date probation (and therefore confirmation) is counted from.
+const getProbationStartDate = (joiningDate, internshipEndDate) =>
+  internshipEndDate ? addDays(internshipEndDate, 1) : joiningDate || null;
+
+// Calculate probation end date (probation start date + months - 1 day)
 const calculateProbationEndDate = (joiningDate, months) => {
   if (!joiningDate || !months) return null;
   const dateAfterMonths = addMonths(joiningDate, months);
@@ -146,7 +170,7 @@ const getAutoConfirmUpdate = (staff) => {
   const confirmationDate =
     staff.confirmationDate ||
     calculateConfirmationDate(
-      staff.date,
+      getProbationStartDate(staff.date, staff.internshipEndDate),
       staff.confirmationMonths || staff.probationMonths || 3,
     ) ||
     addDays(endDate, 1);
@@ -154,14 +178,46 @@ const getAutoConfirmUpdate = (staff) => {
   return { status: "Confirmation", confirmationDate };
 };
 
-// Applies getAutoConfirmUpdate() across a list of (lean) staff docs,
+// Once an internship has actually ended, status moves Internship ->
+// Probation automatically. If the probation period has ALSO already elapsed
+// (e.g. an old record), it carries straight on to Confirmation in the same
+// step. Returns the fields to update, or null if nothing is due yet.
+const getAutoAdvanceUpdate = (staff) => {
+  let update = null;
+  let current = staff;
+
+  if (staff.status === "Internship" && staff.internshipEndDate) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const internshipEnd = new Date(staff.internshipEndDate);
+    if (!isNaN(internshipEnd.getTime())) {
+      internshipEnd.setHours(0, 0, 0, 0);
+      if (today > internshipEnd) {
+        update = { status: "Probation" };
+        if (!staff.probationEndDate) {
+          update.probationEndDate = calculateProbationEndDate(
+            addDays(internshipEnd, 1),
+            staff.probationMonths || 3,
+          );
+        }
+        current = { ...staff, ...update };
+      }
+    }
+  }
+
+  const confirmUpdate = getAutoConfirmUpdate(current);
+  if (confirmUpdate) update = { ...(update || {}), ...confirmUpdate };
+  return update;
+};
+
+// Applies getAutoAdvanceUpdate() across a list of (lean) staff docs,
 // persisting whichever ones are due in a single bulk write, and returns the
 // list with those changes merged in — so callers get the corrected status
 // immediately, without a second round trip.
 const autoAdvanceStaffList = async (staffList) => {
   const ops = [];
   const result = staffList.map((staff) => {
-    const update = getAutoConfirmUpdate(staff);
+    const update = getAutoAdvanceUpdate(staff);
     if (!update) return staff;
     ops.push({
       updateOne: { filter: { _id: staff._id }, update: { $set: update } },
@@ -175,7 +231,7 @@ const autoAdvanceStaffList = async (staffList) => {
 // Same as above, for a single staff doc (getStaffById / getMyStaffProfile).
 const autoAdvanceStaff = async (staff) => {
   if (!staff) return staff;
-  const update = getAutoConfirmUpdate(staff);
+  const update = getAutoAdvanceUpdate(staff);
   if (!update) return staff;
   await Staff.updateOne({ _id: staff._id }, { $set: update });
   return { ...staff, ...update };
@@ -201,7 +257,7 @@ export const getMyStaffProfile = asyncHandler(async (req, res) => {
   }
 
   staff = await autoAdvanceStaff(staff);
-  res.status(200).json({ success: true, data: staff });
+  res.status(200).json({ success: true, data: withPhotoUrl(staff) });
 });
 
 /** GET /api/staff — list all staff members */
@@ -221,10 +277,11 @@ export const getAllStaff = asyncHandler(async (req, res) => {
   }
 
   let staff = await Staff.find(filter).sort({ createdAt: -1 }).lean();
-  // Flip anyone whose probation period has elapsed over to "Confirmation"
-  // automatically, so the list always reflects today's real status.
+  // Move anyone whose internship / probation period has elapsed on to the
+  // next status (Internship -> Probation -> Confirmation) automatically, so
+  // the list always reflects today's real status.
   staff = await autoAdvanceStaffList(staff);
-  res.json({ success: true, count: staff.length, data: staff });
+  res.json({ success: true, count: staff.length, data: withPhotoUrl(staff) });
 });
 
 /** GET /api/staff/teams — distinct list of team names */
@@ -241,7 +298,110 @@ export const getStaffById = asyncHandler(async (req, res) => {
   let staff = await Staff.findById(req.params.id).lean();
   if (!staff) throw new ApiError(404, "Staff member not found");
   staff = await autoAdvanceStaff(staff);
-  res.json({ success: true, data: staff });
+  res.json({ success: true, data: withPhotoUrl(staff) });
+});
+
+/** GET /api/staff/:id/password — admin-only: the password as originally entered */
+// A bcrypt hash looks like $2a$12$... — anything else stored in the password
+// field was inserted directly into the database as plain text.
+const looksHashed = (v) => /^\$2[aby]\$\d{2}\$/.test(String(v || ""));
+
+export const getStaffPassword = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const staff = await Staff.findById(req.params.id)
+    .select("+password +passwordEncrypted email")
+    .lean();
+  if (!staff) throw new ApiError(404, "Staff member not found");
+
+  let password = decryptPassword(staff.passwordEncrypted);
+  // Tells the History view WHY there is no password to show.
+  //   ok           -> password returned
+  //   key-mismatch -> a copy is saved but the current key can't read it
+  //   hash-only    -> only the one-way login hash exists (older account)
+  let passwordStatus = password
+    ? "ok"
+    : staff.passwordEncrypted
+      ? "key-mismatch"
+      : "hash-only";
+
+  // Nothing stored by the app: check whether the account was inserted into
+  // the database with a plain-text password (Staff or its linked User).
+  if (!password) {
+    let plain = staff.password && !looksHashed(staff.password) ? staff.password : null;
+    if (!plain && staff.email) {
+      const user = await User.findOne({ email: staff.email.toLowerCase().trim() })
+        .select("+password")
+        .lean();
+      if (user?.password && !looksHashed(user.password)) plain = user.password;
+    }
+    if (plain) {
+      password = plain;
+      passwordStatus = "ok";
+      // Remember it so it keeps showing (without touching the login hash).
+      await Staff.updateOne(
+        { _id: staff._id },
+        { $set: { passwordEncrypted: encryptPassword(plain) } },
+      );
+    }
+  }
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    success: true,
+    data: {
+      email: staff.email || null,
+      // null => bcrypt-hashed only (cannot be reversed)
+      password: password || null,
+      status: staff.email ? passwordStatus : "no-login",
+    },
+  });
+});
+
+/** PUT /api/staff/:id/password — admin-only: store/set the login password */
+export const setStaffPassword = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const pwd = typeof req.body.password === "string" ? req.body.password.trim() : "";
+  if (pwd.length < 6) {
+    throw new ApiError(400, "Password must be at least 6 characters");
+  }
+  const staff = await Staff.findById(req.params.id).select("+password email");
+  if (!staff) throw new ApiError(404, "Staff member not found");
+  if (!staff.email) {
+    throw new ApiError(400, "This staff member has no email, so no login");
+  }
+  // .save() so the model hook stores the bcrypt hash AND the encrypted,
+  // viewable copy.
+  staff.password = pwd;
+  await staff.save();
+
+  // Keep the linked login account in sync so this is the password they
+  // actually log in with.
+  const user = await User.findOne({ email: staff.email.toLowerCase().trim() });
+  if (user) {
+    user.password = pwd;
+    await user.save();
+  }
+  res.set("Cache-Control", "no-store");
+  res.json({ success: true, data: { password: pwd } });
+});
+
+// GET /api/staff/:id/settlement — Full & Final Settlement Statement for a
+// relieved staff member (leave balance, days worked/payable, net amount
+// still owed). Only meaningful once status is "Relieved" with a
+// relievingDate set — computeFinalSettlement itself enforces that and
+// throws a 400 (via err.status) if it isn't.
+export const getFinalSettlement = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  try {
+    const settlement = await computeFinalSettlement(req.params.id);
+    res.json({ success: true, data: settlement });
+  } catch (err) {
+    // computeFinalSettlement throws plain Errors with a `.status` (400/404)
+    // for expected cases (not found / not yet relieved) — translate those
+    // into the app's standard ApiError shape instead of a generic 500.
+    if (err.status) throw new ApiError(err.status, err.message);
+    throw err;
+  }
 });
 
 // Auto-increments off the highest existing numeric suffix (e.g. 5 staff → next is ZAP0006),
@@ -262,6 +422,14 @@ export const generateStaffId = async () => {
   return `ZS${String(nextNumber).padStart(3, "0")}`;  // Changed to 3 digits (010, 011, etc.)
 };
 
+// "male" / "M" / "Mr" -> "Male", "female" / "F" / "Ms" / "Mrs" -> "Female".
+const normalizeGender = (g) => {
+  const v = String(g || "").trim().toLowerCase();
+  if (["male", "m", "mr", "mr."].includes(v)) return "Male";
+  if (["female", "f", "ms", "ms.", "mrs", "mrs.", "miss"].includes(v)) return "Female";
+  return "";
+};
+
 /** POST /api/staff — create a staff member */
 export const createStaff = asyncHandler(async (req, res) => {
   console.log("values of req.body", req.body);
@@ -276,7 +444,15 @@ export const createStaff = asyncHandler(async (req, res) => {
     password,
     date, // Joining Date
     dateOfBirth,
+    gender,
+    designation,
+    department,
+    address,
+    currentAddress,
+    workSchedule,
     status = "Probation",
+    internshipMonths = 3,
+    internshipEndDate,
     probationMonths = 3,
     probationEndDate,
     confirmationMonths = 3,
@@ -335,11 +511,31 @@ export const createStaff = asyncHandler(async (req, res) => {
   // Calculate dates based on status
   const joiningDate = date ? new Date(date) : new Date();
 
-  // Calculate probation end date if status is Probation
-  let finalProbationEndDate = probationEndDate;
-  if (status === "Probation" && !finalProbationEndDate) {
-    finalProbationEndDate = calculateProbationEndDate(
+  // Internship runs from the joining date; calculate its end date when the
+  // status is Internship and none was supplied.
+  let finalInternshipEndDate = internshipEndDate;
+  if (status === "Internship" && !finalInternshipEndDate) {
+    finalInternshipEndDate = calculateInternshipEndDate(
       joiningDate,
+      internshipMonths,
+    );
+  }
+
+  // Probation (and confirmation) count from the day after the internship
+  // ends — or from the joining date when there was no internship.
+  const probationStartDate = getProbationStartDate(
+    joiningDate,
+    finalInternshipEndDate,
+  );
+
+  // Calculate probation end date for Internship (planned) and Probation
+  let finalProbationEndDate = probationEndDate;
+  if (
+    (status === "Internship" || status === "Probation") &&
+    !finalProbationEndDate
+  ) {
+    finalProbationEndDate = calculateProbationEndDate(
+      probationStartDate,
       probationMonths,
     );
   }
@@ -348,7 +544,7 @@ export const createStaff = asyncHandler(async (req, res) => {
   let finalConfirmationDate = confirmationDate;
   if (status === "Confirmation" && !finalConfirmationDate) {
     finalConfirmationDate = calculateConfirmationDate(
-      joiningDate,
+      probationStartDate,
       confirmationMonths,
     );
   }
@@ -364,7 +560,15 @@ export const createStaff = asyncHandler(async (req, res) => {
     contactNo: contactNo?.trim() || "",
     date: joiningDate,
     dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+    gender: normalizeGender(gender),
+    designation: String(designation || "").trim(),
+    department: String(department || "").trim(),
+    address: String(address || "").trim(),
+    currentAddress: String(currentAddress || "").trim(),
+    workSchedule: String(workSchedule || "").trim(),
     status: status || "Probation",
+    internshipMonths: internshipMonths || 3,
+    internshipEndDate: finalInternshipEndDate || null,
     probationMonths: probationMonths || 3,
     probationEndDate: finalProbationEndDate || null,
     confirmationMonths: confirmationMonths || 3,
@@ -375,6 +579,15 @@ export const createStaff = asyncHandler(async (req, res) => {
     projectEndDate: projectEndDate ? new Date(projectEndDate) : null,
     enabled,
   });
+
+  // staffId / email must be unique. Checked here as well as by the database
+  // index, so the message is clear on every database.
+  if (await Staff.exists({ staffId: finalStaffId })) {
+    throw new ApiError(409, `Staff ID "${finalStaffId}" already exists`);
+  }
+  if (trimmedEmail && (await Staff.exists({ email: trimmedEmail }))) {
+    throw new ApiError(409, `A staff member with email "${trimmedEmail}" already exists`);
+  }
 
   let staff;
   try {
@@ -454,7 +667,15 @@ export const updateStaff = asyncHandler(async (req, res) => {
     password,
     date, // Joining Date
     dateOfBirth,
+    gender,
+    designation,
+    department,
+    address,
+    currentAddress,
+    workSchedule,
     status,
+    internshipMonths,
+    internshipEndDate,
     probationMonths,
     probationEndDate,
     confirmationMonths,
@@ -498,7 +719,20 @@ export const updateStaff = asyncHandler(async (req, res) => {
   if (dateOfBirth !== undefined) {
     updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
   }
+  if (gender !== undefined) updateData.gender = normalizeGender(gender);
+  if (designation !== undefined) updateData.designation = String(designation || "").trim();
+  if (department !== undefined) updateData.department = String(department || "").trim();
+  if (address !== undefined) updateData.address = String(address || "").trim();
+  if (currentAddress !== undefined) updateData.currentAddress = String(currentAddress || "").trim();
+  if (workSchedule !== undefined) updateData.workSchedule = String(workSchedule || "").trim();
   if (status !== undefined) updateData.status = status;
+  if (internshipMonths !== undefined)
+    updateData.internshipMonths = internshipMonths;
+  if (internshipEndDate !== undefined) {
+    updateData.internshipEndDate = internshipEndDate
+      ? new Date(internshipEndDate)
+      : null;
+  }
   if (probationMonths !== undefined)
     updateData.probationMonths = probationMonths;
   if (probationEndDate !== undefined) {
@@ -529,9 +763,51 @@ export const updateStaff = asyncHandler(async (req, res) => {
   }
   if (enabled !== undefined) updateData.enabled = enabled;
 
+  // Marking someone "Relieved" is how this app records that a staff member
+  // has left, but `enabled` is a separate flag that several dashboard/
+  // report queries filter on. If this request sets status to Relieved and
+  // doesn't also explicitly say what `enabled` should be, default it to
+  // false so the two stay in sync and the person disappears from active-
+  // staff lists (Present/Not Present, leave balances, etc.) without the
+  // admin having to remember a second, separate toggle.
+  //
+  // This must only happen at the moment the staff member is *moved into*
+  // Relieved — NOT on every later save. The staff form never sends `enabled`,
+  // so applying it on every save of an already-Relieved record silently
+  // flipped an admin's manual "Active" back to Inactive. It is also skipped
+  // while the Relieved Date is still in the future (notice period — the
+  // person still works here).
+  {
+    const effectiveRelieving =
+      relievingDate !== undefined
+        ? relievingDate
+          ? new Date(relievingDate)
+          : null
+        : existingStaff.relievingDate;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    let hasLeft = true; // Relieved with no date recorded counts as left
+    if (effectiveRelieving) {
+      const d = new Date(effectiveRelieving);
+      if (!isNaN(d.getTime())) {
+        d.setHours(0, 0, 0, 0);
+        hasLeft = d <= startOfToday;
+      }
+    }
+    const becomingRelieved =
+      status === "Relieved" && existingStaff.status !== "Relieved";
+    if (becomingRelieved && enabled === undefined && hasLeft) {
+      updateData.enabled = false;
+    }
+  }
+
   // Auto-calculate dates if status changed and no explicit dates provided
   const newStatus = status || existingStaff.status;
   const joiningDate = date ? new Date(date) : existingStaff.date;
+  const newInternshipMonths =
+    internshipMonths !== undefined
+      ? internshipMonths
+      : existingStaff.internshipMonths || 3;
   const newProbationMonths =
     probationMonths !== undefined
       ? probationMonths
@@ -541,10 +817,54 @@ export const updateStaff = asyncHandler(async (req, res) => {
       ? confirmationMonths
       : existingStaff.confirmationMonths;
 
+  // If status is Internship and internshipEndDate not explicitly set,
+  // calculate it — only when it's missing or the inputs it depends on
+  // (joining date / internship months) changed, so an admin-picked date
+  // isn't overwritten by an unrelated update.
+  if (
+    newStatus === "Internship" &&
+    internshipEndDate === undefined &&
+    (!existingStaff.internshipEndDate ||
+      date !== undefined ||
+      internshipMonths !== undefined)
+  ) {
+    updateData.internshipEndDate = calculateInternshipEndDate(
+      joiningDate,
+      newInternshipMonths,
+    );
+  }
+
+  // Probation / confirmation count from the day after the internship ends
+  // (or from the joining date if this staff member had no internship).
+  const effectiveInternshipEndDate =
+    updateData.internshipEndDate !== undefined
+      ? updateData.internshipEndDate
+      : existingStaff.internshipEndDate;
+  const probationStartDate = getProbationStartDate(
+    joiningDate,
+    effectiveInternshipEndDate,
+  );
+
+  // Internship status: keep the *planned* probation end date filled in.
+  if (
+    newStatus === "Internship" &&
+    probationEndDate === undefined &&
+    (!existingStaff.probationEndDate ||
+      internshipEndDate !== undefined ||
+      internshipMonths !== undefined ||
+      date !== undefined ||
+      probationMonths !== undefined)
+  ) {
+    updateData.probationEndDate = calculateProbationEndDate(
+      probationStartDate,
+      newProbationMonths,
+    );
+  }
+
   // If status is Probation and probationEndDate not explicitly set, calculate it
   if (newStatus === "Probation" && probationEndDate === undefined) {
     updateData.probationEndDate = calculateProbationEndDate(
-      joiningDate,
+      probationStartDate,
       newProbationMonths,
     );
   }
@@ -552,7 +872,7 @@ export const updateStaff = asyncHandler(async (req, res) => {
   // If status is Confirmation and confirmationDate not explicitly set, calculate it
   if (newStatus === "Confirmation" && confirmationDate === undefined) {
     updateData.confirmationDate = calculateConfirmationDate(
-      joiningDate,
+      probationStartDate,
       newConfirmationMonths,
     );
   }
@@ -704,47 +1024,35 @@ export const toggleStaffStatus = asyncHandler(async (req, res) => {
 /** DELETE /api/staff/:id — remove a staff member */
 export const deleteStaff = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
-  const staff = await Staff.findByIdAndDelete(req.params.id);
-  if (!staff) throw new ApiError(404, "Staff member not found");
-
-  // Staff and User are only linked by email (no stored userId) — delete the
-  // matching login account too, otherwise a "deleted" staff member could
-  // still log in indefinitely.
-  if (staff.email) {
-    await User.deleteOne({ email: staff.email.toLowerCase().trim() });
-  }
-
-  res.json({ success: true, message: "Staff member deleted successfully" });
+  // Removes the staff member AND all their data (attendance, leaves,
+  // payroll, advances, expenses, documents, letters, login account, …).
+  const { deletedCount, counts } = await purgeStaff([req.params.id]);
+  if (!deletedCount) throw new ApiError(404, "Staff member not found");
+  res.json({ success: true, message: "Staff member and all related data deleted successfully", counts });
 });
 
-/** DELETE /api/staff — bulk delete { ids: [...] } */
+/** GET /api/staff/:id/delete-preview — what deleting this staff member removes. */
+export const deleteStaffPreview = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const preview = await previewStaffPurge([req.params.id]);
+  if (!preview.staff.length) throw new ApiError(404, "Staff member not found");
+  res.json({ success: true, data: preview });
+});
+
+/** DELETE /api/staff — bulk delete { ids: [...] } (with all related data) */
 export const deleteManyStaff = asyncHandler(async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new ApiError(400, "ids must be a non-empty array");
   }
   const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
-
-  // Grab emails before the Staff docs are gone, so the matching User
-  // (login) accounts can be removed too.
-  const staffToDelete = await Staff.find(
-    { _id: { $in: validIds } },
-    { email: 1 },
-  ).lean();
-  const emails = staffToDelete
-    .map((s) => s.email)
-    .filter(Boolean)
-    .map((e) => e.toLowerCase().trim());
-
-  const result = await Staff.deleteMany({ _id: { $in: validIds } });
-  if (emails.length > 0) {
-    await User.deleteMany({ email: { $in: emails } });
-  }
+  const { deletedCount, counts } = await purgeStaff(validIds);
 
   res.json({
     success: true,
-    message: `${result.deletedCount} staff member(s) deleted successfully`,
-    deletedCount: result.deletedCount,
+    message: `${deletedCount} staff member(s) and all related data deleted successfully`,
+    deletedCount,
+    counts,
   });
 });
 
@@ -760,9 +1068,25 @@ export const importStaff = asyncHandler(async (req, res) => {
     if (!row.staffName || !row.staffName.trim()) continue;
 
     const joiningDate = row.date ? new Date(row.date) : new Date();
+    const internshipMonths = row.internshipMonths || 3;
     const probationMonths = row.probationMonths || 3;
     const confirmationMonths = row.confirmationMonths || 3;
     const status = row.status || "Probation";
+
+    let internshipEndDate = row.internshipEndDate
+      ? new Date(row.internshipEndDate)
+      : null;
+    if (status === "Internship" && !internshipEndDate) {
+      internshipEndDate = calculateInternshipEndDate(
+        joiningDate,
+        internshipMonths,
+      );
+    }
+    // Probation / confirmation count from the day after the internship.
+    const probationStartDate = getProbationStartDate(
+      joiningDate,
+      internshipEndDate,
+    );
 
     let probationEndDate = row.probationEndDate
       ? new Date(row.probationEndDate)
@@ -772,16 +1096,19 @@ export const importStaff = asyncHandler(async (req, res) => {
       : null;
 
     // Auto-calculate if not provided
-    if (status === "Probation" && !probationEndDate) {
+    if (
+      (status === "Internship" || status === "Probation") &&
+      !probationEndDate
+    ) {
       probationEndDate = calculateProbationEndDate(
-        joiningDate,
+        probationStartDate,
         probationMonths,
       );
     }
 
     if (status === "Confirmation" && !confirmationDate) {
       confirmationDate = calculateConfirmationDate(
-        joiningDate,
+        probationStartDate,
         confirmationMonths,
       );
     }
@@ -798,6 +1125,8 @@ export const importStaff = asyncHandler(async (req, res) => {
       date: joiningDate,
       dateOfBirth: row.dateOfBirth ? new Date(row.dateOfBirth) : null,
       status: status,
+      internshipMonths: internshipMonths,
+      internshipEndDate: internshipEndDate,
       probationMonths: probationMonths,
       probationEndDate: probationEndDate,
       confirmationMonths: confirmationMonths,
@@ -823,5 +1152,213 @@ export const importStaff = asyncHandler(async (req, res) => {
     success: true,
     message: `${inserted.length} staff member(s) imported successfully`,
     data: inserted.map((doc) => sanitize(doc)),
+  });
+});
+// ── Birthdays ─────────────────────────────────────────────────────────────
+
+// "Today" in India, as a plain local calendar date (midnight).
+const istToday = () => {
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  return new Date(ist.getFullYear(), ist.getMonth(), ist.getDate());
+};
+
+// Next birthday on/after `today` for a DOB saved as UTC midnight.
+const nextBirthday = (dateOfBirth, today) => {
+  const dob = new Date(dateOfBirth);
+  if (isNaN(dob.getTime())) return null;
+  const m = dob.getUTCMonth();
+  const d = dob.getUTCDate();
+  let next = new Date(today.getFullYear(), m, d);
+  if (next < today) next = new Date(today.getFullYear() + 1, m, d);
+  return {
+    next,
+    daysUntil: Math.round((next - today) / 86400000),
+    ymd: `${next.getFullYear()}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+  };
+};
+
+const isBirthdayToday = (staff) => {
+  if (!staff?.dateOfBirth) return false;
+  const nb = nextBirthday(staff.dateOfBirth, istToday());
+  return !!nb && nb.daysUntil === 0;
+};
+
+const sameEmail = (a, b) =>
+  !!a && !!b && String(a).toLowerCase().trim() === String(b).toLowerCase().trim();
+
+// Gives every staff object in `staff` (lean, mutated in place) a
+// `photoUpdatedAt` when a profile photo really exists for them.
+const fillBirthdayPhotos = async (staff) => {
+  const missing = staff.filter((s) => !s.photoUpdatedAt);
+  if (!missing.length) return;
+
+  // 1) Photo stored for this very staff record.
+  const docs = await StaffDocument.find({ staff: { $in: missing.map((s) => s._id) }, type: "photo" })
+    .select("staff updatedAt createdAt")
+    .lean();
+  const byStaff = new Map(docs.map((d) => [String(d.staff), d.updatedAt || d.createdAt || new Date()]));
+
+  // 2) Photo uploaded on another staff record with the same e-mail.
+  const emails = missing
+    .filter((s) => !byStaff.has(String(s._id)) && s.email)
+    .map((s) => String(s.email).toLowerCase().trim());
+  const twins = emails.length
+    ? await Staff.find({ email: { $in: emails }, photoUpdatedAt: { $ne: null } })
+        .select("_id email photoUpdatedAt")
+        .lean()
+    : [];
+  const twinByEmail = new Map(twins.map((t) => [String(t.email).toLowerCase().trim(), t]));
+
+  const repairs = [];
+  for (const s of missing) {
+    const at = byStaff.get(String(s._id));
+    if (at) {
+      s.photoUpdatedAt = at;
+      repairs.push({ updateOne: { filter: { _id: s._id }, update: { $set: { photoUpdatedAt: at } } } });
+      continue;
+    }
+    const twin = s.email && twinByEmail.get(String(s.email).toLowerCase().trim());
+    if (twin) {
+      // The signed link is for the record that owns the photo.
+      s._photoOwner = { _id: twin._id, photoUpdatedAt: twin.photoUpdatedAt };
+    }
+  }
+  if (repairs.length) await Staff.bulkWrite(repairs).catch(() => {});
+};
+
+/**
+ * GET /api/staff/birthdays/upcoming?days=60
+ * Upcoming birthdays for the mobile "Upcoming birthdays" cards. Only name /
+ * team / day+month / photo are returned — never the birth year.
+ * Today's birthdays (from 12:00 midnight India time) also carry:
+ *   wishCount  — how many colleagues have wished them
+ *   wishedByMe — the caller already wished them
+ *   canWish    — show the Wish button (never for your own birthday)
+ */
+export const getUpcomingBirthdays = asyncHandler(async (req, res) => {
+  const days = Math.min(366, Math.max(1, parseInt(req.query.days, 10) || 60));
+  const today = istToday();
+
+  const staff = await Staff.find({
+    enabled: true,
+    status: { $ne: "Relieved" },
+    dateOfBirth: { $ne: null },
+  })
+    .select("staffName projectName dateOfBirth email photoUpdatedAt")
+    .lean();
+
+  // Colleagues' photos: some staff have an uploaded photo but no
+  // `photoUpdatedAt` on the record the birthday list reads (photo uploaded
+  // before that field existed, or uploaded on a second staff record with the
+  // same e-mail). Those used to show as initials ("AI") for everyone else.
+  // Fill them in from the stored photo itself, and repair the record.
+  await fillBirthdayPhotos(staff);
+
+  const list = [];
+  for (const s of staff) {
+    const nb = nextBirthday(s.dateOfBirth, today);
+    if (!nb || nb.daysUntil > days) continue;
+    list.push({
+      _id: s._id,
+      staffName: s.staffName,
+      projectName: s.projectName || "",
+      date: nb.ymd,
+      daysUntil: nb.daysUntil,
+      isToday: nb.daysUntil === 0,
+      isSelf: sameEmail(s.email, req.user?.email),
+      photoUrl: photoUrlFor(s._photoOwner || s),
+    });
+  }
+
+  // Wish info for today's birthdays.
+  const todays = list.filter((b) => b.isToday);
+  if (todays.length) {
+    const year = today.getFullYear();
+    const wishes = await BirthdayWish.find({
+      staff: { $in: todays.map((b) => b._id) },
+      year,
+    })
+      .select("staff fromUser")
+      .lean();
+    const me = String(req.user?._id || "");
+    for (const b of todays) {
+      const mine = wishes.filter((w) => String(w.staff) === String(b._id));
+      b.wishCount = mine.length;
+      b.wishedByMe = mine.some((w) => String(w.fromUser) === me);
+      b.canWish = !b.isSelf;
+    }
+  }
+
+  list.sort((a, b) => a.daysUntil - b.daysUntil || a.staffName.localeCompare(b.staffName));
+  res.json({ success: true, count: list.length, data: list });
+});
+
+/**
+ * POST /api/staff/birthdays/:id/wish   { message? }
+ * Wish a colleague on their birthday. Only on the birthday itself (India
+ * date), never yourself, once per person per year.
+ */
+export const wishBirthday = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const staff = await Staff.findById(req.params.id)
+    .select("staffName dateOfBirth email enabled status")
+    .lean();
+  if (!staff) throw new ApiError(404, "Staff member not found");
+  if (sameEmail(staff.email, req.user?.email)) {
+    throw new ApiError(400, "You can't wish yourself — enjoy your day! 🎂");
+  }
+  if (!isBirthdayToday(staff)) {
+    throw new ApiError(400, `Today is not ${staff.staffName}'s birthday.`);
+  }
+  const year = istToday().getFullYear();
+  const already = await BirthdayWish.exists({ staff: staff._id, year, fromUser: req.user._id });
+  if (already) throw new ApiError(400, `You have already wished ${staff.staffName}.`);
+
+  const fromStaff = req.user?.email
+    ? await Staff.findOne({ email: req.user.email.toLowerCase().trim() }).select("_id staffName").lean()
+    : null;
+  const fromName =
+    fromStaff?.staffName ||
+    req.user?.name ||
+    `${req.user?.firstName || ""} ${req.user?.lastName || ""}`.trim() ||
+    "A colleague";
+
+  await BirthdayWish.create({
+    staff: staff._id,
+    year,
+    fromUser: req.user._id,
+    fromStaff: fromStaff?._id || null,
+    fromName,
+    message: String(req.body?.message || "").trim().slice(0, 300),
+  });
+  const wishCount = await BirthdayWish.countDocuments({ staff: staff._id, year });
+  res.status(201).json({
+    success: true,
+    message: `You wished ${staff.staffName} a happy birthday! 🎉`,
+    data: { staffId: staff._id, wishCount, wishedByMe: true },
+  });
+});
+
+/**
+ * GET /api/staff/birthdays/my-wishes — wishes the logged-in staff member
+ * received for this year's birthday (shown on their own birthday card).
+ */
+export const getMyBirthdayWishes = asyncHandler(async (req, res) => {
+  const email = req.user?.email?.toLowerCase().trim();
+  const me = email ? await Staff.findOne({ email }).select("_id").lean() : null;
+  if (!me) return res.json({ success: true, data: [] });
+  const wishes = await BirthdayWish.find({ staff: me._id, year: istToday().getFullYear() })
+    .sort({ createdAt: -1 })
+    .populate("fromStaff", "photoUpdatedAt")
+    .lean();
+  res.json({
+    success: true,
+    data: wishes.map((w) => ({
+      _id: w._id,
+      fromName: w.fromName,
+      message: w.message,
+      createdAt: w.createdAt,
+      photoUrl: w.fromStaff ? photoUrlFor(w.fromStaff) : null,
+    })),
   });
 });

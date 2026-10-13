@@ -5,6 +5,7 @@ import {
   updateLeavePolicy,
   getAllStaffLeaveBalances,
   getMyLeaveBalance,
+  getStaffLeaveBalanceMonthly,
 } from "../controllers/leavePolicyController.js";
 
 const router = express.Router();
@@ -14,6 +15,9 @@ router.get("/balances/me", protect, getMyLeaveBalance);
 
 // Admin: view balances for everyone.
 router.get("/balances", protect, allowAdminOnly, getAllStaffLeaveBalances);
+
+// Admin: one staff member's balances + month-by-month statement.
+router.get("/balances/staff/:staffId", protect, allowAdminOnly, getStaffLeaveBalanceMonthly);
 
 // Policy: readable by any authenticated account, editable by admins only.
 router.get("/", protect, getLeavePolicy);

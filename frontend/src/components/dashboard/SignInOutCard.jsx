@@ -1,10 +1,12 @@
 // src/components/dashboard/SignInOutCard.jsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { LogIn, LogOut, Clock, ShieldCheck } from "lucide-react";
+import { LogIn, LogOut, Clock, Wifi } from "lucide-react";
+import PcAgentSetup from "../presence/PcAgentSetup";
 import Card from "../common/Card";
 import Spinner from "../common/Spinner";
 import { attendanceService } from "../../services/attendanceService";
 import { showToast } from "../../utils/toast";
+import { refreshSidebarCounts } from "../../hooks/useSidebarCounts";
 
 // Fallbacks — only used until the backend tells us this user's actual
 // values via `meta` (shiftStartTime/shiftEndTime can differ per user, e.g.
@@ -159,6 +161,16 @@ const SignInOutCard = () => {
     };
   }, [fetchStatus]);
 
+  // The background presence heartbeat (App.jsx) fires this when the backend
+  // auto-signs the user in/out or records a disconnect — refresh right away.
+  useEffect(() => {
+    const onChanged = () => fetchStatus();
+    window.addEventListener("attendanceChanged", onChanged);
+    return () => window.removeEventListener("attendanceChanged", onChanged);
+  }, [fetchStatus]);
+
+  const [agentOpen, setAgentOpen] = useState(false);
+
   const isSignedIn = !!attendance?.loginTime && !attendance?.logoutTime;
   const isSignedOut = !!attendance?.loginTime && !!attendance?.logoutTime;
 
@@ -223,6 +235,7 @@ const SignInOutCard = () => {
       setAttendance(res.data?.attendance || null);
       setMeta(res.data?.meta || null);
       showToast("success", res.data?.message || "Signed in successfully");
+      refreshSidebarCounts();
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to sign in");
     } finally {
@@ -238,6 +251,7 @@ const SignInOutCard = () => {
       setAttendance(res.data?.attendance || null);
       setMeta(res.data?.meta || null);
       showToast("success", res.data?.message || "Signed out successfully");
+      refreshSidebarCounts();
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to sign out");
       // The backend may have refused because the requirement wasn't met —
@@ -257,8 +271,8 @@ const SignInOutCard = () => {
 
   if (loading) {
     return (
-      <div className="max-w-md mx-auto mb-6">
-        <Card noPadding>
+      <div className="h-full">
+        <Card noPadding className="h-full rounded-2xl">
           <div className="flex items-center justify-center py-8">
             <Spinner size="sm" />
           </div>
@@ -269,8 +283,8 @@ const SignInOutCard = () => {
 
   if (statusError) {
     return (
-      <div className="max-w-md mx-auto mb-6">
-        <Card noPadding>
+      <div className="h-full">
+        <Card noPadding className="h-full rounded-2xl">
           <div className="p-5 flex items-center justify-between gap-4">
             <p className="text-sm text-red-500">
               Couldn't check today's attendance status.
@@ -292,7 +306,7 @@ const SignInOutCard = () => {
     // If user has signed out for the day
     if (isSignedOut) {
       return (
-        <span className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-500 w-full">
+        <span className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-500 w-full">
           Day complete
         </span>
       );
@@ -305,19 +319,13 @@ const SignInOutCard = () => {
           <button
             onClick={handleSignOut}
             disabled={submitting}
-            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors w-full bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+            className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors w-full bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
           >
             <LogOut size={16} />
             {submitting ? "Signing out..." : "Sign Out"}
           </button>
           {/* REMOVED: the status message about required hours and admin approval */}
           {/* Staff can now sign out freely - show optional remaining time info */}
-          {isSignedIn && !requiredMet && (
-            <p className="text-[11px] text-center text-gray-400">
-              {formatDuration(remainingMinutes)} remaining to meet shift
-              requirement
-            </p>
-          )}
         </div>
       );
     }
@@ -326,7 +334,7 @@ const SignInOutCard = () => {
       <button
         onClick={handleSignIn}
         disabled={submitting}
-        className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors w-full"
+        className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors w-full"
       >
         <LogIn size={16} />
         {submitting ? "Signing in..." : "Sign In"}
@@ -334,108 +342,127 @@ const SignInOutCard = () => {
     );
   };
 
-  return (
-    <div className="max-w-md">
-      <Card noPadding>
-        <div className="p-4 flex flex-col gap-3">
-          {/* Header Section - Fixed with justify-between */}
-          <div className="flex items-center gap-3 pb-2 border-b border-gray-100">
-            <div
-              className={`p-2 rounded-full shrink-0 ${
-                isSignedIn
-                  ? "text-emerald-600 bg-emerald-50"
-                  : isSignedOut
-                    ? "text-gray-500 bg-gray-100"
-                    : "text-blue-600 bg-blue-50"
-              }`}
-            >
-              <Clock size={18} />
-            </div>
-            <div className="flex-1 flex items-center justify-between">
-              <p className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
-                Attendance
-                {isSignedIn && (
-                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    LIVE
-                  </span>
-                )}
-              </p>
-              <p className="text-[10px] text-gray-400 whitespace-nowrap">
-                {formatShiftLabel(shift.shiftStartTime)} –{" "}
-                {formatShiftLabel(shift.shiftEndTime)}
-              </p>
-            </div>
-          </div>
+  // Progress toward the day's required hours (0–100).
+  const workedMinutes = isSignedIn
+    ? liveMinutes
+    : isSignedOut && attendance?.totalTime
+      ? (() => {
+          const [h = 0, m = 0] = String(attendance.totalTime).split(":").map(Number);
+          return h * 60 + m;
+        })()
+      : 0;
+  const progress = Math.min(100, Math.round((workedMinutes / requiredMinutes) * 100));
 
-          {/* Status Details - Each on its own line with label left, value right */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-500">Status</span>
+  const tone = isSignedIn
+    ? { text: "text-emerald-600", bg: "bg-emerald-50", bar: "bg-emerald-500", label: "Signed In" }
+    : isSignedOut
+      ? { text: "text-gray-600", bg: "bg-gray-100", bar: "bg-blue-500", label: "Day Complete" }
+      : { text: "text-rose-500", bg: "bg-rose-50", bar: "bg-gray-300", label: "Not Signed In" };
+
+  return (
+    <div className="h-full bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col">
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between gap-2">
+        <p className="text-base font-semibold text-gray-800 flex items-center gap-2 whitespace-nowrap">
+          <Clock size={17} className="text-blue-600" />
+          Attendance
+          {isSignedIn && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="hidden 2xl:inline">LIVE</span>
+            </span>
+          )}
+        </p>
+        <span className="text-[11px] text-gray-500 bg-gray-50 border border-gray-100 rounded-full px-2 py-0.5 whitespace-nowrap truncate">
+          {formatShiftLabel(shift.shiftStartTime)} – {formatShiftLabel(shift.shiftEndTime)}
+        </span>
+      </div>
+
+      <div className="flex-1 min-h-0 flex flex-col justify-center gap-3 px-5 py-3">
+        {/* Worked time on the left, sign-in / remaining on the right */}
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <span
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${tone.bg} ${tone.text}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isSignedIn ? "bg-emerald-500" : isSignedOut ? "bg-gray-400" : "bg-rose-400"}`} />
+              {tone.label}
+            </span>
+            <p className="text-3xl font-bold text-gray-800 mt-1.5 tabular-nums leading-none">
+              {workedLabel || "0h 00m"}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-1">
+              of {formatDuration(requiredMinutes)} required
+            </p>
+          </div>
+          <div className="text-right space-y-1">
+            <p className="text-[11px] text-gray-500">
+              Sign in{" "}
+              <span className="block text-sm font-semibold text-gray-800">
+                {attendance?.loginTime ? formatClockTime(attendance.loginTime) : "--"}
+              </span>
+            </p>
+            <p className="text-[11px] text-gray-500">
+              {isSignedIn && !requiredMet ? "Remaining" : "Sign out"}{" "}
               <span
-                className={`text-sm font-semibold ${
-                  isSignedIn
-                    ? "text-emerald-600"
-                    : isSignedOut
-                      ? "text-gray-700"
-                      : "text-red-500"
+                className={`block text-sm font-semibold ${
+                  isSignedIn && !requiredMet ? "text-amber-600" : "text-gray-800"
                 }`}
               >
-                {isSignedIn
-                  ? "Signed In"
-                  : isSignedOut
-                    ? "Completed"
-                    : "Not Signed In"}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-500">Login</span>
-              <span className="text-sm font-medium text-gray-700">
-                {attendance?.loginTime
-                  ? formatClockTime(attendance.loginTime)
-                  : "--"}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-500">Worked</span>
-              <span className="text-sm font-semibold text-blue-600">
-                {workedLabel || "--"}
-              </span>
-            </div>
-
-            {/* Remaining time — only meaningful while signed in and short of the requirement */}
-            {isSignedIn && !requiredMet && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-500">Remaining</span>
-                <span className="text-sm font-semibold text-amber-600">
-                  {formatDuration(remainingMinutes)}
-                </span>
-              </div>
-            )}
-
-            {/* REMOVED: Admin approval badge section */}
-
-            {/* Logout Time (only if signed out) */}
-            {isSignedOut && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-500">Logout</span>
-                <span className="text-sm font-medium text-gray-700">
-                  {attendance?.logoutTime
+                {isSignedIn && !requiredMet
+                  ? formatDuration(remainingMinutes)
+                  : attendance?.logoutTime
                     ? formatClockTime(attendance.logoutTime)
                     : "--"}
-                </span>
-              </div>
-            )}
+              </span>
+            </p>
           </div>
-
-          {/* Action Button */}
-          <div className="mt-2">{renderButton()}</div>
         </div>
-      </Card>
+        <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${requiredMet ? "bg-emerald-500" : tone.bar}`}
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="px-5 pb-4">
+        {renderButton()}
+        <AutoAttendanceNote attendance={attendance} onSetup={() => setAgentOpen(true)} />
+      </div>
+      <PcAgentSetup open={agentOpen} onClose={() => setAgentOpen(false)} />
     </div>
   );
 };
+
+const REASON_TEXT = {
+  pc_shutdown: "PC shut down",
+  left_office: "left office network",
+  day_end: "not signed out",
+};
+
+// Small line under the button: what automatic attendance did / is doing,
+// plus a link to set up the PC agent.
+function AutoAttendanceNote({ attendance, onSetup }) {
+  let text = null;
+  let cls = "text-gray-400";
+  if (attendance?.autoSignedOut && attendance?.logoutTime) {
+    text = `Signed out automatically at ${formatClockTime(attendance.logoutTime)} (${REASON_TEXT[attendance.signOutReason] || "auto"})`;
+    cls = "text-gray-500";
+  } else if (attendance?.lastDisconnectAt && !attendance?.logoutTime) {
+    text = `Left office network at ${formatClockTime(attendance.lastDisconnectAt)} — reconnect to continue`;
+    cls = "text-amber-600";
+  } else if (attendance?.source === "auto" && !attendance?.logoutTime) {
+    text = "Signed in automatically on office Wi-Fi";
+    cls = "text-emerald-600";
+  }
+  return (
+    <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
+      <span className={`truncate ${cls}`} title={text || ""}>{text || "Auto attendance on office Wi-Fi"}</span>
+      <button onClick={onSetup} className="inline-flex items-center gap-1 text-blue-600 hover:underline shrink-0">
+        <Wifi size={12} /> Set up
+      </button>
+    </div>
+  );
+}
 
 export default SignInOutCard;

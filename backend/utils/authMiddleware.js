@@ -1,4 +1,7 @@
+import { authenticate } from "../middleware/authenticate";
+
 router.post("/login", async (req, res) => {
+  consle.log("Login request received:", req.body); // Debugging log
   try {
     let { username, password } = req.body;
     if (!username || !password) {

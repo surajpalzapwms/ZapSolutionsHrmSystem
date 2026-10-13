@@ -1,11 +1,15 @@
 // src/components/staff-basic-payroll/hooks/useStaffBasicPayroll.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { staffBasicPayrollService } from "../../../services/staffBasicPayrollService";
 import { useModal } from "../../../hooks/useModal";
 import { usePagination } from "../../../hooks/usePagination";
 import { useSearch } from "../../../hooks/useSearch";
 import { showToast } from "../../../utils/toast";
 import { ITEMS_PER_PAGE } from "../../../utils/constants";
+import {
+  useCurrentStaffOnly,
+  useLeftStaffIds,
+} from "../../../hooks/useCurrentStaffFilter";
 
 export const useStaffBasicPayroll = () => {
   const [records, setRecords] = useState([]);
@@ -47,13 +51,30 @@ export const useStaffBasicPayroll = () => {
     fetchAvailableStaff();
   }, [fetchRecords, fetchAvailableStaff]);
 
-  const { searchTerm, setSearchTerm, filteredData } = useSearch(records, [
+  // "Current staff only" toggle: hide records of staff who have left.
+  const [currentOnly, setCurrentOnly] = useCurrentStaffOnly();
+  const leftStaffIds = useLeftStaffIds();
+  const visibleRecords = useMemo(
+    () =>
+      currentOnly
+        ? records.filter(
+            (r) => !leftStaffIds.has(String(r.employeeId?._id ?? r.employeeId)),
+          )
+        : records,
+    [records, currentOnly, leftStaffIds],
+  );
+
+  const { searchTerm, setSearchTerm, filteredData } = useSearch(visibleRecords, [
     "staffName",
     "staffId",
   ]);
 
   const { currentPage, setCurrentPage, totalPages, currentData } =
     usePagination(filteredData, ITEMS_PER_PAGE.STAFF_BASIC_PAYROLL);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [currentOnly, setCurrentPage]);
 
   const toggleSelect = useCallback((row) => {
     setSelected((prev) =>
@@ -123,5 +144,10 @@ export const useStaffBasicPayroll = () => {
     viewModal,
     addModal,
     importModal,
+    currentOnly,
+    setCurrentOnly,
+    visibleCount: visibleRecords.length,
+    totalCount: records.length,
+    filteredCount: filteredData.length,
   };
 };

@@ -1,20 +1,18 @@
 // src/components/advance/index.jsx
 import React, { useState } from "react";
-import { Wallet, Menu } from "lucide-react";
+import { Wallet } from "lucide-react";
 import { useAdvance } from "./hooks/useAdvance";
 import AdvanceList from "./AdvanceList";
 import AdvanceForm from "./AdvanceForm";
 import SearchBar from "../common/SearchBar";
 import Button from "../common/Button";
 import Modal from "../common/Modal";
-import Sidebar from "../common/Sidebar";
 import Spinner from "../common/Spinner";
 import { showToast } from "../../utils/toast";
 import { confirmDialog } from "../../utils/confirmationDialog";
 
 const Advance = () => {
   const [isMobileView, setIsMobileView] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const {
     loading,
@@ -85,24 +83,8 @@ const Advance = () => {
 
   return (
     <div className={`${isMobileView ? "px-3" : "p-6"} relative`}>
-      {isMobileView && (
-        <Sidebar
-          isOpen={sidebarOpen}
-          toggleSidebar={() => setSidebarOpen(false)}
-          isMobile={true}
-        />
-      )}
-
       <div className="flex justify-between items-center mb-4">
         <div className="flex items-center gap-2">
-          {isMobileView && (
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="p-2 rounded-full bg-gray-100"
-            >
-              <Menu size={20} className="text-gray-700" />
-            </button>
-          )}
           <Wallet className="w-5 h-5 text-blue-600" />
           <h1 className="text-xl font-bold text-gray-800">Advances</h1>
         </div>

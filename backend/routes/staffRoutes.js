@@ -20,9 +20,16 @@ import {
   updateStaff,
   toggleStaffStatus,
   deleteStaff,
+  deleteStaffPreview,
   deleteManyStaff,
   importStaff,
   getMyStaffProfile,
+  getFinalSettlement,
+  getStaffPassword,
+  setStaffPassword,
+  getUpcomingBirthdays,
+  wishBirthday,
+  getMyBirthdayWishes,
 } from "../controllers/staffController.js";
 
 const router = express.Router();
@@ -75,8 +82,15 @@ const staffBodyRules = [
   body("date").optional({ checkFalsy: true }).isISO8601(),
   body("status")
     .optional()
-    .isIn(["Probation", "Confirmation", "Relieving"])
-    .withMessage("Status must be one of: Probation, Confirmation, Relieving"),
+    .isIn(["Internship", "Probation", "Confirmation", "Relieved"])
+    .withMessage(
+      "Status must be one of: Internship, Probation, Confirmation, Relieved",
+    ),
+  body("internshipMonths")
+    .optional()
+    .isInt({ min: 1 })
+    .withMessage("Internship months must be at least 1"),
+  body("internshipEndDate").optional({ checkFalsy: true }).isISO8601(),
   body("probationMonths")
     .optional()
     .isInt({ min: 1 })
@@ -102,12 +116,56 @@ router.get("/teams", getTeams);
 // Must come before "/:id" (which requires a Mongo ObjectId) or "me" would
 // get swallowed by that route and rejected as an invalid id.
 router.get("/me", getMyStaffProfile);
+router.get("/birthdays/upcoming", getUpcomingBirthdays);
+router.get("/birthdays/my-wishes", getMyBirthdayWishes);
+router.post(
+  "/birthdays/:id/wish",
+  writeOperationLimiter,
+  [
+    param("id").isMongoId().withMessage("Invalid staff ID"),
+    body("message").optional().isString().isLength({ max: 300 }),
+  ],
+  validateRequest,
+  wishBirthday,
+);
 
 router.get(
   "/:id",
   [param("id").isMongoId().withMessage("Invalid staff ID")],
   validateRequest,
   getStaffById,
+);
+
+// Admin-only: reveal the login password as originally entered (History view).
+router.get(
+  "/:id/password",
+  allowAdminOnly,
+  requireTabAccess("staff"),
+  [param("id").isMongoId().withMessage("Invalid staff ID")],
+  validateRequest,
+  getStaffPassword,
+);
+
+router.put(
+  "/:id/password",
+  allowAdminOnly,
+  requireTabAccess("staff"),
+  writeOperationLimiter,
+  [
+    param("id").isMongoId().withMessage("Invalid staff ID"),
+    body("password").isString().isLength({ min: 6 }),
+  ],
+  validateRequest,
+  setStaffPassword,
+);
+
+// Full & Final Settlement Statement — only meaningful once a staff member
+// is Relieved; the controller/service return a 400 otherwise.
+router.get(
+  "/:id/settlement",
+  [param("id").isMongoId().withMessage("Invalid staff ID")],
+  validateRequest,
+  getFinalSettlement,
 );
 
 router.post(
@@ -169,6 +227,15 @@ router.delete(
   ],
   validateRequest,
   deleteManyStaff,
+);
+
+router.get(
+  "/:id/delete-preview",
+  allowAdminOnly,
+  requireTabAccess("staff"),
+  [param("id").isMongoId().withMessage("Invalid staff ID")],
+  validateRequest,
+  deleteStaffPreview,
 );
 
 router.delete(

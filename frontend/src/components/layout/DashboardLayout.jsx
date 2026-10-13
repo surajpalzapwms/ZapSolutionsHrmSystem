@@ -1,49 +1,16 @@
 // src/components/layout/DashboardLayout.jsx
-import React, { useState, useEffect } from "react";
+import React, { Suspense, memo, useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { LogOut, Menu, Bell } from "lucide-react";
 import HolidayAnnouncement from "../dashboard/HolidayAnnouncement";
 import Sidebar from "../common/Sidebar";
-
-// Mirrors App.jsx's readUserFromStorage: some login flows only ever write
-// the flat "email"/"role"/"username" keys (never a "user" JSON blob), so a
-// naive `JSON.parse(localStorage.getItem("user"))` silently returns null.
-const readUser = () => {
-  try {
-    const raw = localStorage.getItem("user");
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        (parsed._id ||
-          parsed.id ||
-          parsed.name ||
-          parsed.firstName ||
-          parsed.email)
-      ) {
-        return parsed;
-      }
-    }
-  } catch {
-    /* ignore parse errors, fall through to flat-key lookup */
-  }
-
-  const email = localStorage.getItem("email");
-  const role = localStorage.getItem("role");
-  const username = localStorage.getItem("username");
-
-  if (email || role || username) {
-    return { name: username || email || "User", email, role, username };
-  }
-
-  return null;
-};
+import Spinner from "../common/Spinner";
+import { getCurrentUser } from "../../utils/authUser";
 
 const formatDateTime = (d) =>
   d.toLocaleString("en-US", {
     day: "numeric",
-    month: "short", 
+    month: "short",
     year: "numeric",
     hour: "numeric",
     minute: "2-digit",
@@ -51,21 +18,41 @@ const formatDateTime = (d) =>
     hour12: true,
   });
 
-const DashboardLayout = () => {
-  const navigate = useNavigate();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [now, setNow] = useState(new Date());
-  const [user, setUser] = useState(() => readUser());
-
+// The clock ticks every second. It lives in its own tiny component so only
+// this <span> re-renders each tick — previously the timer sat in the layout
+// itself, which re-rendered the whole header + both sidebars every second.
+const LiveClock = memo(function LiveClock() {
+  const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+  return (
+    <span className="hidden xl:block text-sm text-gray-500 tabular-nums whitespace-nowrap">
+      {formatDateTime(now)}
+    </span>
+  );
+});
+
+// Shown only in the content area while a lazy page chunk downloads, so the
+// sidebar and header stay on screen during navigation.
+const PageFallback = () => (
+  <div className="flex items-center justify-center w-full py-24">
+    <Spinner size="lg" />
+  </div>
+);
+
+const noop = () => {};
+
+const DashboardLayout = () => {
+  const navigate = useNavigate();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [user, setUser] = useState(getCurrentUser);
 
   useEffect(() => {
     // Re-read whenever another tab logs in/out, or right after this tab's
     // own login flow dispatches "userLoggedIn" (see components/login/index.jsx).
-    const refresh = () => setUser(readUser());
+    const refresh = () => setUser(getCurrentUser());
     window.addEventListener("storage", refresh);
     window.addEventListener("userLoggedIn", refresh);
     return () => {
@@ -75,11 +62,9 @@ const DashboardLayout = () => {
   }, []);
 
   const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    localStorage.removeItem("email");
-    localStorage.removeItem("role");
-    localStorage.removeItem("username");
+    ["token", "user", "email", "role", "username", "selectedCompany"].forEach((k) =>
+      localStorage.removeItem(k),
+    );
     navigate("/login", { replace: true });
   };
 
@@ -100,14 +85,14 @@ const DashboardLayout = () => {
   return (
     <div className="flex h-screen bg-gray-100 overflow-hidden">
       <div className="hidden lg:block">
-        <Sidebar isOpen={true} toggleSidebar={() => {}} isMobile={false} />
+        <Sidebar isOpen toggleSidebar={noop} isMobile={false} />
       </div>
 
       <div className="lg:hidden">
         <Sidebar
           isOpen={sidebarOpen}
           toggleSidebar={() => setSidebarOpen(false)}
-          isMobile={true}
+          isMobile
         />
       </div>
 
@@ -144,9 +129,7 @@ const DashboardLayout = () => {
               <Bell size={18} />
             </button>
 
-            <span className="hidden xl:block text-sm text-gray-500 tabular-nums whitespace-nowrap">
-              {formatDateTime(now)}
-            </span>
+            <LiveClock />
 
             <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
               <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm font-semibold">
@@ -157,7 +140,6 @@ const DashboardLayout = () => {
                 <p className="text-sm font-medium text-gray-800 truncate max-w-[160px]">
                   {displayName}
                 </p>
-
                 <p className="text-xs text-gray-500 capitalize">{role}</p>
               </div>
             </div>
@@ -173,7 +155,9 @@ const DashboardLayout = () => {
         </header>
 
         <main className="flex-1 overflow-y-auto">
-          <Outlet />
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

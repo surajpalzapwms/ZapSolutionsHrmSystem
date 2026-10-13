@@ -97,9 +97,7 @@ const PayslipModal = ({ isOpen, onClose, record }) => {
         checkedPeriods.includes(p.period),
       );
       for (let i = 0; i < selectedPayrolls.length; i++) {
-        // eslint-disable-next-line no-await-in-loop
         await downloadOne(selectedPayrolls[i]);
-        // eslint-disable-next-line no-await-in-loop
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       showToast("success", `${selectedPayrolls.length} payslip(s) downloaded`);

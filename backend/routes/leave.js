@@ -1,6 +1,7 @@
 import express from "express";
 import { protect } from "../middleware/auth.js";
 import { allowAdminOnly } from "../middleware/auth.js";
+import { authorize } from "../middleware/authorize.js";
 import {
   listAttendance,
   getTodayAttendance,
@@ -29,6 +30,7 @@ import {
   getOpenAttendanceToday,
   getStaffSummary,
   getStaffCalendar,
+  getMyCalendar,
   applyMyLeave,
   getMyLeaves,
   getPendingLeaveRequests,
@@ -37,7 +39,10 @@ import {
   rejectLeaveRequest,
   reconcileAbsences,
   reconcileStaffSandwichLeave,
+  changeDayStatus,
 } from "../controllers/leave.js";
+
+import { legacyAutoCheckIn } from "../controllers/presenceController.js";
 
 const router = express.Router();
 
@@ -51,7 +56,14 @@ router.post("/attendance/checkin", protect, checkIn);
 router.post("/attendance/checkout", protect, checkOut);
 // Silent, automatic, fired by the frontend on app load — see autoCheckIn
 // in controllers/leave.js for the office-network gating.
-router.post("/attendance/auto-checkin", protect, autoCheckIn);
+// Now also records office presence (services/presence.js).
+router.post("/attendance/auto-checkin", protect, legacyAutoCheckIn);
+// Same monthly/annual calendar view the admin gets on the Staff → Calendar
+// screen, but for whichever staff member is making the request — the
+// controller resolves the staffId from the caller's own account, so there's
+// no id parameter here for one staff member to swap out to view another's
+// attendance. Safe to leave open to any authenticated role.
+router.get("/my-attendance/calendar", protect, getMyCalendar);
 
 // ── Admin: early sign-out approval ──────────────────────────────────────────
 router.get(
@@ -68,13 +80,27 @@ router.post(
 );
 
 // ── Staff List + per-Staff Calendar View ─────────────────────────────────────────
-router.get("/staff-summary", getStaffSummary);
-router.get("/staff-summary/:staffId/calendar", getStaffCalendar);
+// These show every staff member's data (or, via :staffId, ANY staff member's
+// calendar) — must be admin-only, otherwise one staff member could view
+// another's attendance simply by changing the staffId in the URL/API call.
+router.get("/staff-summary", protect, allowAdminOnly, getStaffSummary);
+router.get(
+  "/staff-summary/:staffId/calendar",
+  protect,
+  allowAdminOnly,
+  getStaffCalendar,
+);
 
 // ── Attendance ──────────────────────────────────────────────────────────────
-router.get("/attendance", listAttendance);
-router.get("/attendance/today", getTodayAttendance);
-router.get("/attendance/yesterday", getYesterdayAttendance);
+// Cross-staff attendance views — admin-only for the same reason as above.
+router.get("/attendance", protect, allowAdminOnly, listAttendance);
+router.get("/attendance/today", protect, allowAdminOnly, getTodayAttendance);
+router.get(
+  "/attendance/yesterday",
+  protect,
+  allowAdminOnly,
+  getYesterdayAttendance,
+);
 router.put("/attendance/:id", protect, allowAdminOnly, updateAttendance);
 router.delete("/attendance/:id", protect, allowAdminOnly, deleteAttendance);
 router.delete(
@@ -91,22 +117,39 @@ router.post(
   allowAdminOnly,
   convertExtraHoursToLeave,
 );
-router.get("/attendance/extra-hours/:userId", getExtraHoursSummary);
+router.get(
+  "/attendance/extra-hours/:userId",
+  protect,
+  allowAdminOnly,
+  getExtraHoursSummary,
+);
 
 // ── Holidays (scoped under this router → /api/hrm/leaves/holidays) ─────────
+// Not staff-specific — same holiday calendar applies to everyone, so this
+// one is fine left open to any authenticated request.
 router.get("/holidays", listHolidays);
 
 // ── Leaves ───────────────────────────────────────────────────────────────────
-router.get("/", listLeaves);
+// Lists every staff member's leave records — admin-only, same reasoning as
+// the attendance list above.
+router.get("/", protect, allowAdminOnly, listLeaves);
 router.post("/", protect, allowAdminOnly, applyLeave);
 router.put("/leave/:id", protect, allowAdminOnly, updateLeave);
 router.delete("/leave/:id", protect, allowAdminOnly, deleteLeave);
 router.post("/leave/import", protect, allowAdminOnly, importLeaves);
+// Admin-only: change what ONE calendar day is marked as (Present / Half Day
+// / Paid / Sick / Casual / Unpaid) in a single safe step — see
+// changeDayStatus in controllers/leave.js. Staff can never call this.
+router.put("/day-status", protect, allowAdminOnly, changeDayStatus);
 
 // ── Leave requests (staff self-service + admin approval) ───────────────────
-// Staff member: submit a request / view their own requests.
-router.get("/requests/my", protect, getMyLeaves);
-router.post("/requests/my", protect, applyMyLeave);
+// Staff member only (role "user") — submit a request / view their own
+// requests. Admin/super-admin accounts already apply leave for any staff
+// member (including themselves as a staff record, if applicable) via
+// POST /leaves above, so this self-service pair is deliberately restricted
+// to plain staff — matches the frontend's StaffOnlyRoute on this page.
+router.get("/requests/my", protect, authorize("user"), getMyLeaves);
+router.post("/requests/my", protect, authorize("user"), applyMyLeave);
 // Admin: review + decide on requests. Static paths declared before "/:id"
 // routes so they aren't swallowed by them.
 router.get("/requests/pending", protect, allowAdminOnly, getPendingLeaveRequests);
@@ -133,7 +176,16 @@ router.post(
 );
 
 // ── Misc ─────────────────────────────────────────────────────────────────────
-router.get("/extra-hours/:userId", getExtraHoursSimple);
-router.get("/user/:userId", getUserAttendance);
+// Both take an arbitrary :userId — without allowAdminOnly, any logged-in
+// staff account could read another staff member's hours/attendance by
+// swapping the id in the URL, which is exactly the cross-staff leak we're
+// closing here.
+router.get(
+  "/extra-hours/:userId",
+  protect,
+  allowAdminOnly,
+  getExtraHoursSimple,
+);
+router.get("/user/:userId", protect, allowAdminOnly, getUserAttendance);
 
 export default router;

@@ -7,6 +7,9 @@ export const holidayService = {
   create: (data) => api.post("/api/hrm/holidays", data),
   update: (id, data) => api.put(`/api/hrm/holidays/${id}`, data),
   delete: (id) => api.delete(`/api/hrm/holidays/${id}`),
-  deleteMany: (ids) => api.delete("/api/hrm/holidays", { data: { ids } }),
+  // The backend has no bulk-delete route for this resource, so delete one
+  // by one through the existing (validated, permission-checked) endpoint.
+  deleteMany: (ids) =>
+    Promise.all(ids.map((id) => api.delete(`/api/hrm/holidays/${id}`))),
   import: (data) => api.post("/api/hrm/holidays/import", data),
 };

@@ -20,7 +20,7 @@ export const env = {
   // Rate Limiting
   loginRateLimit: {
     windowMs: parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-    max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX) || 5,
+    max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX) || 20,
   },
 
   // Frontend/Backend URLs

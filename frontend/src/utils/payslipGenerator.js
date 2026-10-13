@@ -1,11 +1,10 @@
 // src/utils/payslipGenerator.js
 // Builds a single "Employee Payslip" PDF (styled after the company payslip
 // template) from a Payroll record and triggers a browser download.
-import jsPDF from "jspdf";
 import { getMonthName } from "./dateUtils";
+import { getBrand } from "./brand";
 
-// Edit this to match your organization.
-const COMPANY_NAME = "ZAP Solutionz";
+// Company name / finance title come from src/utils/brand.js.
 
 const COLORS = {
   navy: [15, 42, 74],
@@ -90,7 +89,10 @@ function drawCornerRibbon(doc, pageWidth, pageHeight, corner) {
  * Renders one payslip and saves it as a PDF.
  * @param {ReturnType<typeof buildPayslipData>} data
  */
-export const generatePayslipPDF = (data) => {
+export const generatePayslipPDF = async (data) => {
+  // jsPDF (+ html2canvas/dompurify it drags in) is ~400 KB — load it only
+  // when a payslip is actually being downloaded.
+  const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 48;
@@ -272,14 +274,18 @@ export const generatePayslipPDF = (data) => {
   doc.text("Accounts Team", pageWidth - margin, y, { align: "right" });
   y += 13;
   doc.setTextColor(...COLORS.textDark);
-  doc.text(`Finance Manager – ${COMPANY_NAME}`, margin, y);
+  doc.text(`${getBrand().financeTitle} – ${getBrand().name}`, margin, y);
   doc.setTextColor(...COLORS.textMuted);
-  doc.text(COMPANY_NAME, pageWidth - margin, y, { align: "right" });
+  doc.text(getBrand().name, pageWidth - margin, y, { align: "right" });
   y += 20;
   doc.text("Created by - Accounts team", margin, y);
   y += 14;
   doc.text("Approved by Admin", margin, y);
 
-  const filename = `Payslip_${data.employeeName.replace(/\s+/g, "_")}_${data.period}.pdf`;
+  // File name = staff name + month name, e.g. "Suraj_Pal_October_2026.pdf".
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const pm = /^(\d{4})-(\d{1,2})/.exec(String(data.period || ""));
+  const monthPart = pm ? `${MONTHS[Number(pm[2]) - 1]}_${pm[1]}` : String(data.period || "").replace(/[^\w-]+/g, "_");
+  const filename = `${String(data.employeeName || "Staff").trim().replace(/[^\w-]+/g, "_")}_${monthPart}.pdf`;
   doc.save(filename);
 };

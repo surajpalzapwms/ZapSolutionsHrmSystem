@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  History,
   Inbox,
   XCircle,
 } from "lucide-react";
@@ -12,57 +13,27 @@ import Button from "../common/Button";
 import Spinner from "../common/Spinner";
 import { attendanceService } from "../../services/attendanceService";
 import { showToast } from "../../utils/toast";
-
-const formatDate = (d) => {
-  if (!d) return "-";
-  const date = new Date(d);
-  if (isNaN(date.getTime())) return "-";
-  return date.toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-};
-
-// Multi-day ("range") requests share a requestGroupId — collapse them into
-// one row (From - To, N days) so the admin approves/rejects the whole span
-// with a single action instead of one per day.
-const groupRequests = (requests) => {
-  const groups = [];
-  const byGroupId = new Map();
-  for (const r of requests) {
-    if (!r.requestGroupId) {
-      groups.push({ key: r._id, groupId: null, days: [r] });
-      continue;
-    }
-    if (byGroupId.has(r.requestGroupId)) {
-      byGroupId.get(r.requestGroupId).days.push(r);
-    } else {
-      const entry = {
-        key: r.requestGroupId,
-        groupId: r.requestGroupId,
-        days: [r],
-      };
-      byGroupId.set(r.requestGroupId, entry);
-      groups.push(entry);
-    }
-  }
-  groups.forEach((g) =>
-    g.days.sort((a, b) => new Date(a.leaveDate) - new Date(b.leaveDate)),
-  );
-  return groups;
-};
+import LeaveHistoryModal from "../leave-requests/LeaveHistoryModal";
+import {
+  groupRequests,
+  groupTypeLabel,
+  groupDateLabel,
+  groupIsHalfDay,
+} from "../leave-requests/leaveRequestHelpers";
 
 /**
  * Admin panel: lists every leave request awaiting a decision and lets the
  * admin approve or reject it in place. Embedded at the top of the Attendance
  * & Leaves page so admins see pending requests without a separate route.
  */
-const LeaveRequestsPanel = ({ onDecision }) => {
+const LeaveRequestsPanel = ({ onDecision, onCountChange }) => {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(true);
   const [actingId, setActingId] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [history, setHistory] = useState([]);
 
   const fetchPending = useCallback(async () => {
     try {
@@ -83,66 +54,78 @@ const LeaveRequestsPanel = ({ onDecision }) => {
     fetchPending();
   }, [fetchPending]);
 
-  const handleApprove = async (group) => {
+  // The Attendance & Leaves page passes onCountChange to drive the bell
+  // badge, but this panel never called it, so the badge stayed empty.
+  useEffect(() => {
+    if (!loading) onCountChange?.(requests.length);
+  }, [requests, loading, onCountChange]);
+
+  // Approves/rejects every day of a group one at a time (in date order) so
+  // the backend's per-day leave-balance check still runs for each day. If
+  // one day fails (e.g. balance runs out part-way), the days already
+  // decided are removed from the list and the error is shown.
+  const decideGroup = async (group, action) => {
+    const isApprove = action === "approve";
+    const call = isApprove
+      ? attendanceService.approveLeaveRequest
+      : attendanceService.rejectLeaveRequest;
+    const done = new Set();
     setActingId(group.key);
     try {
-      if (group.groupId) {
-        await attendanceService.approveLeaveGroup(group.groupId);
-      } else {
-        await attendanceService.approveLeaveRequest(group.key);
+      for (const day of group.days) {
+        await call(day._id);
+        done.add(day._id);
       }
+      const verb = isApprove ? "approved" : "rejected";
       showToast(
         "success",
         group.days.length > 1
-          ? `Leave request approved for ${group.days.length} days`
-          : "Leave request approved",
+          ? `Leave request ${verb} for ${group.days.length} days`
+          : `Leave request ${verb}`,
       );
-      const idsInGroup = new Set(group.days.map((d) => d._id));
-      setRequests((prev) => prev.filter((r) => !idsInGroup.has(r._id)));
-      onDecision?.();
     } catch (err) {
       showToast(
         "error",
-        err.response?.data?.message || "Failed to approve request",
+        (done.size ? `${done.size} of ${group.days.length} day(s) done. ` : "") +
+          (err.response?.data?.message ||
+            `Failed to ${action} request`),
       );
     } finally {
+      if (done.size) {
+        setRequests((prev) => prev.filter((r) => !done.has(r._id)));
+        onDecision?.();
+      }
       setActingId(null);
     }
   };
 
-  const handleReject = async (group) => {
-    setActingId(group.key);
+  // Every request (any status, any staff member) for the history modal.
+  const openHistory = async () => {
+    setHistoryOpen(true);
     try {
-      if (group.groupId) {
-        await attendanceService.rejectLeaveGroup(group.groupId);
-      } else {
-        await attendanceService.rejectLeaveRequest(group.key);
-      }
-      showToast(
-        "success",
-        group.days.length > 1
-          ? `Leave request rejected for ${group.days.length} days`
-          : "Leave request rejected",
-      );
-      const idsInGroup = new Set(group.days.map((d) => d._id));
-      setRequests((prev) => prev.filter((r) => !idsInGroup.has(r._id)));
-      onDecision?.();
+      setHistoryLoading(true);
+      const res = await attendanceService.getAllLeaveRequests();
+      setHistory(res.data?.leaves || []);
     } catch (err) {
       showToast(
         "error",
-        err.response?.data?.message || "Failed to reject request",
+        err.response?.data?.message || "Failed to load leave history",
       );
     } finally {
-      setActingId(null);
+      setHistoryLoading(false);
     }
   };
+
+  const handleApprove = (group) => decideGroup(group, "approve");
+  const handleReject = (group) => decideGroup(group, "reject");
 
   return (
     <Card className="mb-4" noPadding>
+      <div className="flex items-center justify-between pr-6">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between px-6 py-4"
+        className="flex-1 flex items-center justify-between px-6 py-4"
       >
         <div className="flex items-center gap-2">
           <Inbox className="w-5 h-5 text-amber-600" />
@@ -157,6 +140,16 @@ const LeaveRequestsPanel = ({ onDecision }) => {
         </div>
         {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
       </button>
+      <Button
+        size="sm"
+        variant="outline"
+        className="ml-3 shrink-0"
+        onClick={openHistory}
+      >
+        <History size={14} />
+        View Leave History
+      </Button>
+      </div>
 
       {expanded && (
         <div className="border-t border-gray-200">
@@ -172,11 +165,7 @@ const LeaveRequestsPanel = ({ onDecision }) => {
             <div className="divide-y divide-gray-200">
               {groupRequests(requests).map((g) => {
                 const first = g.days[0];
-                const last = g.days[g.days.length - 1];
-                const dateLabel =
-                  g.days.length > 1
-                    ? `${formatDate(first.leaveDate)} - ${formatDate(last.leaveDate)} (${g.days.length} days)`
-                    : formatDate(first.leaveDate);
+                const dateLabel = groupDateLabel(g);
                 return (
                   <div
                     key={g.key}
@@ -186,7 +175,8 @@ const LeaveRequestsPanel = ({ onDecision }) => {
                       <p className="font-medium text-gray-800">
                         {first.userId?.staffName || "Unknown Staff"}{" "}
                         <span className="text-xs font-normal text-gray-400">
-                          {dateLabel} · {first.leaveType}
+                          {dateLabel} · {groupTypeLabel(g)}
+                          {groupIsHalfDay(g) ? " · Half Day" : ""}
                         </span>
                       </p>
                       <p className="text-sm text-gray-500">{first.reason}</p>
@@ -218,6 +208,14 @@ const LeaveRequestsPanel = ({ onDecision }) => {
           )}
         </div>
       )}
+      <LeaveHistoryModal
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        requests={history}
+        loading={historyLoading}
+        showStaffName
+        title="Leave History — All Staff"
+      />
     </Card>
   );
 };

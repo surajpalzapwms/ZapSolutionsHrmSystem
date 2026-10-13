@@ -51,7 +51,11 @@ const MobileDashboard = () => {
         </h1>
       </div>
 
-      {!admin && <SignInOutCard />}
+      {!admin && (
+        <div className="mb-4">
+          <SignInOutCard />
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         {visibleLinks.map((item) => (

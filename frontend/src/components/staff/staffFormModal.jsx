@@ -1,7 +1,4 @@
-// EXAMPLE — adapt this into your actual modal/dialog wrapper component
-// (the one that currently renders the "Add Staff Member" title + X you
-// circled). This is not a real file in your project — I don't have that
-// component, so I can't edit it directly. Copy the relevant bits in.
+
 
 import React, { useState } from "react";
 import { X } from "lucide-react";

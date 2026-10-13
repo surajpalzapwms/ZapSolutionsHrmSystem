@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
   Trash2,
   ShieldCheck,
+  CalendarRange,
 } from "lucide-react";
 import Button from "../common/Button";
 import Spinner from "../common/Spinner";
@@ -11,189 +12,97 @@ import { useMRCalendar } from "./hooks/useMRCalendar";
 import { SHORT_DAYS, MONTHS } from "../../utils/constants";
 import { showToast } from "../../utils/toast";
 import { attendanceService } from "../../services/attendanceService";
+import { payrollService } from "../../services/payrollService";
+import { advanceService } from "../../services/advanceService";
+import { staffService } from "../../services/staffService";
+import MonthSummaryPanel from "./MonthSummaryPanel";
+import { eachDateInRange } from "../../utils/dateUtils";
+import EditDayModal from "./EditDayModal";
+import BulkMarkMonthModal from "./BulkMarkMonthModal.jsx";
+import {
+  LEGEND,
+  TOOLTIP_STATUSES,
+  DELETABLE_STATUSES,
+  EDITABLE_STATUSES,
+  dayCellClasses,
+  dayCellSplitStyle,
+} from "./calendarHelpers";
+import {
+  DayTooltip,
+  DayEditButton,
+  MiniMonth,
+  SalaryBoxContent,
+  LeaveBalanceLine,
+} from "./calendarGridPieces";
 
-const STATUS_STYLES = {
-  present: "bg-green-500 text-white border-green-500",
-  half: "bg-orange-400 text-white border-orange-400",
-  swap: "bg-purple-500 text-white border-purple-500",
-  paid: "bg-blue-500 text-white border-blue-500",
-  sick: "bg-teal-500 text-white border-teal-500",
-  casual: "bg-pink-500 text-white border-pink-500",
-  unpaid: "bg-red-600 text-white border-red-600",
-  holiday: "bg-yellow-400 text-gray-900 border-yellow-400",
-};
+// Annual view badge: the total PAID LEAVE amount the company has given this
+// staff member this year (Jan up to the current month, or the whole year for
+// a past year). Only the paid-leave value is counted — NOT the salary and
+// NOT the payroll amounts paid out. Each month's figure comes from the
+// calendar payload's `paidLeaveValue[month]` (backend
+// services/leaveEncashment.js): PL days credited that month × that month's
+// per-day salary — the same "PL Amt" shown on each month card.
+const fmtINR = (n) =>
+  `₹${Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 
-const LEGEND = [
-  { label: "Present", className: "bg-green-500" },
-  { label: "Half Day", className: "bg-orange-400" },
-  { label: "Swap Leave", className: "bg-purple-500" },
-  { label: "Paid Leave", className: "bg-blue-500" },
-  { label: "Sick Leave", className: "bg-teal-500" },
-  { label: "Casual Leave", className: "bg-pink-500" },
-  { label: "Unpaid Leave", className: "bg-red-600" },
-  { label: "Holiday", className: "bg-yellow-400" },
-  { label: "Today", className: "bg-white border-2 border-indigo-400" },
-];
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-const formatTime = (value) => {
-  if (!value) return "--";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "--";
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-};
-
-const TOOLTIP_STATUSES = [
-  "present",
-  "half",
-  "holiday",
-  "paid",
-  "sick",
-  "casual",
-  "unpaid",
-  "swap",
-];
-
-// "holiday" is deliberately excluded from DELETABLE_STATUSES
-const DELETABLE_STATUSES = [
-  "present",
-  "half",
-  "paid",
-  "sick",
-  "casual",
-  "unpaid",
-  "swap",
-];
-
-const LEAVE_LABELS = {
-  paid: "Paid Leave",
-  sick: "Sick Leave",
-  casual: "Casual Leave",
-  unpaid: "Unpaid Leave",
-  swap: "Swap Leave",
-};
-
-const DayTooltip = ({ info }) => {
-  const isAttendance = info.status === "present" || info.status === "half";
+const TotalPaidLeaveBadge = ({ paidLeaveValue, year, loading }) => {
+  const now = new Date();
+  const lastMonth =
+    year < now.getFullYear() ? 11 : year > now.getFullYear() ? -1 : now.getMonth();
+  let amount = 0;
+  let days = 0;
+  let takenAmount = 0;
+  let leftAmount = 0;
+  for (let m = 0; m <= lastMonth; m++) {
+    const pl = paidLeaveValue?.[m];
+    if (!pl?.credited) continue;
+    amount += Number(pl.amount) || 0;
+    days += Number(pl.plDays) || 0;
+    takenAmount += Number(pl.plTakenAmount) || 0;
+    leftAmount += Number(pl.plLeftAmount) || 0;
+  }
+  const range =
+    lastMonth < 0 ? "" : `Jan–${MONTHS[lastMonth].slice(0, 3)} ${year}`;
+  const daysText = `${round2(days)} day${round2(days) === 1 ? "" : "s"}`;
   return (
     <div
-      className="pointer-events-none absolute left-1/2 bottom-full z-20 mb-2 w-max -translate-x-1/2
-        rounded-lg bg-gray-900 px-3 py-2 text-xs text-white opacity-0 shadow-lg
-        transition-opacity duration-150 group-hover:opacity-100"
+      className="flex flex-col items-end rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1 leading-tight"
+      title={
+        `Paid leave given by the company ${range ? `(${range})` : ""}: ${daysText} = ${fmtINR(amount)}\n` +
+        `Used: ${fmtINR(takenAmount)} · Still available: ${fmtINR(leftAmount)}\n` +
+        "Salary and payroll payouts are not included."
+      }
     >
-      {isAttendance ? (
-        <>
-          <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-green-400">Sign In:</span>
-            <span>{formatTime(info.loginTime)}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-red-400">Sign Out:</span>
-            <span>{formatTime(info.logoutTime)}</span>
-          </div>
-        </>
-      ) : info.status === "holiday" ? (
-        <div className="flex items-center gap-1.5">
-          <span className="font-semibold text-gray-300">Holiday:</span>
-          <span>{info.holidayName || "Holiday"}</span>
-        </div>
-      ) : (
-        <div className="flex items-center gap-1.5">
-          <span className="font-semibold text-gray-300">Leave:</span>
-          <span>
-            {LEAVE_LABELS[info.status] || "Leave"}
-            {info.isHalfDay ? " (Half Day)" : ""}
-          </span>
-        </div>
-      )}
-      <div
-        className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent
-          border-t-gray-900"
-      />
+      <span className="text-[11px] font-medium text-emerald-700">
+        Total Paid Leave {range && `(${range})`}
+      </span>
+      <span className="text-sm font-bold text-emerald-800">
+        {loading ? "Loading…" : fmtINR(amount)}
+        {!loading && (
+          <span className="ml-2 text-xs font-medium text-emerald-700">{daysText}</span>
+        )}
+      </span>
     </div>
   );
 };
 
-// FIXED: Holiday status takes absolute precedence
-const dayCellClasses = (status, isToday, isSelected) => {
-  if (status === "holiday") {
-    return STATUS_STYLES.holiday; // Always yellow, ignore rings
-  }
-  const base =
-    STATUS_STYLES[status] || "bg-white text-gray-600 border-gray-200";
-  const todayRing = isToday ? "ring-2 ring-indigo-400 ring-offset-1" : "";
-  const selectedRing = isSelected ? "ring-2 ring-gray-800 ring-offset-1" : "";
-  return `${base} ${todayRing} ${selectedRing}`;
-};
-
-const MiniMonth = ({
-  year,
-  month,
-  days,
-  isCurrentMonth,
-  today,
-  selectedDay,
-  onDayClick,
+const MRCalendarView = ({
+  staff,
+  onBack,
+  onDeleted,
+  holidays = [],
+  // Bumped by the parent after an import / Record Attendance / delete so
+  // this view refetches in place — it used to be part of this component's
+  // `key`, which unmounted and remounted the whole calendar (losing the
+  // month being viewed and jumping back to today) after every change.
+  refreshKey = 0,
 }) => {
-  const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  const daysInMonth = Object.keys(days).length;
-  const cells = [
-    ...Array(firstDow).fill(null),
-    ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
-  ];
-
-  return (
-    <div className="border border-gray-200 rounded-xl p-3">
-      <h4 className="text-sm font-semibold text-gray-700 mb-2 text-center">
-        {MONTHS[month]}
-      </h4>
-      <div className="grid grid-cols-7 gap-1 text-center text-[10px] text-gray-400 mb-1">
-        {SHORT_DAYS.map((d) => (
-          <div key={d}>{d[0]}</div>
-        ))}
-      </div>
-      <div className="grid grid-cols-7 gap-1">
-        {cells.map((day, idx) => {
-          const info = day ? days[day] : null;
-          const hasTooltip = info && TOOLTIP_STATUSES.includes(info.status);
-          const isDeletable = info && DELETABLE_STATUSES.includes(info.status);
-          const isToday = isCurrentMonth && today === day;
-          const isSelected = isDeletable && selectedDay === day;
-
-          return (
-            <div key={`${year}-${month}-${day || idx}`} className="relative group">
-              <button
-                type="button"
-                disabled={!isDeletable}
-                onClick={() => isDeletable && onDayClick?.(day)}
-                className={`w-full aspect-square rounded text-[10px] flex items-center justify-center border ${
-                  day
-                    ? dayCellClasses(info?.status, isToday, isSelected)
-                    : "border-transparent"
-                } ${isDeletable ? "cursor-pointer" : "cursor-default"}`}
-              >
-                {day || ""}
-              </button>
-              {info?.isHalfDay && (
-                <span
-                  className="pointer-events-none absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full
-                    bg-white text-[7px] font-bold leading-none flex items-center justify-center
-                    border border-gray-400 text-gray-700"
-                  title="Half Day"
-                >
-                  ½
-                </span>
-              )}
-              {hasTooltip && <DayTooltip info={info} />}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
-const MRCalendarView = ({ staff, onBack, onDeleted }) => {
-  const isRelieved = staff.status === "Relieving" && !!staff.relievingDate;
+  const isRelieved = staff.status === "Relieved" && !!staff.relievingDate;
   const relievingDateObj = isRelieved ? new Date(staff.relievingDate) : null;
   const maxYear = relievingDateObj ? relievingDateObj.getFullYear() : null;
   const maxMonth = relievingDateObj ? relievingDateObj.getMonth() : null;
@@ -210,6 +119,7 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     month,
     calendar,
     loading,
+    error,
     selectedDay,
     setSelectedDay,
     goToPrevMonth,
@@ -220,6 +130,15 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     goToYear,
     fetchCalendar,
   } = useMRCalendar(staff.staffId, defaultCalendarDate);
+
+  const firstRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (refreshKey === firstRefreshKey.current) return;
+    fetchCalendar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
+
+  const isAnnualView = viewMode === "annual";
 
   const yearOptions = useMemo(() => {
     const nowYear = new Date().getFullYear();
@@ -268,59 +187,272 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     });
   }, [calendar, isRelieved, year, maxYear, maxMonth, minYear, minMonth]);
 
-  const [openRecord, setOpenRecord] = useState(null);
-  const [openRecordLoading, setOpenRecordLoading] = useState(true);
-  const [signOutBusy, setSignOutBusy] = useState(false);
-  const [reconcileBusy, setReconcileBusy] = useState(false);
-
   const [selectedAnnualCell, setSelectedAnnualCell] = useState(null);
   useEffect(() => {
     setSelectedAnnualCell(null);
   }, [year, viewMode]);
 
-  const loadOpenRecord = useCallback(async () => {
-    if (!calendar?.attendanceUserId) {
-      setOpenRecord(null);
-      setOpenRecordLoading(false);
+  // The day currently open in the Edit modal — holds the calendar API's
+  // per-day info object (date, status, leaveType, isHalfDay, loginTime,
+  // logoutTime, recordId, leaveId) directly, so EditDayModal doesn't need
+  // to know whether it came from the monthly grid or an annual MiniMonth.
+  const [editingDay, setEditingDay] = useState(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [bulkTarget, setBulkTarget] = useState(null); // { month } | null
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const openBulkForMonth = useCallback((m) => setBulkTarget({ month: m }), []);
+
+  // Month-wise salary (Annual view only) — toggled on by the "View Salary"
+  // button. Keyed by calendar month index (0-11) -> that month's Payroll
+  // record for this staff member, refetched whenever the visible year
+  // changes so it never shows a stale year's figures.
+  // Salary is always shown in the Annual view (the old View/Hide Salary
+  // toggle was removed).
+  const showSalary = true;
+  const [salaryLoading, setSalaryLoading] = useState(false);
+  const [salaryByMonth, setSalaryByMonth] = useState({});
+
+  // Advances given to this staff member, grouped by "YYYY-M" (month 0-11)
+  // of the advance date — the Monthly view's summary panel shows the ones
+  // given in the month on the selected tab. Rejected advances are ignored.
+  const [advancesByMonth, setAdvancesByMonth] = useState({});
+  const [advancesLoading, setAdvancesLoading] = useState(false);
+  useEffect(() => {
+    if (!staff.staffId) return;
+    let cancelled = false;
+    setAdvancesLoading(true);
+    advanceService
+      .getAll({ employeeId: staff.staffId })
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.data?.data || [];
+        const grouped = {};
+        list
+          .filter((a) => a.status !== "rejected")
+          .forEach((a) => {
+            const d = new Date(a.date);
+            if (Number.isNaN(d.getTime())) return;
+            const key = `${d.getFullYear()}-${d.getMonth()}`;
+            (grouped[key] = grouped[key] || []).push(a);
+          });
+        Object.values(grouped).forEach((arr) => arr.sort((x, y) => new Date(x.date) - new Date(y.date)));
+        setAdvancesByMonth(grouped);
+      })
+      .catch(() => {
+        if (!cancelled) setAdvancesByMonth({});
+      })
+      .finally(() => {
+        if (!cancelled) setAdvancesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [staff.staffId, refreshKey]);
+
+  // Full & Final Paid Leave for a staff member who has LEFT: every month's
+  // Paid Leave still left (the same figure as the Settlement Statement's
+  // leave encashment). It is added to Total payable ONLY in the relieving
+  // month — ordinary months never include Paid Leave in Total payable.
+  const [finalPaidLeave, setFinalPaidLeave] = useState(null);
+  useEffect(() => {
+    if (!isRelieved || !staff.staffId) {
+      setFinalPaidLeave(null);
       return;
     }
-    setOpenRecordLoading(true);
-    try {
-      const res = await attendanceService.getOpenAttendanceToday();
-      const records = res.data?.records || [];
-      const mine = records.find(
-        (r) => String(r.userId) === String(calendar.attendanceUserId),
-      );
-      setOpenRecord(mine || null);
-    } catch (err) {
-      // Silent
-    } finally {
-      setOpenRecordLoading(false);
-    }
-  }, [calendar?.attendanceUserId]);
+    let cancelled = false;
+    staffService
+      .getSettlement(staff.staffId)
+      .then((res) => {
+        const fs = res.data?.data?.finalSettlement;
+        if (cancelled || !fs) return;
+        setFinalPaidLeave({
+          days: Number(fs.leaveEncashmentDays) || 0,
+          amount: Number(fs.leaveEncashment) || 0,
+          months: fs.leaveEncashmentMonths || [],
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setFinalPaidLeave(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isRelieved, staff.staffId, refreshKey]);
 
+  // Bumped for every salary fetch so a slow, out-of-date response can never
+  // overwrite a newer one.
+  const salaryReqId = useRef(0);
+
+  // `onlyMonth` (0-11) refreshes just that month and merges it into the
+  // existing figures — used by the Monthly view, which only shows one month
+  // at a time. Omit it to (re)load the whole year for the Annual view.
+  const loadSalary = useCallback(async (onlyMonth = null) => {
+    const reqId = ++salaryReqId.current;
+    setSalaryLoading(true);
+    try {
+      const res = await payrollService.getAll({
+        employeeId: staff.staffId,
+        periodFrom: `${year}-01`,
+        periodTo: `${year}-12`,
+      });
+      const records = res.data?.data || res.data || [];
+      const byMonth = {};
+      records.forEach((rec) => {
+        const monthIdx = Number(String(rec.period).split("-")[1]) - 1;
+        if (monthIdx < 0 || monthIdx > 11) return;
+        // Normalize a saved Payroll doc's field names to match the live
+        // estimate shape below (payableDays/totalDays/unpaidDays), so
+        // SalaryBoxContent can show a "why is this low" tooltip either way.
+        // A saved doc has no day-by-day list, only the attendanceInfo counts.
+        byMonth[monthIdx] = {
+          ...rec,
+          payableDays: rec.attendanceInfo?.payableDays,
+          totalDays: rec.attendanceInfo?.totalWorkingDays,
+          unpaidDays: rec.attendanceInfo?.unpaidLeaves,
+          leaveDeduction: rec.attendanceInfo?.leaveDeduction ?? 0,
+        };
+      });
+
+      // No saved Payroll doc for a month just means nobody has generated
+      // one yet — it doesn't mean there's nothing to show. For any month
+      // that's already happened (not in the future) and isn't saved, fetch
+      // a live estimate from the same calculate/preview endpoint the "Add
+      // Payroll" screen uses, so "View Salary" always shows a figure.
+      //
+      // A month WITH a saved Payroll doc is recalculated live too: the saved
+      // doc is a snapshot taken when payroll was generated, so after an
+      // admin edits a day (e.g. Unpaid -> Holiday) it would keep showing
+      // the old figure (14,516.13 instead of 15,000). The live figure is
+      // shown, and the saved amount is kept alongside for comparison.
+      const now = new Date();
+      const monthsNeedingEstimate = Array.from({ length: 12 }, (_, m) => m).filter((m) => {
+        if (onlyMonth !== null && m !== onlyMonth) return false;
+        if (year > now.getFullYear()) return false;
+        if (year === now.getFullYear() && m > now.getMonth()) return false;
+        return true;
+      });
+
+      const estimates = await Promise.allSettled(
+        monthsNeedingEstimate.map((m) => {
+          const period = `${year}-${String(m + 1).padStart(2, "0")}`;
+          return payrollService
+            .calculate(staff.staffId, period)
+            .then((r) => ({ month: m, data: r.data?.data || r.data }));
+        }),
+      );
+      estimates.forEach((result) => {
+        // A month can fail to calculate (e.g. before the staff member
+        // joined, or no Basic Payroll configured for them yet) — in that
+        // case just leave it out, so it still falls back to the normal
+        // "No salary record" message instead of showing a wrong figure.
+        if (result.status === "fulfilled" && result.value?.data) {
+          const { month, data } = result.value;
+          const saved = byMonth[month];
+          if (saved) {
+            // Same basis as the saved doc: live attendance-based salary,
+            // minus the advance recovered on that doc, plus its own
+            // allowances/deductions.
+            const live =
+              Number(data.netSalary || 0) -
+              Number(saved.advanceDeduction || 0) +
+              Number(saved.totalAllowance || 0) -
+              Number(saved.totalDeduction || 0);
+            const liveRounded = Math.round(Math.max(0, live) * 100) / 100;
+            const savedNet = Number(saved.netSalary || 0);
+            byMonth[month] = {
+              ...saved,
+              netSalary: liveRounded,
+              savedNetSalary: savedNet,
+              differsFromSaved: Math.abs(liveRounded - savedNet) >= 0.01,
+              payableDays: data.payableDays,
+              payableNote: data.payableNote || null,
+              totalDays: data.totalDaysInMonth,
+              unpaidDays: data.unpaidLeaveDays,
+              leaveDeduction: data.leaveDeduction ?? 0,
+              unmarkedDates: data.unmarkedDates,
+            };
+            return;
+          }
+          byMonth[month] = {
+            netSalary: data.finalSalary ?? data.netSalary,
+            isEstimate: true,
+            payableDays: data.payableDays,
+            payableNote: data.payableNote || null,
+            totalDays: data.totalDaysInMonth,
+            unpaidDays: data.unpaidLeaveDays,
+            leaveDeduction: data.leaveDeduction ?? 0,
+            // Dates counted unpaid because the calendar had NO attendance,
+            // leave or holiday record for them at all — as opposed to an
+            // explicit approved Unpaid leave. If a date shows up here that
+            // the calendar/attendance sheet clearly marks present, that
+            // means the imported attendance for that day isn't linked to
+            // this staff member's login account (wrong/stale userId),
+            // which is the most common cause of a much-lower-than-expected
+            // month.
+            unmarkedDates: data.unmarkedDates,
+          };
+        }
+      });
+
+      if (reqId === salaryReqId.current) {
+        if (onlyMonth === null) {
+          setSalaryByMonth(byMonth);
+        } else {
+          setSalaryByMonth((prev) => {
+            const next = { ...prev };
+            if (byMonth[onlyMonth]) next[onlyMonth] = byMonth[onlyMonth];
+            else delete next[onlyMonth];
+            return next;
+          });
+        }
+      }
+    } catch (err) {
+      if (reqId === salaryReqId.current) {
+        showToast("error", err.response?.data?.message || "Failed to load salary");
+      }
+    } finally {
+      if (reqId === salaryReqId.current) setSalaryLoading(false);
+    }
+  }, [year, staff.staffId]);
+
+  // A different year/staff starts from a clean slate.
   useEffect(() => {
-    loadOpenRecord();
-    const id = setInterval(loadOpenRecord, 60000);
-    return () => clearInterval(id);
-  }, [loadOpenRecord]);
+    salaryReqId.current++; // drop any in-flight response for the old year/staff
+    setSalaryByMonth({});
+  }, [year, staff.staffId]);
 
-  const toggleEarlySignOut = async (allow) => {
-    if (!openRecord) return;
-    setSignOutBusy(true);
-    try {
-      const res = await attendanceService.setEarlySignOutPermission(
-        openRecord.userId,
-        allow,
-      );
-      showToast("success", res.data?.message || "Updated");
-      await loadOpenRecord();
-    } catch (err) {
-      showToast("error", err.response?.data?.message || "Failed to update permission");
-    } finally {
-      setSignOutBusy(false);
+  // BUGFIX ("calendar shows 4 unpaid days but salary deducted 5"): the
+  // salary figures used to be fetched once and cached for the whole year
+  // ("already loaded" early-return), so after editing/deleting/importing a
+  // leave day the calendar updated (4 unpaid) while the salary strip kept
+  // the OLD estimate (5 unpaid days). Whenever the calendar data reloads,
+  // throw the cached figures away and — if the salary strip is open —
+  // recalculate them from the current data.
+  useEffect(() => {
+    if (!calendar) return;
+    if (calendar.mode === "annual") {
+      setSalaryByMonth({});
+      loadSalary();
+    } else {
+      // Monthly: the summary panel on the right always shows this month's
+      // salary, so load (just) this month whenever the calendar changes.
+      loadSalary(calendar.month);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendar]);
+
+  // Day-by-day info for a given month, wherever it's currently loaded —
+  // calendar.months[m] in Annual view, or calendar.days for the single
+  // month currently shown in Monthly view.
+  const getMonthDaysMap = useCallback(
+    (m) => {
+      const fromAnnual = calendar?.months?.find((mm) => mm.month === m);
+      if (fromAnnual?.days) return fromAnnual.days;
+      if (calendar?.days && m === month) return calendar.days;
+      return {};
+    },
+    [calendar, month],
+  );
 
   const cells = useMemo(() => {
     if (!calendar?.days) return [];
@@ -332,6 +464,16 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     ];
   }, [calendar, year, month]);
 
+  // Where the Monthly view tucks the salary box: the blank cells before
+  // day 1 (leading) or after the last day (trailing) when at least 2 wide,
+  // otherwise only the detail line under the grid is shown.
+  const monthFirstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const monthTrailingBlanks = (7 - (cells.length % 7)) % 7;
+  const monthLastRow = Math.max(1, Math.ceil(cells.length / 7));
+  // The Monthly view now shows salary in the right-hand summary panel, so
+  // the old salary box squeezed into the blank calendar cells is off.
+  const monthSalaryPlacement = "none";
+
   const handleDayClick = (day) => {
     if (!day) return;
     const info = calendar.days[day];
@@ -339,13 +481,92 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
     setSelectedDay(selectedDay === day ? null : day);
   };
 
-  const handleAnnualDayClick = (month, day) => {
+  // Stable callbacks (MiniMonth passes the month back as 2nd argument) so
+  // the memoized MiniMonth grids in the Annual view only re-render the
+  // month that actually changed instead of all 12 on every click.
+  const handleAnnualDayClick = useCallback((day, month) => {
     if (!day) return;
     setSelectedAnnualCell((prev) =>
       prev && prev.month === month && prev.day === day
         ? null
         : { month, day },
     );
+  }, []);
+
+  const handleEditClick = (day) => {
+    if (!day) return;
+    const info = calendar?.days?.[day];
+    if (!info || !EDITABLE_STATUSES.includes(info.status)) return;
+    setEditingDay(info);
+  };
+
+  const handleAnnualEditClick = useCallback(
+    (day, month) => {
+      if (!day) return;
+      const info = calendar?.months?.find((mm) => mm.month === month)?.days?.[day];
+      if (!info || !EDITABLE_STATUSES.includes(info.status)) return;
+      setEditingDay(info);
+    },
+    [calendar],
+  );
+
+  // Applying leave for a future date (e.g. booking November or April ahead
+  // of time) is allowed as long as the staff member has the balance for
+  // it, but the backend won't commit a future-dated day without an
+  // explicit go-ahead first — it comes back with `requiresConfirmation`
+  // instead of creating anything. This wraps that round trip: ask once via
+  // a plain confirm dialog, and only resend with `confirmed: true` if the
+  // person says yes. A past/today date never trips this — it resolves on
+  // the first call.
+  const applyLeaveWithConfirmation = async (payload) => {
+    const res = await attendanceService.applyLeave(payload);
+    if (res.data?.requiresConfirmation) {
+      const proceed = window.confirm(
+        `${res.data.message || "This date is in the future."} Apply this leave now?`,
+      );
+      if (!proceed) return res;
+      return attendanceService.applyLeave({ ...payload, confirmed: true });
+    }
+    return res;
+  };
+
+  // Admin-only edit of a single day. One server call does the whole
+  // change (validate -> replace old record -> re-check sandwich Sundays),
+  // so the day is never left blank if the change is refused — e.g. when
+  // there's no Paid/Sick/Casual left, which are fixed counts.
+  const handleEditSubmit = async ({ day, newStatus, loginTime, logoutTime, reason }) => {
+    if (!day) return false;
+    setEditBusy(true);
+    try {
+      const res = await attendanceService.changeDayStatus({
+        staffId: staff.staffId,
+        date: day.date,
+        status: newStatus,
+        loginTime: loginTime || undefined,
+        logoutTime: logoutTime || undefined,
+        reason,
+      });
+      if (res.data?.success === false) {
+        showToast("error", res.data?.message || `Could not update ${day.date}`);
+        return false;
+      }
+      showToast("success", res.data?.message || `${day.date} updated successfully`);
+      setEditingDay(null);
+      setSelectedDay(null);
+      setSelectedAnnualCell(null);
+      await fetchCalendar();
+      return true;
+    } catch (err) {
+      // Nothing was changed on the server — keep the modal open so the
+      // admin can pick a different status.
+      showToast(
+        "error",
+        err.response?.data?.message || `Could not update ${day.date} — nothing was changed`,
+      );
+      return false;
+    } finally {
+      setEditBusy(false);
+    }
   };
 
   const handleDeleteAttendance = async () => {
@@ -365,26 +586,96 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
       showToast("error", "This Staff has no linked login account, so attendance can't be recorded or deleted.");
       return;
     }
+    // The parent refreshes this calendar (via refreshKey) once the delete
+    // is done — no second fetch needed here.
     await onDeleted(calendar.attendanceUserId, info.date);
     setSelectedDay(null);
     setSelectedAnnualCell(null);
-    fetchCalendar();
   };
 
-  const handleFixSandwichLeave = async () => {
-    setReconcileBusy(true);
+  // Called by BulkMarkMonthModal on submit. For leave types, the backend's
+  // range mode already skips Sundays/holidays/existing attendance/leave on
+  // its own, so we just forward the range. For Present/Half Day there's no
+  // range endpoint, so we build the list of days ourselves — using the
+  // month's calendar data we already have loaded — and only send the days
+  // that have no attendance/leave/holiday on them yet, via the bulk
+  // attendance import endpoint.
+  const handleBulkSubmit = async ({ kind, status, leaveType, startDate, endDate, loginTime, logoutTime, reason }) => {
+    setBulkBusy(true);
     try {
-      const res = await attendanceService.reconcileSandwichLeave(staff.staffId);
-      const count = res.data?.created ?? 0;
-      showToast("success", count > 0
-        ? `Fixed ${count} day(s) — Sundays/holidays inside a leave range are now counted as leave.`
-        : "No sandwiched Sunday/holiday days found — nothing to fix."
-      );
+      if (kind === "leave") {
+        if (!staff.staffId) {
+          showToast("error", "Missing staff record — can't apply leave.");
+          return false;
+        }
+        try {
+          const res = await applyLeaveWithConfirmation({
+            userId: staff.staffId,
+            leaveDate: startDate,
+            endDate,
+            reason,
+            leaveType,
+          });
+          if (res.data?.success === false) {
+            showToast("error", res.data?.message || "Failed to apply leave for this range");
+            return false;
+          }
+          showToast("success", res.data?.message || "Leave applied for the selected range");
+        } catch (err) {
+          showToast("error", err.response?.data?.message || "Failed to apply leave for this range");
+          return false;
+        }
+      } else {
+        if (!calendar?.attendanceUserId) {
+          showToast("error", "This staff has no linked login account, so attendance can't be recorded.");
+          return false;
+        }
+        const daysMap = getMonthDaysMap(bulkTarget?.month);
+        const dates = eachDateInRange(startDate, endDate);
+        const rows = [];
+        let skippedLocal = 0;
+        dates.forEach((dateStr) => {
+          const dayNum = Number(dateStr.slice(-2));
+          const info = daysMap[dayNum];
+          const dow = new Date(`${dateStr}T00:00:00`).getDay();
+          if (dow === 0 || info?.status) {
+            skippedLocal++;
+            return;
+          }
+          rows.push({
+            userId: calendar.attendanceUserId,
+            date: dateStr,
+            status: status === "half" ? "half-day" : undefined,
+            loginTime: `${dateStr}T${loginTime}:00`,
+            logoutTime: status === "half" ? undefined : `${dateStr}T${logoutTime}:00`,
+          });
+        });
+
+        if (rows.length === 0) {
+          showToast("error", "Every day in that range is a Sunday, a holiday, or already marked — nothing to add.");
+          return false;
+        }
+
+        try {
+          const res = await attendanceService.importAttendance(rows);
+          const { importedCount = 0, failedCount = 0 } = res.data || {};
+          const skippedTotal = skippedLocal + failedCount;
+          showToast(
+            importedCount > 0 ? "success" : "error",
+            `${importedCount} day(s) marked as ${status === "half" ? "Half Day" : "Present"}` +
+              (skippedTotal > 0 ? `, ${skippedTotal} day(s) skipped (already marked / Sunday / holiday).` : "."),
+          );
+          if (importedCount === 0) return false;
+        } catch (err) {
+          showToast("error", err.response?.data?.message || "Failed to mark attendance for this range");
+          return false;
+        }
+      }
+
       await fetchCalendar();
-    } catch (err) {
-      showToast("error", err.response?.data?.message || "Failed to reconcile sandwich leave");
+      return true;
     } finally {
-      setReconcileBusy(false);
+      setBulkBusy(false);
     }
   };
 
@@ -403,16 +694,16 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
           >
             <Trash2 size={16} className="mr-1" /> Delete Attendance
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handleFixSandwichLeave}
-            disabled={reconcileBusy}
-            title="Bridge Sunday/holiday days that sit between two approved leaves but weren't counted as leave"
-          >
-            <ShieldCheck size={16} className="mr-1" />
-            {reconcileBusy ? "Fixing..." : "Fix Sandwiched Holidays"}
-          </Button>
+          {viewMode === "monthly" && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => openBulkForMonth(month)}
+              title="Mark Present/Half Day/Leave for every unmarked day in a date range within this month"
+            >
+              <CalendarRange size={16} className="mr-1" /> Bulk Mark Month
+            </Button>
+          )}
         </div>
         <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden">
           <button
@@ -433,43 +724,40 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-200 shadow p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h3 className="text-lg font-bold text-gray-800">
-            {staff.staffName} - Calendar View{" "}
-            <span className="text-indigo-600 font-medium text-base">
-              (Paid: {calendar?.paidCount ?? 0}, Sick: {calendar?.sickCount ?? 0}, Casual: {calendar?.casualCount ?? 0},
+      <div className={`bg-white rounded-2xl border border-gray-200 shadow ${isAnnualView ? "p-3" : "p-4"}`}>
+        <div className={`flex flex-wrap items-center justify-between gap-3 ${isAnnualView ? "mb-2" : "mb-4"}`}>
+          <h3 className={isAnnualView ? "text-base font-bold text-gray-800" : "text-lg font-bold text-gray-800"}>
+              {viewMode === "annual" ? "Annual View" : "Monthly View"}{" "}
+            <span className={isAnnualView ? "text-indigo-600 font-medium text-xs" : "text-indigo-600 font-medium text-base"}>
+              (Taken — Paid: {calendar?.paidCount ?? 0}, Sick: {calendar?.sickCount ?? 0}, Casual: {calendar?.casualCount ?? 0},
               Unpaid: {calendar?.unpaidCount ?? 0}, Swap: {calendar?.swapCount ?? 0})
             </span>
-            <span className="block text-emerald-700 font-medium text-sm mt-1">
+            <LeaveBalanceLine balance={calendar?.leaveBalance} />
+            <span className={isAnnualView ? "block text-emerald-700 font-medium text-xs mt-0.5" : "block text-emerald-700 font-medium text-sm mt-1"}>
               Total Working Days: {calendar?.totalWorkingDays ?? 0}{" "}
-              <span className="text-gray-400 font-normal">
+              {/* <span className="text-gray-400 font-normal">
                 (Days Elapsed: {calendar?.elapsedCalendarDays ?? 0} − Unpaid Leave: {calendar?.totalLeaveTaken ?? 0}; Present: {calendar?.presentCount ?? 0}
                 {calendar?.halfCount ? ` + Half Day: ${calendar.halfCount}` : ""})
-              </span>
+              </span> */}
             </span>
           </h3>
           <div className="flex items-center gap-2">
+            {isAnnualView && (
+              <TotalPaidLeaveBadge
+                paidLeaveValue={calendar?.paidLeaveValue}
+                year={year}
+                loading={loading && !calendar}
+              />
+            )}
             <button
               onClick={viewMode === "annual" ? handlePrevYear : handlePrevMonth}
               disabled={viewMode === "annual" ? atMinYear : atMinMonth}
+              title={viewMode === "annual" ? "Previous year" : "Previous month"}
               className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <ChevronLeft size={18} />
             </button>
 
-            {viewMode === "monthly" && (
-              <select
-                value={month}
-                onChange={(e) => goToMonth(year, Number(e.target.value))}
-                className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                aria-label="Jump to month"
-              >
-                {monthOptions.map(({ m, idx }) => (
-                  <option key={m} value={idx}>{m}</option>
-                ))}
-              </select>
-            )}
             <select
               value={year}
               onChange={(e) =>
@@ -494,9 +782,24 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
         </div>
 
         {loading ? (
+          // Only shown for a month/year that isn't cached yet — a month
+          // viewed before renders instantly (see useMRCalendar).
           <Spinner />
+        ) : !calendar ? (
+          // A failed/timed-out fetch (this endpoint can be slow — see the
+          // timeout comment in attendanceService.getStaffCalendar) used to
+          // leave this area completely blank once loading finished, with
+          // no spinner and no indication anything had gone wrong. Show a
+          // visible retry instead so it's obvious what happened and the
+          // user isn't left waiting on nothing.
+          <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-gray-500">
+            <p className="text-sm">{error || "Couldn't load this calendar."}</p>
+            <Button variant="outline" size="sm" onClick={fetchCalendar}>
+              Retry
+            </Button>
+          </div>
         ) : viewMode === "annual" ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {visibleMonths?.map((m) => (
               <MiniMonth
                 key={`${year}-${m.month}`}
@@ -506,37 +809,124 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
                 isCurrentMonth={m.isCurrentMonth}
                 today={m.today}
                 selectedDay={selectedAnnualCell?.month === m.month ? selectedAnnualCell.day : null}
-                onDayClick={(day) => handleAnnualDayClick(m.month, day)}
+                onDayClick={handleAnnualDayClick}
+                onEditClick={handleAnnualEditClick}
+                onMonthDoubleClick={openBulkForMonth}
+                showSalary={showSalary}
+                salary={salaryByMonth[m.month] || null}
+                paidLeave={calendar?.paidLeaveValue?.[m.month] || null}
               />
             ))}
           </div>
         ) : (
           <>
+            {/* One tab per month of the selected year — click to open it. */}
+            <div className="flex gap-1 overflow-x-auto pb-2 mb-4 border-b border-gray-100" role="tablist">
+              {MONTHS.map((name, idx) => {
+                const allowed = monthOptions.some((o) => o.idx === idx);
+                const active = idx === month;
+                const hasAdvance = !!advancesByMonth[`${year}-${idx}`];
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    disabled={!allowed}
+                    onClick={() => goToMonth(year, idx)}
+                    title={allowed ? `${name} ${year}` : "Outside joining / relieving dates"}
+                    className={`relative shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      active
+                        ? "bg-blue-600 text-white shadow-sm"
+                        : allowed
+                        ? "bg-gray-50 text-gray-700 hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                        : "bg-gray-50 text-gray-300 cursor-not-allowed"
+                    }`}
+                  >
+                    {name.slice(0, 3)}
+                    {hasAdvance && (
+                      <span
+                        className={`absolute top-1 right-1 w-1.5 h-1.5 rounded-full ${active ? "bg-amber-300" : "bg-orange-500"}`}
+                        aria-label="Advance given this month"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-5">
+            <div>
             <div className="grid grid-cols-7 gap-2 text-center text-sm font-medium text-gray-500 mb-2">
               {SHORT_DAYS.map((d) => (
                 <div key={d} className={d === "Sun" ? "text-red-500" : ""}>{d}</div>
               ))}
             </div>
             <div className="grid grid-cols-7 gap-2">
+              {monthSalaryPlacement === "leading" && (
+                <div
+                  style={{ gridRow: 1, gridColumn: `1 / span ${monthFirstDow}` }}
+                  className="h-full min-h-[52px] rounded-lg border border-dashed border-blue-300 bg-blue-50 flex flex-col items-center justify-center px-1 text-center leading-tight"
+                  title="This month's salary"
+                >
+                  <SalaryBoxContent
+                    salary={salaryByMonth[month] || null}
+                    pl={calendar?.paidLeaveValue?.[month] || null}
+                    large
+                  />
+                </div>
+              )}
+              {monthSalaryPlacement === "trailing" && (
+                <div
+                  style={{
+                    gridRow: monthLastRow,
+                    gridColumn: `${8 - monthTrailingBlanks} / span ${monthTrailingBlanks}`,
+                  }}
+                  className="h-full min-h-[52px] rounded-lg border border-dashed border-blue-300 bg-blue-50 flex flex-col items-center justify-center px-1 text-center leading-tight"
+                  title="This month's salary"
+                >
+                  <SalaryBoxContent
+                    salary={salaryByMonth[month] || null}
+                    pl={calendar?.paidLeaveValue?.[month] || null}
+                    large
+                  />
+                </div>
+              )}
               {cells.map((day, idx) => {
+                if (day === null) return null; // days are positioned explicitly below
                 const info = day ? calendar.days[day] : null;
                 const isToday = calendar?.isCurrentMonth && calendar?.today === day;
                 const hasTooltip = info && TOOLTIP_STATUSES.includes(info.status);
+                const isEditable = info && EDITABLE_STATUSES.includes(info.status);
+                const isSplit = !!info?.isHalfDayTopUp;
                 return (
-                  <div key={`${year}-${month}-${day || idx}`} className="relative group">
+                  <div
+                    key={`${year}-${month}-${day || idx}`}
+                    className="relative group"
+                    style={{
+                      gridRow: Math.floor((monthFirstDow + day - 1) / 7) + 1,
+                      gridColumn: ((monthFirstDow + day - 1) % 7) + 1,
+                    }}
+                  >
                     <button
                       onClick={() => handleDayClick(day)}
                       disabled={!day}
+                      style={isSplit ? dayCellSplitStyle(info) : undefined}
                       className={`w-full min-h-[52px] rounded-lg border font-medium text-sm transition-colors ${
-                        day ? dayCellClasses(info?.status, isToday, selectedDay === day) : "border-transparent"
+                        day ? dayCellClasses(info?.status, isToday, selectedDay === day, isSplit) : "border-transparent"
                       } ${hasTooltip ? "cursor-pointer" : "cursor-default"}`}
                     >
                       {day || ""}
                     </button>
-                    {info?.isHalfDay && (
+                    {isEditable && <DayEditButton onClick={() => handleEditClick(day)} />}
+                    {(info?.isHalfDay || isSplit) && (
                       <span
                         className="pointer-events-none absolute top-1 right-1 w-4 h-4 rounded-full bg-white text-[9px] font-bold leading-none flex items-center justify-center border border-gray-400 text-gray-700"
-                        title="Half Day"
+                        title={
+                          isSplit
+                            ? `Worked Half Day, topped up with ${info.topUpLeaveType || "leave"}`
+                            : "Half Day"
+                        }
                       >
                         ½
                       </span>
@@ -546,20 +936,54 @@ const MRCalendarView = ({ staff, onBack, onDeleted }) => {
                 );
               })}
             </div>
+            </div>
+
+            <MonthSummaryPanel
+              monthLabel={`${MONTHS[month]} ${year}`}
+              pl={calendar?.paidLeaveValue?.[month] || null}
+              salary={salaryByMonth[month] || null}
+              salaryLoading={salaryLoading}
+              advances={advancesByMonth[`${year}-${month}`] || []}
+              advancesLoading={advancesLoading}
+              isRelievingMonth={isRelieved && year === maxYear && month === maxMonth}
+              finalPaidLeave={finalPaidLeave}
+            />
+            </div>
           </>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 mt-6 pt-4 border-t border-gray-100">
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-gray-600">
+        <div className={`flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-t border-gray-100 ${isAnnualView ? "mt-3 pt-2" : "mt-6 pt-4"}`}>
+          <div className={isAnnualView ? "flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-gray-600" : "flex flex-wrap gap-x-6 gap-y-2 text-xs text-gray-600"}>
             {LEGEND.map((l) => (
               <div key={l.label} className="flex items-center gap-1.5">
-                <span className={`w-3.5 h-3.5 rounded ${l.className}`} />
+                <span className={`${isAnnualView ? "w-3 h-3" : "w-3.5 h-3.5"} rounded ${l.className}`} />
                 {l.label}
               </div>
             ))}
           </div>
         </div>
       </div>
+
+      <EditDayModal
+        isOpen={!!editingDay}
+        onClose={() => !editBusy && setEditingDay(null)}
+        onSubmit={handleEditSubmit}
+        day={editingDay}
+        holidays={holidays}
+        canMarkAttendance={!!calendar?.attendanceUserId}
+        leaveBalance={calendar?.leaveBalance}
+      />
+
+      <BulkMarkMonthModal
+        isOpen={!!bulkTarget}
+        onClose={() => !bulkBusy && setBulkTarget(null)}
+        onSubmit={handleBulkSubmit}
+        month={bulkTarget?.month ?? null}
+        year={year}
+        canMarkAttendance={!!calendar?.attendanceUserId}
+        minDateOverall={joinDateObj || null}
+        maxDateOverall={relievingDateObj || null}
+      />
     </div>
   );
 };

@@ -1,11 +1,13 @@
 // src/components/staff/hooks/useStaff.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { staffService } from "../../../services/staffService";
 import { useModal } from "../../../hooks/useModal";
 import { usePagination } from "../../../hooks/usePagination";
 import { useSearch } from "../../../hooks/useSearch";
 import { showToast } from "../../../utils/toast";
 import { ITEMS_PER_PAGE } from "../../../utils/constants";
+import { useCurrentStaffOnly } from "../../../hooks/useCurrentStaffFilter";
+import { isCurrentStaff } from "../../../utils/staffStatus";
 
 export const useStaff = () => {
   const [staff, setStaff] = useState([]);
@@ -22,6 +24,7 @@ export const useStaff = () => {
     try {
       setLoading(true);
       const res = await staffService.getAll();
+      console.log("Fetched staff:", res.data?.data || res.data || []);
       setStaff(res.data?.data || res.data || []);
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to load staff");
@@ -44,7 +47,14 @@ export const useStaff = () => {
     fetchTeams();
   }, [fetchStaff, fetchTeams]);
 
-  const { searchTerm, setSearchTerm, filteredData } = useSearch(staff, [
+  // "Current staff only" toggle: hide staff who have left the organization.
+  const [currentOnly, setCurrentOnly] = useCurrentStaffOnly();
+  const visibleStaff = useMemo(
+    () => (currentOnly ? staff.filter(isCurrentStaff) : staff),
+    [staff, currentOnly],
+  );
+
+  const { searchTerm, setSearchTerm, filteredData } = useSearch(visibleStaff, [
     "staffName",
     "staffId",
     "projectName",
@@ -56,6 +66,11 @@ export const useStaff = () => {
     filteredData,
     ITEMS_PER_PAGE.STAFF
   );
+
+  // Back to page 1 whenever the toggle changes the list.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [currentOnly, setCurrentPage]);
 
   const toggleSelect = useCallback((member) => {
     setSelected((prev) =>
@@ -76,7 +91,7 @@ export const useStaff = () => {
     async (id, name) => {
       try {
         await staffService.delete(id);
-        showToast("success", `${name || "Staff member"} deleted successfully`);
+        showToast("success", `${name || "Staff member"} and all related data deleted`);
         setSelected((prev) => prev.filter((s) => s.id !== id));
         await fetchStaff();
       } catch (err) {
@@ -89,7 +104,7 @@ export const useStaff = () => {
   const deleteSelected = useCallback(async () => {
     try {
       await staffService.deleteMany(selected.map((s) => s.id));
-      showToast("success", "Selected staff deleted successfully");
+      showToast("success", "Selected staff and all their data deleted");
       setSelected([]);
       await fetchStaff();
     } catch (err) {
@@ -131,5 +146,9 @@ export const useStaff = () => {
     addModal,
     importModal,
     allStaff: staff,
+    currentOnly,
+    setCurrentOnly,
+    visibleCount: visibleStaff.length,
+    filteredCount: filteredData.length,
   };
 };

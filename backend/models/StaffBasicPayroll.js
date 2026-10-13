@@ -28,7 +28,6 @@ const staffBasicPayrollSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Staff",
       required: true,
-      unique: true,
     },
     employeeName: {
       type: String,
@@ -56,6 +55,8 @@ const staffBasicPayrollSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+staffBasicPayrollSchema.index({ employeeId: 1 }, { unique: true });
 
 const StaffBasicPayroll = mongoose.model("StaffBasicPayroll", staffBasicPayrollSchema);
 export default StaffBasicPayroll;

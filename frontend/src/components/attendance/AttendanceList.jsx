@@ -1,6 +1,6 @@
 // src/components/attendance/AttendanceList.jsx
 import React from "react";
-import { Clock, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import Table from "../common/Table";
 import Pagination from "../common/Pagination";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
@@ -17,7 +17,6 @@ const AttendanceList = ({
   toggleSelect,
   toggleSelectAll,
   onDelete,
-  onViewExtraHours,
   currentPage,
   totalPages,
   onPageChange,
@@ -39,19 +38,6 @@ const AttendanceList = ({
         <span className={`px-2 py-1 rounded-full text-xs font-medium capitalize ${typeColors[row.attendanceType] || "bg-gray-100 text-gray-700"}`}>
           {row.attendanceType}
         </span>
-      ),
-    },
-    {
-      key: "extraHoursInMinutes",
-      header: "Extra Hours",
-      render: (row) => (
-        <button
-          onClick={() => onViewExtraHours(row.userId)}
-          className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800"
-        >
-          <Clock size={14} />
-          {row.extraHoursInMinutes ? `${row.extraHoursInMinutes}m` : "0m"}
-        </button>
       ),
     },
     {

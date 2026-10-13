@@ -1,3 +1,4 @@
+// models/StaffAdvance.js
 import mongoose from "mongoose";
 
 const staffAdvanceSchema = new mongoose.Schema(
@@ -43,14 +44,15 @@ const staffAdvanceSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
-    remarks: {
-      type: String,
-    },
   },
   {
     timestamps: true,
   }
 );
+
+// Payroll looks up each staff member's outstanding advances on every
+// salary calculation — index the fields it filters and sorts on.
+staffAdvanceSchema.index({ employeeId: 1, status: 1, date: 1 });
 
 const StaffAdvance = mongoose.model("StaffAdvance", staffAdvanceSchema);
 export default StaffAdvance;

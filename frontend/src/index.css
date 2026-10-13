@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+:root {
+  /* Set at startup from src/utils/brand.js */
+  --brand-primary: #2563eb;
+  --brand-sidebar: #0b1220;
+}
+
 @layer utilities {
   .fade-in {
     animation: fadeIn 0.7s ease-out forwards;
@@ -66,4 +72,32 @@
   .auth-card {
     animation: none;
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Holiday announcement ticker (header). Pure-CSS, GPU-composited bounce:
+   the track slides across the container (0 → 100% of container width)
+   while the message slides back by its own width (-100% → 0), so it
+   starts fully hidden on the left and ends fully hidden on the right.
+   Replaces a requestAnimationFrame loop that forced a layout read
+   (offsetWidth) 60 times a second on every page.
+   ══════════════════════════════════════════════════════════════════════ */
+.ticker-track {
+  animation: ticker-track var(--ticker-duration, 14s) linear infinite alternate;
+  will-change: transform;
+}
+.ticker-msg {
+  animation: ticker-msg var(--ticker-duration, 14s) linear infinite alternate;
+  will-change: transform;
+}
+@keyframes ticker-track {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@keyframes ticker-msg {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track, .ticker-msg { animation: none; }
 }

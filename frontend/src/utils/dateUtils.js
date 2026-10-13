@@ -20,7 +20,7 @@ export const formatDateToDDMMMYYYY = (dateString) => {
     let date;
     if (dateString instanceof Date) date = dateString;
     else if (typeof dateString === "string") {
-      const m = dateString.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      const m = dateString.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
       date = m ? new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1])) : new Date(dateString);
     } else date = new Date(dateString);
     if (isNaN(date.getTime())) return dateString || "--";
@@ -32,6 +32,17 @@ export const formatDateToDDMMMYYYY = (dateString) => {
 };
 
 export const getTodayDate = () => new Date().toISOString().split("T")[0];
+
+// Normalizes any date-ish value (ISO string, Date, timestamp) coming back
+// from the API into the "YYYY-MM-DD" shape the DatePicker/inputs expect,
+// using local time (not UTC) so it matches what the calendar shows.
+export const toDateInputValue = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().split("T")[0];
+};
 
 export const getCurrentMonth = () => new Date().toISOString().slice(0, 7);
 
@@ -69,13 +80,7 @@ export const isSaturday = (date) => {
   return d.getDay() === 6;
 };
 
-/**
- * Finds the holiday (if any) that covers a given date.
- * `holidays` is the raw array returned by the holidays API, each with
- * enabled / startDate / endDate. Only "enabled" holidays block the date.
- * Dates are compared using the plain Y-M-D value (no timezone math),
- * matching how the date pickers hand us "YYYY-MM-DD" strings.
- */
+
 export const findHolidayForDate = (dateString, holidays = []) => {
   if (!dateString || !Array.isArray(holidays) || holidays.length === 0) return null;
 
@@ -94,11 +99,6 @@ export const findHolidayForDate = (dateString, holidays = []) => {
   );
 };
 
-/**
- * Combines the Sunday check and the holiday-calendar check into a single
- * helper so forms can show one consistent "why can't I pick this date"
- * message. Returns null when the date is a normal working day.
- */
 export const getBlockedDayReason = (dateString, holidays = []) => {
   if (!dateString) return null;
   if (isSunday(dateString)) return "Sunday";
@@ -125,6 +125,35 @@ export const getShortMonthName = (monthIndex) => {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return months[monthIndex] || "";
+};
+
+// Local-calendar "YYYY-MM-DD" for a Date object — deliberately NOT
+// date.toISOString() (which converts to UTC first and can shift the date
+// by a day depending on the server/browser timezone). Used anywhere we
+// need to turn a plain JS Date back into the same date-only string format
+// the date pickers and APIs use.
+export const formatDateISO = (date) => {
+  const d = new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+// Every calendar day from startStr to endStr (inclusive), both "YYYY-MM-DD",
+// as an array of "YYYY-MM-DD" strings. Used by bulk date-range actions
+// (e.g. the "bulk mark a month" modal) that need to walk every day in a
+// range client-side. Guarded to a max of a year's worth of days.
+export const eachDateInRange = (startStr, endStr) => {
+  const dates = [];
+  if (!startStr || !endStr) return dates;
+  let cursor = new Date(`${startStr}T00:00:00`);
+  const last = new Date(`${endStr}T00:00:00`);
+  for (let guard = 0; cursor <= last && guard < 366; guard++) {
+    dates.push(formatDateISO(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dates;
 };
 
 export const parseExcelDate = (dateValue) => {

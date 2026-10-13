@@ -93,6 +93,14 @@ holidaySchema.index({ name: 1, startDate: 1 }, { unique: true });
 holidaySchema.index({ startDate: 1 });
 holidaySchema.index({ endDate: 1 });
 holidaySchema.index({ yearCode: 1 });
+// The actual query shape used everywhere a holiday range is looked up
+// (isHolidayOrSunday, warmHolidayWindow, buildMonthDays, etc.) is
+// { enabled: true, startDate: { $lte }, endDate: { $gte } }. The single-
+// field indexes above can each narrow one side of that range but Mongo can
+// only use one of them per query (or fall back to a slower index
+// intersection) — this compound index lets it satisfy the whole filter
+// directly.
+holidaySchema.index({ enabled: 1, startDate: 1, endDate: 1 });
 
 holidaySchema.statics.findByYear = function (year) {
   return this.find({ yearCode: year.toString() });

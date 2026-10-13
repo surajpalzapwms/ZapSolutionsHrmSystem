@@ -2,20 +2,55 @@ import User from "../models/User.js";
 import Staff from "../models/Staff.js";
 import { performSelfCheckIn } from "./leave.js";
 import jwt from "jsonwebtoken";
-import { ALL_TAB_KEYS, TAB_TREE, isAdminRole } from "../config/permissions.js";
+import {
+  ALL_TAB_KEYS,
+  isAdminRole,
+  TAB_TREE,
+} from "../config/permissions.js";
 import { isFromOfficeNetwork } from "../utils/officeNetwork.js";
+import { autoAttendanceApplies } from "../services/presence.js";
+import { encryptPassword, decryptPassword } from "../utils/passwordVault.js";
+
+// Keeps the admin-viewable copy of a staff member's password (shown in the
+// Staff History view) in step with the password they actually log in with.
+// Staff and User are linked only by email. Never throws — a failure here
+// must not break login or a password change.
+const syncStaffViewablePassword = async (email, plainPassword) => {
+  try {
+    if (!email || !plainPassword) return;
+    const staff = await Staff.findOne({ email: email.toLowerCase().trim() })
+      .select("+passwordEncrypted")
+      .lean();
+    if (!staff) return;
+    if (decryptPassword(staff.passwordEncrypted) === plainPassword) return;
+    // updateOne skips the model hooks, so only the viewable copy changes —
+    // login itself keeps using the User's bcrypt hash.
+    await Staff.updateOne(
+      { _id: staff._id },
+      { $set: { passwordEncrypted: encryptPassword(plainPassword) } },
+    );
+  } catch (err) {
+    console.error("Could not sync staff viewable password:", err.message);
+  }
+};
 
 // Staff and User are only linked by email (no stored userId — same pattern
 // used everywhere else in this codebase). Returns a short, user-facing
 // reason string if this account belongs to a staff member who has already
-// left the organization (status "Relieving" with a relieving date that has
+// left the organization (status "Relieved" with a relieving date that has
 // actually passed), or null if login should be allowed to proceed.
 const getRelievedLoginBlockReason = async (email) => {
   if (!email) return null;
   const staff = await Staff.findOne({ email: email.toLowerCase().trim() })
-    .select("status relievingDate")
+    .select("status relievingDate enabled")
     .lean();
-  if (!staff || staff.status !== "Relieving" || !staff.relievingDate) {
+  if (!staff) return null;
+  // The Active/Inactive toggle on the Staff page is the final word:
+  // Active => allowed to log in (even if the status is Relieved);
+  // Inactive => blocked (handled by getInactiveLoginBlockReason below).
+  if (staff.enabled === true || staff.enabled === false) return null;
+  // Old records with no Active flag at all: fall back to the Relieved rule.
+  if (staff.status !== "Relieved" || !staff.relievingDate) {
     return null;
   }
   const today = new Date();
@@ -26,10 +61,33 @@ const getRelievedLoginBlockReason = async (email) => {
   return "You are not allowed to login because admin has deactivated you.";
 };
 
+// Returns a message if this login account has been set Inactive by an admin
+// (Staff.enabled === false, or User.isActive === false), else null. The
+// super admin is exempt so an admin can never lock everyone out.
+const INACTIVE_MESSAGE =
+  "You are not allowed to login because admin has deactivated you.";
+const getInactiveLoginBlockReason = async (user) => {
+  if (!user || user.role === "super-admin") return null;
+  if (user.isActive === false) return INACTIVE_MESSAGE;
+  if (!user.email) return null;
+  const staff = await Staff.findOne({ email: user.email.toLowerCase().trim() })
+    .select("enabled")
+    .lean();
+  if (staff && staff.enabled === false) return INACTIVE_MESSAGE;
+  return null;
+};
+
 // Generate JWT Token
-const generateToken = (user) => {
+// The phone app keeps marking attendance in the background (Wi-Fi / GPS)
+// without the user opening it, so its session must not run out after a
+// week — otherwise attendance silently stops until they log in again.
+const generateToken = (user, { client } = {}) => {
+  const expiresIn =
+    client === "mobile"
+      ? process.env.MOBILE_JWT_EXPIRE || "365d"
+      : process.env.JWT_EXPIRE || "7d";
   return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || "7d",
+    expiresIn,
   });
 };
 
@@ -165,136 +223,55 @@ export const register = async (req, res) => {
   }
 };
 
-// @desc    Login user
+// Turns what was typed in the login box into the account's e-mail.
+// Anything with an "@" is an e-mail; anything else is treated as a Staff ID
+// (case-insensitive, so "zs0019" finds "ZS0019") and mapped to that staff
+// member's e-mail — the login account (User) is linked to Staff by e-mail,
+// so the password is the same whichever one is used.
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const resolveLoginEmail = async (identifier) => {
+  const raw = String(identifier || "").trim();
+  if (!raw) return null;
+  if (raw.includes("@")) return raw.toLowerCase();
+  const staff = await Staff.findOne({ staffId: new RegExp(`^${escapeRegex(raw)}$`, "i") })
+    .select("email")
+    .lean();
+  return staff?.email ? String(staff.email).trim().toLowerCase() : null;
+};
+
+// @desc    Login user (e-mail OR Staff ID + password)
 // @route   POST /api/auth/login
 // @access  Public
-
 export const login = async (req, res) => {
   try {
-    console.log("========== LOGIN START ==========");
-
-    // 1. Request body
-    console.log("[1] req.body:", req.body);
-
-    const { email, password } = req.body;
-
-    console.log("[2] Extracted email:", email);
-    console.log("[3] Password received:", password ? "YES" : "NO");
-
-    // 2. Validate email/password
-    console.log("[4] Checking email and password...");
-
-    if (!email || !password) {
-      console.log("[4.1] FAILED: Email or password missing");
-
+    // `identifier` is either an e-mail ("suraj@zapwms.com") or a Staff ID
+    // ("ZS0019"). Older clients send it as `email`, so both keys work.
+    const body = req.body || {};
+    const identifier = body.identifier ?? body.email ?? body.staffId;
+    const { password } = body;
+    if (!identifier || !password) {
       return res.status(400).json({
         success: false,
-        message: "Please provide email and password",
+        message: "Please provide your email or Staff ID and password",
       });
     }
 
-    console.log("[4.2] Email and password are present");
-
-    // 3. Normalize email
-    console.log("[5] Converting email to string...");
-
-    const emailAsString = String(email);
-
-    console.log("[5.1] emailAsString:", emailAsString);
-
-    console.log("[6] Trimming email...");
-
-    const trimmedEmail = emailAsString.trim();
-
-    console.log("[6.1] trimmedEmail:", trimmedEmail);
-
-    console.log("[7] Converting email to lowercase...");
-
-    const normalizedEmail = trimmedEmail.toLowerCase();
-
-    console.log("[7.1] normalizedEmail:", normalizedEmail);
-
-    // 4. Find user
-    console.log("[8] Searching user in MongoDB...");
-
-    const user = await User.findOne({
-      email: normalizedEmail,
-    }).select("+password");
-
-    console.log("[8.1] MongoDB user query completed");
-
-    console.log(
-      "[8.2] User result:",
-      user ? "USER FOUND" : "USER NOT FOUND"
-    );
-
-    if (user) {
-      console.log("[8.3] User email:", user.email);
-      console.log("[8.4] User ID:", user._id);
-      console.log("[8.5] User role:", user.role);
-      console.log(
-        "[8.6] Password field exists:",
-        user.password ? "YES" : "NO"
-      );
+    const normalizedEmail = await resolveLoginEmail(identifier);
+    const user = normalizedEmail
+      ? await User.findOne({ email: normalizedEmail }).select("+password")
+      : null;
+    if (!user || !(await user.comparePassword(password))) {
+      return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
-    // 5. User doesn't exist
-    console.log("[9] Checking whether user exists...");
+    // Accounts created before passwords were kept viewable only have a
+    // bcrypt hash, which can't be reversed. The password just typed is the
+    // correct one, so store it now — from then on it shows in History.
+    await syncStaffViewablePassword(user.email, password);
 
-    if (!user) {
-      console.log("[9.1] FAILED: User not found");
-
-      console.log("========== LOGIN END: 401 USER NOT FOUND ==========");
-
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials",
-      });
-    }
-
-    console.log("[9.2] User exists, continuing login");
-
-    // 6. Password comparison
-    console.log("[10] Starting password comparison...");
-
-    console.log(
-      "[10.1] Calling user.comparePassword(password)..."
-    );
-
-    const isMatch = await user.comparePassword(password);
-
-    console.log("[10.2] Password comparison completed");
-
-    console.log("[10.3] Password match result:", isMatch);
-
-    // 7. Invalid password
-    console.log("[11] Checking password result...");
-
-    if (!isMatch) {
-      console.log("[11.1] FAILED: Password does NOT match");
-
-      console.log("========== LOGIN END: 401 INVALID PASSWORD ==========");
-
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials",
-      });
-    }
-
-    console.log("[11.2] SUCCESS: Password matched");
-
-    // 7.5 Block login for staff who have already left the organization —
-    // status "Relieving" with a relieving date that has actually passed.
-    // Checked here (before touching lastLogin/token) so a relieved staff
-    // member gets a clear, immediate reason instead of a generic failure.
-    console.log("[11.5] Checking whether this staff member has been relieved...");
-
+    // Block login for staff who have already left (Relieved + date passed).
     const relievedBlockReason = await getRelievedLoginBlockReason(user.email);
-
     if (relievedBlockReason) {
-      console.log("[11.6] FAILED: Staff has been relieved —", relievedBlockReason);
-      console.log("========== LOGIN END: 403 STAFF RELIEVED ==========");
-
       return res.status(403).json({
         success: false,
         message: relievedBlockReason,
@@ -302,93 +279,32 @@ export const login = async (req, res) => {
       });
     }
 
-    console.log("[11.7] Staff is not relieved, continuing login");
-
-    // 8. Update last login
-    console.log("[12] Updating lastLogin...");
-
-    user.lastLogin = new Date();
-
-    console.log("[12.1] lastLogin value:", user.lastLogin);
-
-    console.log("[12.2] Saving user to MongoDB...");
-
-    await user.save();
-
-    console.log("[12.3] User saved successfully");
-
-    // 9. Check admin role
-    console.log("[13] Checking admin role...");
-
-    const adminRoleResult = isAdminRole(user.role);
-
-    console.log("[13.1] User role:", user.role);
-    console.log("[13.2] isAdminRole result:", adminRoleResult);
-
-    // 10. Check office network
-    console.log("[14] Checking office network...");
-
-    const officeNetworkResult = isFromOfficeNetwork(req);
-
-    console.log(
-      "[14.1] isFromOfficeNetwork result:",
-      officeNetworkResult
-    );
-
-    // 11. Auto attendance
-    if (!adminRoleResult && officeNetworkResult) {
-      console.log(
-        "[15] User is NOT admin AND user is from office network"
-      );
-
-      console.log("[15.1] Starting automatic attendance check-in...");
-
-      try {
-        await performSelfCheckIn(user._id);
-
-        console.log("[15.2] Automatic attendance check-in SUCCESS");
-      } catch (attErr) {
-        console.error(
-          "[15.2] Automatic attendance check-in FAILED:",
-          attErr
-        );
-
-        console.error(
-          "[15.3] Attendance failure will NOT block login"
-        );
-      }
-    } else {
-      console.log(
-        "[15] Automatic attendance check-in SKIPPED"
-      );
-
-      console.log(
-        "[15.1] Reason - isAdminRole:",
-        adminRoleResult
-      );
-
-      console.log(
-        "[15.2] Reason - isFromOfficeNetwork:",
-        officeNetworkResult
-      );
+    // Block login for staff an admin has set to Inactive.
+    const inactiveBlockReason = await getInactiveLoginBlockReason(user);
+    if (inactiveBlockReason) {
+      return res.status(403).json({
+        success: false,
+        message: inactiveBlockReason,
+        code: "STAFF_INACTIVE",
+      });
     }
 
-    // 12. Generate JWT
-    console.log("[16] Generating JWT token...");
+    user.lastLogin = new Date();
+    await user.save();
 
-    const token = generateToken(user);
+    // Automatic check-in when logging in from the office Wi-Fi. Admins are
+    // included unless AUTO_ATTENDANCE_INCLUDE_ADMINS=false; the super admin
+    // never is (no staff record).
+    if (autoAttendanceApplies(user.role) && isFromOfficeNetwork(req)) {
+      try {
+        await performSelfCheckIn(user._id, { source: "auto" });
+      } catch (attErr) {
+        // Attendance must never block a login.
+        console.error("Automatic check-in at login failed:", attErr.message);
+      }
+    }
 
-    console.log("[16.1] JWT token generated");
-    console.log(
-      "[16.2] Token exists:",
-      token ? "YES" : "NO"
-    );
-
-    // Don't print the actual token in production.
-    console.log("[16.3] Preparing successful response...");
-
-    // 13. Send response
-    console.log("[17] Sending HTTP 200 response...");
+    const token = generateToken(user, { client: req.body?.client });
 
     res.status(200).json({
       success: true,
@@ -402,29 +318,20 @@ export const login = async (req, res) => {
         token,
       },
     });
-
-    console.log("========== LOGIN SUCCESS ==========");
   } catch (error) {
-    console.error("========== LOGIN ERROR ==========");
-    console.error("[ERROR] Login error:", error);
-    console.error("[ERROR] Error message:", error.message);
-    console.error("[ERROR] Error stack:", error.stack);
-    console.error("========== LOGIN END: 500 ==========");
-
-    res.status(500).json({
-      success: false,
-      message: "Login failed",
-    });
+    console.error("Login error:", error.message);
+    res.status(500).json({ success: false, message: "Login failed" });
   }
 };
-
 
 // @desc    Get current user
 // @route   GET /api/auth/me
 // @access  Private
 export const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("-password");
+    // `company` is a leftover field from the old multi-company version.
+    const { company: _legacyCompany, ...user } =
+      (await User.findById(req.user.id).select("-password").lean()) || {};
     res.status(200).json({
       success: true,
       data: user,
@@ -481,6 +388,9 @@ export const changePassword = async (req, res) => {
 
     user.password = newPassword;
     await user.save();
+
+    // Without this, the Staff History view keeps showing the old password.
+    await syncStaffViewablePassword(user.email, newPassword);
 
     res.status(200).json({
       success: true,

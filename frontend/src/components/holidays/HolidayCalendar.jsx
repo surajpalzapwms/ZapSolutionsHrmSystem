@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { getDaysInMonth, getMonthName, getShortMonthName } from "../../utils/dateUtils";
 import { SHORT_DAYS } from "../../utils/constants";
 import { saturdayHolidayService } from "../../services/saturdayHolidayService";
+import { filterHolidaysFromJoiningDate } from "../../utils/holidayHelpers";
 
 const isSameDay = (a, b) =>
   a.getFullYear() === b.getFullYear() &&
@@ -27,6 +28,17 @@ const buildHolidayMap = (holidays) => {
   return map;
 };
 
+// { year, month } (month 0-11) of the staff member's joining date, or null for
+// admins / no joining date. Months before it are never shown.
+const getJoinMonth = (joiningDate) => {
+  if (!joiningDate) return null;
+  const d = new Date(joiningDate);
+  if (isNaN(d.getTime())) return null;
+  return { year: d.getFullYear(), month: d.getMonth() };
+};
+
+const monthIndex = (year, month) => year * 12 + month;
+
 const Legend = () => (
   <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
     <span className="flex items-center gap-1.5">
@@ -44,19 +56,24 @@ const Legend = () => (
   </div>
 );
 
-// ---- Monthly view: one full-size month grid ----
-const MonthlyView = ({ current, setCurrent, holidayMap, today, onView }) => {
+const MonthlyView = ({ current, setCurrent, holidayMap, today, onView, minMonth }) => {
   const year = current.getFullYear();
   const month = current.getMonth();
   const days = useMemo(() => getDaysInMonth(year, month), [year, month]);
 
-  const goPrev = () => setCurrent(new Date(year, month - 1, 1));
+  const canGoPrev =
+    !minMonth || monthIndex(year, month) > monthIndex(minMonth.year, minMonth.month);
+  const goPrev = () => canGoPrev && setCurrent(new Date(year, month - 1, 1));
   const goNext = () => setCurrent(new Date(year, month + 1, 1));
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
       <div className="flex items-center justify-between mb-4">
-        <button onClick={goPrev} className="p-2 rounded-full hover:bg-gray-100">
+        <button
+          onClick={goPrev}
+          disabled={!canGoPrev}
+          className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+        >
           <ChevronLeft size={18} />
         </button>
         <h3 className="text-lg font-semibold text-gray-800">
@@ -188,7 +205,13 @@ const MiniMonth = ({ year, month, holidayMap, holidaysForMonth, today, isCurrent
   );
 };
 
-const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView }) => {
+const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView, minMonth }) => {
+  const canGoPrev = !minMonth || year > minMonth.year;
+  // In the joining year, skip the months before the one they joined in.
+  const visibleMonths = Array.from({ length: 12 }, (_, m) => m).filter(
+    (m) => !minMonth || monthIndex(year, m) >= monthIndex(minMonth.year, minMonth.month),
+  );
+
   const holidaysByMonth = useMemo(() => {
     const buckets = Array.from({ length: 12 }, () => []);
     holidays.forEach((h) => {
@@ -208,7 +231,11 @@ const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView }) => {
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
       <div className="flex items-center justify-between mb-4">
-        <button onClick={() => setYear(year - 1)} className="p-2 rounded-full hover:bg-gray-100">
+        <button
+          onClick={() => canGoPrev && setYear(year - 1)}
+          disabled={!canGoPrev}
+          className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+        >
           <ChevronLeft size={18} />
         </button>
         <h3 className="text-lg font-semibold text-gray-800">{year}</h3>
@@ -218,7 +245,7 @@ const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView }) => {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {Array.from({ length: 12 }, (_, month) => (
+        {visibleMonths.map((month) => (
           <MiniMonth
             key={month}
             year={year}
@@ -239,13 +266,23 @@ const AnnualView = ({ year, setYear, holidays, holidayMap, today, onView }) => {
   );
 };
 
-const HolidayCalendar = ({ holidays, onView }) => {
+const HolidayCalendar = ({
+  holidays,
+  onView,
+  saturdayRefreshKey = 0,
+  viewMode = "annual",
+  joiningDate = null,
+}) => {
   const today = useMemo(() => new Date(), []);
-  // Default to the annual view so the Holiday tab shows the whole year's
-  // holidays at a glance; the user can still switch to Monthly.
-  const [mode, setMode] = useState("annual"); // "monthly" | "annual"
+  // Monthly/Annual is now controlled entirely by the parent (the toggle
+  // buttons in index.jsx's actions row) via the viewMode prop, rather than
+  // owned here. This component no longer renders its own toggle.
+  const mode = viewMode; // "monthly" | "annual"
+  const minMonth = useMemo(() => getJoinMonth(joiningDate), [joiningDate]);
   const [current, setCurrent] = useState(new Date());
-  const [year, setYear] = useState(new Date().getFullYear());
+  const [yearState, setYear] = useState(new Date().getFullYear());
+  // Never sit on a year before the joining year.
+  const year = minMonth ? Math.max(yearState, minMonth.year) : yearState;
   const [saturdayHolidays, setSaturdayHolidays] = useState([]);
 
   // Whichever year is actually on screen right now, depending on view mode.
@@ -254,6 +291,11 @@ const HolidayCalendar = ({ holidays, onView }) => {
   // Recurring Saturday holidays are admin-configured separately from the
   // one-off Holiday records, so pull the computed dates for the visible
   // year and fold them into the same map/legend the manual holidays use.
+  // `saturdayRefreshKey` is bumped by the parent whenever the admin saves
+  // new Saturday rules in the settings modal — without it in the dependency
+  // array, this effect only reruns when `activeYear` changes, so a save
+  // made while staying on the same year would never be re-fetched and the
+  // calendar would keep showing the old pattern until a full page reload.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -267,38 +309,23 @@ const HolidayCalendar = ({ holidays, onView }) => {
     return () => {
       cancelled = true;
     };
-  }, [activeYear]);
+  }, [activeYear, saturdayRefreshKey]);
 
+  // Saturday holidays come from a separate endpoint, so they need the same
+  // "not before the staff member joined" filter as the manual holidays.
   const mergedHolidays = useMemo(
-    () => [...holidays, ...saturdayHolidays],
-    [holidays, saturdayHolidays],
+    () =>
+      filterHolidaysFromJoiningDate(
+        [...holidays, ...saturdayHolidays],
+        joiningDate,
+      ),
+    [holidays, saturdayHolidays, joiningDate],
   );
 
   const holidayMap = useMemo(() => buildHolidayMap(mergedHolidays), [mergedHolidays]);
 
   return (
     <div className="space-y-4">
-      <div className="inline-flex rounded-lg bg-gray-100 p-1">
-        <button
-          type="button"
-          onClick={() => setMode("monthly")}
-          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-            mode === "monthly" ? "bg-blue-600 text-white" : "text-gray-600 hover:text-gray-800"
-          }`}
-        >
-          Monthly
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode("annual")}
-          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-            mode === "annual" ? "bg-blue-600 text-white" : "text-gray-600 hover:text-gray-800"
-          }`}
-        >
-          Annual
-        </button>
-      </div>
-
       {mode === "monthly" ? (
         <MonthlyView
           current={current}
@@ -306,6 +333,7 @@ const HolidayCalendar = ({ holidays, onView }) => {
           holidayMap={holidayMap}
           today={today}
           onView={onView}
+          minMonth={minMonth}
         />
       ) : (
         <AnnualView
@@ -315,6 +343,7 @@ const HolidayCalendar = ({ holidays, onView }) => {
           holidayMap={holidayMap}
           today={today}
           onView={onView}
+          minMonth={minMonth}
         />
       )}
     </div>

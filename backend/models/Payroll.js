@@ -5,7 +5,6 @@ const payrollSchema = new mongoose.Schema(
     payrollCode: {
       type: String,
       required: true,
-      unique: true, // Creates a unique index automatically
       trim: true,
     },
 
@@ -91,6 +90,14 @@ const payrollSchema = new mongoose.Schema(
       min: 0,
     },
 
+    // Advance still owed by the staff member after this payroll's recovery
+    // (e.g. 10,000 advance, 500 recovered in May → 9,500)
+    advanceBalanceAfter: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     // Unpaid balance carried over from the previous period (partial payment)
     previousPendingAmount: {
       type: Number,
@@ -146,6 +153,25 @@ const payrollSchema = new mongoose.Schema(
 
     paymentDate: Date,
 
+    // Every payment made against this month's salary, in order — a month
+    // can be paid in several parts (e.g. 2,000 then 5,000 then 5,000).
+    // paidAmount is always the sum of these. Older records saved before
+    // this list existed have an empty list; the UI shows their paidAmount
+    // as one "earlier payment" instead.
+    payments: [
+      {
+        amount: { type: Number, required: true, min: 0 },
+        date: { type: Date, default: Date.now },
+        method: String,
+        accountName: String,
+        note: String,
+      },
+    ],
+
+    // When the part left unpaid (pendingAmount) is expected to be paid.
+    // Only meaningful while pendingAmount > 0; cleared once fully paid.
+    pendingDate: Date,
+
     remarks: String,
 
     advances: [
@@ -193,6 +219,7 @@ payrollSchema.index(
   { employeeId: 1, period: 1 },
   { unique: true }
 );
+payrollSchema.index({ payrollCode: 1 }, { unique: true });
 
 // Performance indexes
 payrollSchema.index({ status: 1 });

@@ -1,23 +1,27 @@
 // src/components/holidays/index.jsx
-import React, { useState } from "react";
-import { Plus, Upload, Calendar as CalendarIcon, CalendarDays, Menu } from "lucide-react";
+import React, { useState, lazy, Suspense } from "react";
+import {
+  Plus,
+  Upload,
+  Calendar as CalendarIcon,
+  CalendarDays,
+} from "lucide-react";
 import { useHolidays } from "./hooks/useHolidays";
 import HolidayList from "./HolidayList";
 import HolidayForm from "./HolidayForm";
 import HolidayCalendar from "./HolidayCalendar";
-import HolidayImport from "./HolidayImport";
+// xlsx is only needed once the import dialog is opened.
+const HolidayImport = lazy(() => import("./HolidayImport"));
 import SaturdayHolidaySettings from "./SaturdayHolidaySettings";
 import SearchBar from "../common/SearchBar";
 import Button from "../common/Button";
 import Modal from "../common/Modal";
-import Sidebar from "../common/Sidebar";
 import { showToast } from "../../utils/toast";
 import { confirmDialog } from "../../utils/confirmationDialog";
 import { getMonthName } from "../../utils/dateUtils";
 import { getCurrentUser, isAdminUser } from "../../utils/authUser";
+import { refreshSidebarCounts } from "../../hooks/useSidebarCounts";
 
-// e.g. "16 March 2026" — same day/year format the app already uses
-// elsewhere, but with the full month name instead of the 3-letter version.
 const formatFullDate = (dateString) => {
   if (!dateString) return "";
   const d = new Date(dateString);
@@ -27,17 +31,24 @@ const formatFullDate = (dateString) => {
 
 const Holidays = () => {
   const [isMobileView, setIsMobileView] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   // Default to the calendar (whole-year) view so holidays for the entire
   // year are visible as soon as the Holidays tab opens.
   const [showCalendarView, setShowCalendarView] = useState(true);
   const [saturdaySettingsOpen, setSaturdaySettingsOpen] = useState(false);
+  // Bumped every time Saturday holiday rules are saved, so HolidayCalendar's
+  // fetch effect (keyed on this + the visible year) reruns and the calendar
+  // reflects the new checkboxes immediately instead of needing a refresh.
+  const [saturdayRefreshKey, setSaturdayRefreshKey] = useState(0);
+  // "monthly" | "annual" — drives HolidayCalendar's layout. Previously this
+  // toggle rendered on its own row under the actions row; it now lives in
+  // the actions row itself, right-aligned next to Show Table.
+  const [calendarViewMode, setCalendarViewMode] = useState("annual");
   const admin = isAdminUser(getCurrentUser());
 
   const {
-    loading,
     currentData,
     allHolidays,
+    joiningDate,
     totalPages,
     currentPage,
     setCurrentPage,
@@ -83,6 +94,7 @@ const Holidays = () => {
     });
     if (confirm.isConfirmed) {
       await deleteHoliday(holiday._id, holiday.name);
+      refreshSidebarCounts();
     }
   };
 
@@ -94,78 +106,119 @@ const Holidays = () => {
     });
     if (confirm.isConfirmed) {
       await deleteSelected();
+      refreshSidebarCounts();
     }
   };
 
   const handleAddSuccess = () => {
     addModal.close();
     fetchHolidays();
+    refreshSidebarCounts();
     showToast("success", "Holiday added successfully");
   };
 
   const handleEditSuccess = () => {
     editModal.close();
     fetchHolidays();
+    refreshSidebarCounts();
     showToast("success", "Holiday updated successfully");
   };
 
+  // Shared "Total + Search" block for desktop, rendered in different
+  // places depending on whether the calendar or table view is active.
+  const totalAndSearch = (
+    <div className="flex items-center gap-4">
+      <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
+        Total: {currentData.length}
+      </span>
+      <SearchBar
+        value={searchTerm}
+        onChange={setSearchTerm}
+        placeholder="Search holidays..."
+        className="w-64"
+      />
+    </div>
+  );
+
   return (
     <div className={`${isMobileView ? "px-3" : "p-6"} relative`}>
-      {isMobileView && (
-        <Sidebar isOpen={sidebarOpen} toggleSidebar={() => setSidebarOpen(false)} isMobile={true} />
-      )}
-
       {/* Header */}
       <div className="flex justify-between items-center mb-4">
         <div className="flex items-center gap-2">
-          {isMobileView && (
-            <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-full bg-gray-100">
-              <Menu size={20} className="text-gray-700" />
-            </button>
-          )}
           <CalendarIcon className="w-5 h-5 text-blue-600" />
           <h1 className="text-xl font-bold text-gray-800">Holidays</h1>
         </div>
-        {!isMobileView && (
-          <div className="flex items-center gap-4">
-            <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
-              Total: {currentData.length}
-            </span>
-            <SearchBar
-              value={searchTerm}
-              onChange={setSearchTerm}
-              placeholder="Search holidays..."
-              className="w-64"
-            />
-          </div>
-        )}
+        {/* Calendar view: Total + Search live up here, in line with the title. */}
+        
       </div>
 
       {/* Actions */}
-      <div className="flex flex-wrap gap-3 mb-4">
-        {admin && (
-          <Button variant="primary" size="sm" onClick={addModal.open}>
-             Add New Holiday
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {admin && (
+            <Button variant="primary" size="sm" onClick={addModal.open}>
+              Add New Holiday
+            </Button>
+          )}
+          {admin && (
+            <Button variant="success" size="sm" onClick={importModal.open}>
+              <Upload size={16} className="mr-1" /> Import CSV
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowCalendarView(!showCalendarView)}
+          >
+            <CalendarIcon size={16} className="mr-1" />
+            {showCalendarView ? "Show Table" : "Show Calendar"}
           </Button>
+          {admin && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSaturdaySettingsOpen(true)}
+            >
+              <CalendarDays size={16} className="mr-1" />
+              Saturday Holiday Settings
+            </Button>
+          )}
+          {admin && selected.length > 0 && (
+            <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
+              Delete ({selected.length})
+            </Button>
+          )}
+        </div>
+
+        {showCalendarView && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCalendarViewMode("monthly")}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                calendarViewMode === "monthly"
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-600 hover:bg-gray-100"
+              }`}
+            >
+              Monthly
+            </button>
+            <button
+              type="button"
+              onClick={() => setCalendarViewMode("annual")}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                calendarViewMode === "annual"
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-600 hover:bg-gray-100"
+              }`}
+            >
+              Annual
+            </button>
+          </div>
         )}
-        {admin && (
-          <Button variant="success" size="sm" onClick={importModal.open}>
-            <Upload size={16} className="mr-1" /> Import CSV
-          </Button>
-        )}
-        <Button variant="outline" size="sm" onClick={() => setShowCalendarView(!showCalendarView)}>
-          <CalendarIcon size={16} className="mr-1" />
-          {showCalendarView ? "Show Table" : "Show Calendar"}
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => setSaturdaySettingsOpen(true)}>
-          <CalendarDays size={16} className="mr-1" />
-          {admin ? "Saturday Holiday Settings" : "View Saturday Holidays"}
-        </Button>
-        {admin && selected.length > 0 && (
-          <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
-            Delete ({selected.length})
-          </Button>
-        )}
+
+        {/* Table view: Total + Search move down here, alongside the toggle button. */}
+        {!isMobileView && !showCalendarView && totalAndSearch}
       </div>
 
       {isMobileView && (
@@ -178,7 +231,13 @@ const Holidays = () => {
       )}
 
       {showCalendarView ? (
-        <HolidayCalendar holidays={allHolidays} onView={handleView} />
+        <HolidayCalendar
+          holidays={allHolidays}
+          onView={handleView}
+          saturdayRefreshKey={saturdayRefreshKey}
+          viewMode={calendarViewMode}
+          joiningDate={joiningDate}
+        />
       ) : (
         <HolidayList
           holidays={currentData}
@@ -196,12 +255,22 @@ const Holidays = () => {
       )}
 
       {/* Add Modal */}
-      <Modal isOpen={addModal.isOpen} onClose={addModal.close} title="Add New Holiday" size="max-w-2xl">
+      <Modal
+        isOpen={addModal.isOpen}
+        onClose={addModal.close}
+        title="Add New Holiday"
+        size="max-w-2xl"
+      >
         <HolidayForm onSubmit={handleAddSuccess} onCancel={addModal.close} />
       </Modal>
 
       {/* Edit Modal */}
-      <Modal isOpen={editModal.isOpen} onClose={editModal.close} title="Edit Holiday" size="max-w-2xl">
+      <Modal
+        isOpen={editModal.isOpen}
+        onClose={editModal.close}
+        title="Edit Holiday"
+        size="max-w-2xl"
+      >
         <HolidayForm
           initialData={editingHoliday}
           onSubmit={handleEditSuccess}
@@ -211,29 +280,44 @@ const Holidays = () => {
       </Modal>
 
       {/* View Modal */}
-      <Modal isOpen={viewModal.isOpen} onClose={viewModal.close} title="Holiday Details" size="max-w-md">
+      <Modal
+        isOpen={viewModal.isOpen}
+        onClose={viewModal.close}
+        title="Holiday Details"
+        size="max-w-md"
+      >
         {viewingHoliday && (
           <div className="space-y-4">
             <div>
               <label className="text-sm font-medium text-gray-600">Name</label>
-              <p className="border px-3 py-2 rounded-lg bg-gray-100 capitalize">{viewingHoliday.name}</p>
+              <p className="border px-3 py-2 rounded-lg bg-gray-100 capitalize">
+                {viewingHoliday.name}
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="text-sm font-medium text-gray-600">Start Date</label>
+                <label className="text-sm font-medium text-gray-600">
+                  Start Date
+                </label>
                 <p className="border px-3 py-2 rounded-lg bg-gray-100">
                   {formatFullDate(viewingHoliday.startDate)}
                 </p>
               </div>
               <div>
-                <label className="text-sm font-medium text-gray-600">End Date</label>
+                <label className="text-sm font-medium text-gray-600">
+                  End Date
+                </label>
                 <p className="border px-3 py-2 rounded-lg bg-gray-100">
-                  {viewingHoliday.endDate ? formatFullDate(viewingHoliday.endDate) : "N/A"}
+                  {viewingHoliday.endDate
+                    ? formatFullDate(viewingHoliday.endDate)
+                    : "N/A"}
                 </p>
               </div>
             </div>
             <div>
-              <label className="text-sm font-medium text-gray-600">Description</label>
+              <label className="text-sm font-medium text-gray-600">
+                Description
+              </label>
               <p className="border px-3 py-2 rounded-lg bg-gray-100 min-h-[60px]">
                 {viewingHoliday.description || "No description"}
               </p>
@@ -245,19 +329,37 @@ const Holidays = () => {
         )}
       </Modal>
 
-      {/* Saturday Holiday Settings Modal */}
       <Modal
         isOpen={saturdaySettingsOpen}
         onClose={() => setSaturdaySettingsOpen(false)}
         title="Saturday Holiday Settings"
         size="max-w-3xl"
       >
-        <SaturdayHolidaySettings admin={admin} onSaved={() => setSaturdaySettingsOpen(false)} />
+        <SaturdayHolidaySettings
+          admin={admin}
+          onSaved={() => {
+            setSaturdaySettingsOpen(false);
+            setSaturdayRefreshKey((k) => k + 1);
+          }}
+        />
       </Modal>
 
       {/* Import Modal */}
-      <Modal isOpen={importModal.isOpen} onClose={importModal.close} title="Import Holidays" size="max-w-md">
-        <HolidayImport onSuccess={fetchHolidays} onCancel={importModal.close} />
+      <Modal
+        isOpen={importModal.isOpen}
+        onClose={importModal.close}
+        title="Import Holidays"
+        size="max-w-md"
+      >
+        <Suspense fallback={null}>
+          <HolidayImport
+            onSuccess={() => {
+              fetchHolidays();
+              refreshSidebarCounts();
+            }}
+            onCancel={importModal.close}
+          />
+        </Suspense>
       </Modal>
     </div>
   );

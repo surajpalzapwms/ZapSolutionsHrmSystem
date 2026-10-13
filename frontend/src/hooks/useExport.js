@@ -17,7 +17,7 @@ export const useExport = (exportFn, filename = "export") => {
       link.click();
       link.remove();
       showToast("success", "Data exported successfully");
-    } catch (error) {
+    } catch {
       showToast("error", "Failed to export data");
     } finally {
       setLoading(false);

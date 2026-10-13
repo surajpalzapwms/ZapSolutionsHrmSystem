@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Holiday from "../models/holiday.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import { toTitleCase } from "../utils/dateHelpers.js";
+import { invalidateHolidayCheckCache } from "../services/leave.js";
 
 // Swap this stub for your real activity logger if Zap Solutionz has one
 // (e.g. import { logActivity } from "../activity/activityLog.js";).
@@ -69,6 +70,8 @@ export const createHoliday = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  invalidateHolidayCheckCache();
+
   await logActivity(req, {
     action: "CREATE",
     tableName: "holidays",
@@ -110,6 +113,8 @@ export const updateHoliday = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  invalidateHolidayCheckCache();
+
   await logActivity(req, {
     action: "UPDATE",
     tableName: "holidays",
@@ -132,6 +137,8 @@ export const toggleHolidayStatus = asyncHandler(async (req, res) => {
   );
   if (!holiday) throw new ApiError(404, "Holiday not found");
 
+  invalidateHolidayCheckCache();
+
   await logActivity(req, {
     action: "UPDATE",
     tableName: "holidays",
@@ -151,6 +158,8 @@ export const deleteHoliday = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
   const holiday = await Holiday.findByIdAndDelete(req.params.id);
   if (!holiday) throw new ApiError(404, "Holiday not found");
+
+  invalidateHolidayCheckCache();
 
   await logActivity(req, {
     action: "DELETE",
@@ -223,6 +232,7 @@ export const importHolidays = asyncHandler(async (req, res) => {
   }
 
   if (results.success > 0) {
+    invalidateHolidayCheckCache();
     await logActivity(req, {
       action: "IMPORT",
       tableName: "holidays",

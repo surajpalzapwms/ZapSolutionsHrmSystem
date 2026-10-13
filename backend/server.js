@@ -1,3 +1,6 @@
+// Must be the very first import: it registers a global mongoose plugin that
+// times every query, and plugins only apply to models compiled after it.
+import { requestTiming } from "./utils/requestTiming.js";
 import dns from "dns";
 
 // Some networks/ISPs' default DNS doesn't handle SRV records properly,
@@ -24,7 +27,6 @@ async function ensureSrvResolvable(mongoUri) {
     dns.setServers(["8.8.8.8", "1.1.1.1"]);
     try {
       await dns.promises.resolveSrv(srvHost);
-      console.log("✅ SRV lookup succeeded using fallback DNS resolvers.");
     } catch (fallbackErr) {
       console.error(
         `❌ SRV lookup for ${srvHost} also failed using fallback DNS resolvers ` +
@@ -39,6 +41,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import compression from "compression";
 import morgan from "morgan";
 import connectDB from "./utils/db.js";
 import authRoutes from "./routes/authRoutes.js";
@@ -56,8 +59,21 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import leaveAttendanceRoutes from "./routes/leave.js";
 import leavePolicyRoutes from "./routes/leavePolicy.js";
 import resignationRoutes from "./routes/resignation.js";
+import sidebarCountsRoutes from "./routes/sidebarCounts.js";
 import counselingRoutes from "./routes/counseling.js";
+import presenceRoutes from "./routes/presence.js";
+import letterRoutes from "./routes/letterRoutes.js";
+import documentRoutes from "./routes/documentRoutes.js";
+import { runPresenceSweep } from "./services/presence.js";
+import { checkSingleCompanyData } from "./services/singleCompanyCheck.js";
+import { reloadOfficeNetworks } from "./utils/officeNetwork.js";
 import { reconcileAllStaffAbsences } from "./services/leaveAutomation.js";
+import {
+  invalidateCalendarHealOnWrite,
+  markCalendarDataChanged,
+} from "./services/calendarHealCache.js";
+import { runCacheWarmers } from "./services/responseCache.js";
+import { clearAuthUserCache } from "./middleware/auth.js";
 
 const app = express();
 
@@ -65,10 +81,36 @@ const app = express();
 // req.ip is always the proxy's address, which breaks per-IP rate limiting
 // (everyone shares one bucket) and any secure-cookie "is this really HTTPS"
 // checks.
-app.set("trust proxy", 1);
+//
+// TRUST_PROXY_HOPS = how many proxies sit between the internet and this
+// server (default 1 = one proxy, e.g. Render). With 2 (e.g. Cloudflare +
+// nginx) a wrong value of 1 makes EVERY device look like it comes from the
+// proxy, so the office Wi-Fi is never recognised. "false" = no proxy.
+{
+  const raw = String(process.env.TRUST_PROXY_HOPS ?? "1").trim().toLowerCase();
+  app.set(
+    "trust proxy",
+    raw === "true" ? true : raw === "false" ? false : Number.isFinite(Number(raw)) ? Number(raw) : raw,
+  );
+}
 
 // Middleware
 app.use(helmet());
+// Per-request timing: Server-Timing header (visible in DevTools -> Network ->
+// Timing) and a console warning for any request slower than 800ms. See
+// utils/requestTiming.js.
+app.use(requestTiming);
+// Gzip/deflate every JSON response before it goes over the wire. The
+// backend already exchanges plain JSON with the frontend end-to-end
+// (express.json() in, res.json() out) — this is what actually cuts the
+// bytes on the wire for the larger payloads (staff lists, attendance
+// calendars, payroll runs), which is usually what "the site feels slow"
+// comes down to on a normal connection. compression() only kicks in for
+// responses over ~1KB and skips anything the client sends
+// "Accept-Encoding: identity" for, so it's a safe default with no
+// behavior change for callers — axios/fetch/browsers all negotiate
+// gzip automatically and decompress transparently.
+app.use(compression());
 // Strip trailing slashes AND lowercase the origin so "http://localhost:5173/",
 // "http://localhost:5173", and "HTTPS://LOCALHOST:5173" are all treated as
 // the same origin. Hostnames are case-insensitive per spec, but a plain
@@ -115,14 +157,40 @@ app.use(
       }
     },
     credentials: true,
+    // Let the browser show the Server-Timing numbers for cross-origin calls.
+    exposedHeaders: ["Server-Timing"],
   }),
 );
+app.use((req, res, next) => {
+  res.setHeader("Timing-Allow-Origin", "*");
+  next();
+});
 // Cap request body size — an unauthenticated client could otherwise send
 // huge JSON payloads to exhaust memory/CPU before any route-level auth or
 // validation even runs.
+// Staff document / profile photo uploads arrive as base64 JSON, so that one
+// path gets a bigger limit (a phone photo is 1-5 MB, ~33% bigger as base64).
+// It must run BEFORE the 2mb parser below, which then skips the parsed body.
+app.use("/api/documents", express.json({ limit: "12mb" }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-app.use(morgan("dev"));
+// Colourful per-request logs are useful while developing but add
+// synchronous console I/O to every request in production.
+if (process.env.NODE_ENV !== "production") app.use(morgan("dev"));
+
+// Any write to an HRM/staff route may change attendance, leave, holidays
+// or staff dates — tell the attendance calendar to re-run its self-heal
+// passes on the next view (see services/calendarHealCache.js).
+app.use(["/api/hrm", "/api/staff"], invalidateCalendarHealOnWrite);
+// Any write to auth/staff/HRM routes may change a user's role, permissions
+// or relieved status — drop the short-lived login lookup cache in protect().
+app.use(["/api/auth", "/api/hrm", "/api/staff"], (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    clearAuthUserCache();
+    res.on("finish", clearAuthUserCache);
+  }
+  next();
+});
 
 // Routes
 app.use("/api/auth", authRoutes);
@@ -139,7 +207,15 @@ app.use("/api/hrm/staff-basic-payrolls", staffBasicPayrollRoutes);
 app.use("/api/hrm/expense-categories", expenseCategoryRoutes);
 app.use("/api/hrm/office-expenses", officeExpenseRoutes);
 app.use("/api/hrm/resignations", resignationRoutes);
+// Live numbers for the sidebar badges (holidays this month, pending resignations, present today).
+app.use("/api/hrm/sidebar-counts", sidebarCountsRoutes);
 app.use("/api/hrm/counseling", counselingRoutes);
+// Offer / joining / confirmation / termination / leaving / experience letters.
+app.use("/api/hrm/letters", letterRoutes);
+// Staff documents (Aadhaar, PAN, light bill) + profile photo.
+app.use("/api/documents", documentRoutes);
+// Automatic sign-in / sign-out from office Wi-Fi presence + PC agent.
+app.use("/api/presence", presenceRoutes);
 
 app.get("/", (req, res) => {
   res.json({
@@ -206,24 +282,50 @@ if (
 // LEAVE_AUTOMATION_DISABLED=true here so it doesn't run twice.
 function scheduleDailyAbsenceReconciliation() {
   if (process.env.LEAVE_AUTOMATION_DISABLED === "true") {
-    console.log("ℹ️  Daily absence reconciliation disabled (LEAVE_AUTOMATION_DISABLED=true).");
     return;
   }
 
   const runOnce = async () => {
     try {
       const summary = await reconcileAllStaffAbsences();
-      console.log(
-        `🗓️  Absence reconciliation: ${summary.leavesCreated} leave(s) auto-created across ${summary.staffProcessed} staff` +
-          (summary.errors.length ? ` (${summary.errors.length} error(s))` : ""),
-      );
+      markCalendarDataChanged();
     } catch (err) {
       console.error("❌ Daily absence reconciliation failed:", err.message);
     }
   };
 
-  runOnce();
+  // Wait 2 minutes after startup before the first sweep: it touches every
+  // staff member's attendance and used to run at the exact moment the first
+  // people opened the app after a restart, slowing those first page loads.
+  setTimeout(runOnce, 2 * 60 * 1000).unref?.();
   setInterval(runOnce, 24 * 60 * 60 * 1000);
+}
+
+// Automatic attendance: every few minutes, mark users whose devices went
+// silent as disconnected and sign out anyone who left the office and didn't
+// come back (see services/presence.js). Set PRESENCE_SWEEP_DISABLED=true to
+// turn it off (e.g. on extra server instances).
+function schedulePresenceSweep() {
+  if (process.env.PRESENCE_SWEEP_DISABLED === "true") return;
+  const everyMs =
+    (parseInt(process.env.PRESENCE_SWEEP_INTERVAL_MINUTES, 10) || 5) * 60 * 1000;
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const summary = await runPresenceSweep();
+      if (summary.timedOut || summary.signedOut) {
+        console.log("🛰️  Presence sweep:", summary);
+      }
+    } catch (err) {
+      console.error("❌ Presence sweep failed:", err.message);
+    } finally {
+      running = false;
+    }
+  };
+  setTimeout(tick, 60 * 1000).unref?.();
+  setInterval(tick, everyMs).unref?.();
 }
 
 async function startServer(retries = 3, delayMs = 3000) {
@@ -231,15 +333,22 @@ async function startServer(retries = 3, delayMs = 3000) {
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await connectDB(MONGO_URI);
+      await connectDB(MONGO_URI, checkSingleCompanyData);
+      // Office Wi-Fi networks saved from the admin screen (utils/officeNetwork.js).
+      await reloadOfficeNetworks();
       app.listen(PORT, () => {
-        console.log(`🚀 HRM backend running on port ${PORT}`);
-        console.log(`📊 Environment: ${process.env.NODE_ENV}`);
-        console.log(`🌐 Allowed CORS origins: ${allowedOrigins.join(", ")}`);
       });
       scheduleDailyAbsenceReconciliation();
+      schedulePresenceSweep();
+      // Pre-build the payroll pending summary and staff summary so the first
+      // Payroll / Dashboard visit after a restart doesn't have to wait.
+      setTimeout(runCacheWarmers, 5000).unref?.();
       return;
     } catch (err) {
+      if (err.fatal) {
+        console.error(`❌ ${err.message}`);
+        process.exit(1);
+      }
       console.error(
         `❌ MongoDB connection attempt ${attempt} failed:`,
         err.message,

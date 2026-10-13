@@ -31,17 +31,32 @@ export const attendanceService = {
     api.post("/api/hrm/leaves/attendance/convert-to-leave", data),
   getLeaves: (params) => api.get("/api/hrm/leaves", { params }),
   applyLeave: (data) => api.post("/api/hrm/leaves", data),
-  deleteLeave: (id) => api.delete(`/api/hrm/leaves/${id}`),
+  // Admin only: change one calendar day (present/half/paid/sick/casual/unpaid)
+  // in a single safe step on the server.
+  changeDayStatus: (data) => api.put("/api/hrm/leaves/day-status", data),
+  // Backend route is DELETE /api/hrm/leaves/leave/:id (the old
+  // /api/hrm/leaves/:id path doesn't exist and always returned 404).
+  deleteLeave: (id) => api.delete(`/api/hrm/leaves/leave/${id}`),
   getStaffSummary: () => api.get("/api/hrm/leaves/staff-summary"),
+  // The backend runs several sequential self-heal passes (sandwich-leave
+  // reconciliation, stray-leave cleanup, etc.) over the whole requested
+  // year before responding — on a staff member with a lot of leave
+  // history that can genuinely take longer than the default 30s axios
+  // timeout, which was silently aborting the request and leaving the
+  // calendar blank until the next (now-idempotent, so fast) retry. Give
+  // these two calendar endpoints more headroom instead.
   getStaffCalendar: (staffId, params) =>
-    api.get(`/api/hrm/leaves/staff-summary/${staffId}/calendar`, { params }),
-  // Admin repair tool: re-bridges Sunday/holiday days sitting between two
-  // approved leaves that were left un-bridged by data created before the
-  // sandwich-leave order-independence fix (e.g. an Excel import whose rows
-  // weren't in date order). Safe to call more than once.
-  reconcileSandwichLeave: (staffId, params) =>
-    api.post(`/api/hrm/leaves/reconcile-sandwich/${staffId}`, null, {
+    api.get(`/api/hrm/leaves/staff-summary/${staffId}/calendar`, {
       params,
+      timeout: 60000,
+    }),
+  // Staff self-service: the same monthly/annual calendar as above, but
+  // scoped server-side to the logged-in account's own staff record — no
+  // staffId to pass, so there's nothing to swap out to view someone else's.
+  getMyCalendar: (params) =>
+    api.get("/api/hrm/leaves/my-attendance/calendar", {
+      params,
+      timeout: 60000,
     }),
 
   // ── Leave requests: staff self-service + admin approval ─────────────────
@@ -56,9 +71,4 @@ export const attendanceService = {
     api.put(`/api/hrm/leaves/requests/${id}/approve`),
   rejectLeaveRequest: (id, remarks) =>
     api.put(`/api/hrm/leaves/requests/${id}/reject`, { remarks }),
-  // Multi-day ("range") requests: approve/reject every day in one action.
-  approveLeaveGroup: (groupId) =>
-    api.put(`/api/hrm/leaves/requests/group/${groupId}/approve`),
-  rejectLeaveGroup: (groupId, remarks) =>
-    api.put(`/api/hrm/leaves/requests/group/${groupId}/reject`, { remarks }),
 };

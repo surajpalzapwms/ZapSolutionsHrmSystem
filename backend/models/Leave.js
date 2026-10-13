@@ -25,7 +25,10 @@ const leaveSchema = new mongoose.Schema(
       // missing from this enum, which silently made every sick/casual leave
       // application fail model validation even though the balance-checking
       // code elsewhere already accounted for them.
-      enum: ["paid", "unpaid", "swapleave", "sick", "casual"],
+      // "holiday" = an admin marked this date as a holiday for THIS staff
+      // member only (Attendance -> Edit Day). It is not leave: it never
+      // counts toward Paid/Sick/Casual/Unpaid totals, balances or payroll.
+      enum: ["paid", "unpaid", "swapleave", "sick", "casual", "holiday"],
       default: "unpaid",
     },
     // How many days this single Leave record actually represents. Almost
@@ -89,6 +92,22 @@ const leaveSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Leave",
       default: null,
+    },
+    // Set when an admin deliberately put this record on a Sunday/holiday
+    // (Attendance -> Edit Day), e.g. a holiday changed to Paid Leave. The
+    // automatic "no leave on holidays" cleanup must leave these alone.
+    isAdminOverride: {
+      type: Boolean,
+      default: false,
+    },
+    // True when this leave record only covers the missing half of a day
+    // the staff member already worked half of (Edit Day Status -> Half Day
+    // topped up with Paid/Sick/Casual). dayValue is 0.5 on these records —
+    // the OTHER half is a real, still-present Attendance record, not
+    // deleted. See changeDayStatus / getStaffCalendar.
+    isHalfDayTopUp: {
+      type: Boolean,
+      default: false,
     },
   },
   {

@@ -1,9 +1,9 @@
-
 // src/components/payroll/PayrollList.jsx
 import React from "react";
-import { Eye, Trash2 } from "lucide-react";
+import { Eye } from "lucide-react";
 import Table from "../common/Table";
 import Pagination from "../common/Pagination";
+import Button from "../common/Button";
 import { formatCurrency } from "../../utils/numberUtils";
 import { getShortMonthName } from "../../utils/dateUtils";
 
@@ -13,13 +13,16 @@ const splitPeriod = (period) => {
   return { month: getShortMonthName((m || 1) - 1), year: y };
 };
 
+const statusStyles = {
+  paid: "bg-green-100 text-green-700",
+  partial: "bg-amber-100 text-amber-700",
+  pending: "bg-gray-100 text-gray-600",
+  cancelled: "bg-red-100 text-red-600",
+};
+
 const PayrollList = ({
   payroll,
-  selected,
-  toggleSelect,
-  toggleSelectAll,
-  onView,
-  onDelete,
+  onViewSalary,
   currentPage,
   totalPages,
   onPageChange,
@@ -34,94 +37,54 @@ const PayrollList = ({
       ),
     },
     {
-      key: "month",
-      header: "Month",
-      render: (row) => splitPeriod(row.period).month,
-    },
-    {
-      key: "year",
-      header: "Year",
-      render: (row) => splitPeriod(row.period).year,
-    },
-   
-    {
       key: "contactNo",
       header: "Contact",
       render: (row) => row.contactNo || "—",
     },
+    
+   
     {
-      key: "basicSalary",
-      header: "Basic",
-      render: (row) =>
-        formatCurrency(row.adjustedBasicSalary ?? row.basicSalary),
+      key: "latestPeriod",
+      header: "Latest Period",
+      render: (row) => {
+        const { month, year } = splitPeriod(row.latestPeriod);
+        return `${month} ${year}`;
+      },
     },
     {
-      key: "totalAllowance",
-      header: "Allow.",
-      render: (row) => (
-        <div className="flex items-center justify-center gap-1.5">
-          <span>{formatCurrency(row.totalAllowance)}</span>
-          <button
-            onClick={() => onView(row)}
-            className="text-gray-400 hover:text-blue-600"
-            title="View allowances"
-          >
-            <Eye size={14} />
-          </button>
-        </div>
-      ),
-    },
-    {
-      key: "totalDeduction",
-      header: "Ded.",
+      key: "latestStatus",
+      header: "Latest Status",
       render: (row) => (
         <span
-          className={
-            row.totalDeduction > 0
-              ? "text-red-500 font-medium"
-              : "text-gray-400"
-          }
+          className={`px-2 py-1 rounded-full text-xs capitalize ${
+            statusStyles[row.latestStatus] || "bg-gray-100 text-gray-600"
+          }`}
         >
-          {formatCurrency(row.totalDeduction)}
+          {row.latestStatus}
         </span>
       ),
     },
     {
-      key: "advanceDeduction",
-      header: "Advance",
-      render: (row) => (
-        <span
-          className={
-            row.advanceDeduction > 0
-              ? "text-red-600 font-semibold"
-              : "text-gray-400"
-          }
-        >
-          {formatCurrency(row.advanceDeduction)}
-        </span>
-      ),
-    },
-    {
-      key: "pendingAmount",
+      key: "totalPending",
       header: "Pending",
       render: (row) => (
         <span
           className={
-            row.pendingAmount > 0
+            row.totalPending > 0
               ? "text-red-600 font-semibold"
               : "text-gray-400"
           }
         >
-          {formatCurrency(row.pendingAmount)}
+          {formatCurrency(row.totalPending)}
         </span>
       ),
     },
     {
-      key: "netSalary",
-      header: "Net",
+      key: "totalNet",
+      header: "Total Net",
       render: (row) => (
         <span className="text-green-600 font-semibold">
-          {formatCurrency(row.netSalary)}
+          {formatCurrency(row.totalNet)}
         </span>
       ),
     },
@@ -129,22 +92,14 @@ const PayrollList = ({
       key: "actions",
       header: "Actions",
       render: (row) => (
-        <div className="flex justify-center gap-3">
-          <button
-            onClick={() => onView(row)}
-            className="text-blue-600 hover:text-blue-800"
-            title="View"
-          >
-            <Eye size={16} />
-          </button>
-          <button
-            onClick={() => onDelete(row)}
-            className="text-red-600 hover:text-red-800"
-            title="Delete"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onViewSalary(row)}
+          className="flex items-center gap-1.5"
+        >
+          <Eye size={14} /> View Salary
+        </Button>
       ),
     },
   ];
@@ -154,10 +109,6 @@ const PayrollList = ({
       <Table
         columns={columns}
         data={payroll}
-        selectable
-        selected={selected}
-        onSelectAll={toggleSelectAll}
-        onSelectRow={toggleSelect}
         emptyMessage="No payroll records found"
       />
       <Pagination

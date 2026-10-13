@@ -1,7 +1,6 @@
 // src/components/attendance/LeaveExcelImport.jsx
 import React, { useState } from "react";
 import * as XLSX from "xlsx";
-import ExcelJS from "exceljs";
 import { Upload, FileSpreadsheet, Download, AlertTriangle } from "lucide-react";
 import Modal from "../common/Modal";
 import Dropdown from "../common/Dropdown";
@@ -113,6 +112,8 @@ const TEMPLATE_DROPDOWN_ROWS = 200;
 // the importer accepts.
 const downloadLeaveTemplate = async ({ onError } = {}) => {
   try {
+    // ExcelJS is ~950 KB — only fetched when the template is downloaded.
+    const { default: ExcelJS } = await import("exceljs");
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Leaves");
     ws.columns = LEAVE_TEMPLATE_HEADERS.map((header) => ({ header, width: 22 }));
@@ -229,6 +230,58 @@ const normalizeLeaveType = (raw) => {
   return LEAVE_TYPE_ALIASES[key] || key;
 };
 
+// Every error string arrives as "Row N: <message>", and the message often
+// (not always — e.g. "Missing leaveDate or reason" has no date) embeds the
+// leaveDate as a plain YYYY-MM-DD. Splitting these out into Row / Date /
+// Details columns instead of dumping the raw sentence makes a batch of
+// failures scannable instead of a wall of near-identical text.
+const ROW_PREFIX_RE = /^Row (\d+):\s*(.*)$/;
+const EMBEDDED_DATE_RE = /\d{4}-\d{2}-\d{2}/;
+const parseErrorEntry = (errStr) => {
+  const m = String(errStr).match(ROW_PREFIX_RE);
+  const row = m ? m[1] : "—";
+  const detail = m ? m[2] : String(errStr);
+  const dateMatch = detail.match(EMBEDDED_DATE_RE);
+  return { row, date: dateMatch ? dateMatch[0] : "—", detail };
+};
+
+// Shared table for all three error lists below (bad dates, bad types, and
+// import failures) — scrolls internally so a large batch of failures
+// doesn't blow out the modal, with a sticky header so Row/Date/Details
+// stay visible while scrolling.
+const ErrorTable = ({ heading, errors }) => {
+  if (errors.length === 0) return null;
+  const parsed = errors.map(parseErrorEntry);
+  return (
+    <div className="text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
+      <div className="flex items-start gap-2 text-xs font-medium mb-2">
+        <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+        <span>{heading}</span>
+      </div>
+      <div className="max-h-56 overflow-y-auto rounded border border-red-100">
+        <table className="w-full text-xs border-collapse">
+          <thead className="sticky top-0 bg-red-100 text-red-800">
+            <tr>
+              <th className="text-left px-2 py-1 font-medium w-14">Row</th>
+              <th className="text-left px-2 py-1 font-medium w-24">Date</th>
+              <th className="text-left px-2 py-1 font-medium">Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {parsed.map((p, i) => (
+              <tr key={i} className="border-t border-red-100 odd:bg-white even:bg-red-50/60">
+                <td className="px-2 py-1 align-top">{p.row}</td>
+                <td className="px-2 py-1 align-top whitespace-nowrap">{p.date}</td>
+                <td className="px-2 py-1 align-top">{p.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 const LeaveExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }) => {
   const [rows, setRows] = useState([]);
   const [skipped, setSkipped] = useState(0);
@@ -341,6 +394,13 @@ const LeaveExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }) => 
       setImportErrors([]);
       const res = await attendanceService.importLeaves(payload);
       const errors = res.data?.errors || [];
+      const warnings = res.data?.warnings || [];
+      if (warnings.length > 0) {
+        showToast(
+          "info",
+          `${warnings.length} day(s) saved as Unpaid because the leave balance was used up`,
+        );
+      }
       const successCount = res.data?.importedCount ?? payload.length - errors.length;
       if (errors.length > 0) {
         // Keep the modal open and show exactly which rows failed and why
@@ -366,7 +426,7 @@ const LeaveExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }) => 
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Import Leaves from Excel" size="max-w-lg">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Import Leaves from Excel" size="max-w-2xl">
       <div className="space-y-4">
         <div className="flex justify-end">
           <Button
@@ -422,56 +482,20 @@ const LeaveExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }) => 
           </div>
         )}
 
-        {invalidDateRows.length > 0 && (
-          <div className="flex items-start gap-2 text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-            <div className="text-xs space-y-0.5">
-              <div className="font-medium">
-                {invalidDateRows.length} row(s) have an unrecognized or ambiguous Date and won't be imported:
-              </div>
-              {invalidDateRows.slice(0, 8).map((err, i) => (
-                <div key={i}>{err}</div>
-              ))}
-              {invalidDateRows.length > 8 && (
-                <div>...and {invalidDateRows.length - 8} more.</div>
-              )}
-            </div>
-          </div>
-        )}
+        <ErrorTable
+          heading={`${invalidDateRows.length} row(s) have an unrecognized or ambiguous Date and won't be imported:`}
+          errors={invalidDateRows}
+        />
 
-        {invalidTypeRows.length > 0 && (
-          <div className="flex items-start gap-2 text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-            <div className="text-xs space-y-0.5">
-              <div className="font-medium">
-                {invalidTypeRows.length} row(s) have an unrecognized Type and won't be imported:
-              </div>
-              {invalidTypeRows.slice(0, 8).map((err, i) => (
-                <div key={i}>{err}</div>
-              ))}
-              {invalidTypeRows.length > 8 && (
-                <div>...and {invalidTypeRows.length - 8} more.</div>
-              )}
-            </div>
-          </div>
-        )}
+        <ErrorTable
+          heading={`${invalidTypeRows.length} row(s) have an unrecognized Type and won't be imported:`}
+          errors={invalidTypeRows}
+        />
 
-        {importErrors.length > 0 && (
-          <div className="flex items-start gap-2 text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-            <div className="text-xs space-y-0.5">
-              <div className="font-medium">
-                {importErrors.length} row(s) didn't import:
-              </div>
-              {importErrors.slice(0, 8).map((err, i) => (
-                <div key={i}>{err}</div>
-              ))}
-              {importErrors.length > 8 && (
-                <div>...and {importErrors.length - 8} more.</div>
-              )}
-            </div>
-          </div>
-        )}
+        <ErrorTable
+          heading={`${importErrors.length} row(s) didn't import:`}
+          errors={importErrors}
+        />
 
         <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={handleClose}>

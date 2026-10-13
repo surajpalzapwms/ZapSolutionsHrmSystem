@@ -1,22 +1,24 @@
 // src/components/staff/index.jsx
 import React, { useState } from "react";
-import { Plus, Users as UsersIcon, Menu } from "lucide-react";
+import { Plus, Users as UsersIcon } from "lucide-react";
 import { useStaff } from "./hooks/useStaff";
 import StaffList from "./StaffList";
 import StaffForm from "./StaffForm";
 import StaffDashboard from "./StaffDashboard";
 import StaffDetailsModal from "./StaffDetailsModal";
+import StaffLettersModal from "./StaffLettersModal";
 import SearchBar from "../common/SearchBar";
 import Button from "../common/Button";
 import Modal from "../common/Modal";
-import Sidebar from "../common/Sidebar";
+import CurrentStaffToggle from "../common/CurrentStaffToggle";
 import { showToast } from "../../utils/toast";
-import { confirmDialog } from "../../utils/confirmationDialog";
+import { confirmStaffDelete } from "../../utils/confirmationDialog";
+import { staffService } from "../../services/staffService";
 import { getCurrentUser, isSuperAdminUser, hasTabAccess } from "../../utils/authUser";
 
 const Staff = () => {
   const [isMobileView, setIsMobileView] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [lettersStaff, setLettersStaff] = useState(null);
 
   // A plain admin only sees "Add Staff" if the super admin granted them
   // the staff.add sub-tab — mirrors the backend's requireTabAccess check
@@ -25,7 +27,6 @@ const Staff = () => {
   const canAddStaff = isSuperAdminUser(currentUser) || hasTabAccess("staff.add", currentUser);
 
   const {
-    loading,
     teams,
     allStaff,
     currentData,
@@ -43,6 +44,10 @@ const Staff = () => {
     fetchStaff,
     editModal,
     addModal,
+    currentOnly,
+    setCurrentOnly,
+    visibleCount,
+    filteredCount,
   } = useStaff();
 
   const [editingStaff, setEditingStaff] = useState(null);
@@ -77,11 +82,30 @@ const Staff = () => {
     setViewingStaff(member);
   };
 
+  // Fetches what will be removed so the dialog can list it. Falls back to
+  // an empty summary if the preview call fails — the confirmation still shows.
+  const loadPurgePreview = async (ids) => {
+    const totals = {};
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const { data } = await staffService.deletePreview(id);
+          const counts = data?.data?.counts || {};
+          Object.entries(counts).forEach(([k, v]) => { totals[k] = (totals[k] || 0) + (Number(v) || 0); });
+        } catch {
+          /* preview is informational only */
+        }
+      }),
+    );
+    return totals;
+  };
+
   const handleDelete = async (member) => {
-    const confirm = await confirmDialog({
-      text: `Are you sure you want to delete <b>${member.staffName}</b>?`,
-      icon: "warning",
-      confirmButtonText: "Yes, delete",
+    const counts = await loadPurgePreview([member._id]);
+    const confirm = await confirmStaffDelete({
+      names: [member.staffName],
+      counts,
+      confirmWord: member.staffId || "DELETE",
     });
     if (confirm.isConfirmed) {
       await deleteStaff(member._id, member.staffName);
@@ -89,11 +113,10 @@ const Staff = () => {
   };
 
   const handleDeleteSelected = async () => {
-    const confirm = await confirmDialog({
-      text: `Are you sure you want to delete <b>${selected.length}</b> staff member(s)?`,
-      icon: "warning",
-      confirmButtonText: "Yes, delete",
-    });
+    const ids = selected.map((s) => s.id);
+    const names = ids.map((id) => allStaff.find((m) => m._id === id)?.staffName || id);
+    const counts = await loadPurgePreview(ids);
+    const confirm = await confirmStaffDelete({ names, counts, confirmWord: "DELETE" });
     if (confirm.isConfirmed) {
       await deleteSelected();
     }
@@ -113,24 +136,15 @@ const Staff = () => {
 
   return (
     <div className={`${isMobileView ? "px-3" : "p-6"} relative`}>
-      {isMobileView && (
-        <Sidebar isOpen={sidebarOpen} toggleSidebar={() => setSidebarOpen(false)} isMobile={true} />
-      )}
-
       <div className="flex justify-between items-center mb-4">
         <div className="flex items-center gap-2">
-          {isMobileView && (
-            <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-full bg-gray-100">
-              <Menu size={20} className="text-gray-700" />
-            </button>
-          )}
           <UsersIcon className="w-5 h-5 text-blue-600" />
           <h1 className="text-xl font-bold text-gray-800">Staff</h1>
         </div>
         {!isMobileView && (
           <div className="flex items-center gap-4">
             <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
-              Total: {currentData.length}
+              Total: {filteredCount}
             </span>
             <SearchBar
               value={searchTerm}
@@ -144,7 +158,9 @@ const Staff = () => {
 
       <StaffDashboard staff={allStaff} teams={teams} />
 
-      <div className="flex flex-wrap gap-3 mb-4">
+      {/* ACTIONS — buttons on the left, "Current staff only" toggle on the
+          right, all in one row (same layout as the Payroll tab) */}
+      <div className="flex flex-wrap items-center gap-3 mb-4">
         {canAddStaff && (
           <Button variant="primary" size="sm" onClick={handleOpenAddModal}>
             Add Staff
@@ -155,6 +171,14 @@ const Staff = () => {
             Delete ({selected.length})
           </Button>
         )}
+
+        <CurrentStaffToggle
+          className="ml-auto"
+          checked={currentOnly}
+          onChange={setCurrentOnly}
+          shownCount={visibleCount}
+          totalCount={allStaff.length}
+        />
       </div>
 
       {isMobileView && (
@@ -175,6 +199,7 @@ const Staff = () => {
         onDelete={handleDelete}
         onToggleStatus={toggleStatus}
         onView={handleView}
+        onLetters={setLettersStaff}
         currentPage={currentPage}
         totalPages={totalPages}
         onPageChange={setCurrentPage}
@@ -184,6 +209,12 @@ const Staff = () => {
         isOpen={!!viewingStaff}
         onClose={() => setViewingStaff(null)}
         staff={viewingStaff}
+      />
+
+      <StaffLettersModal
+        isOpen={!!lettersStaff}
+        onClose={() => setLettersStaff(null)}
+        staff={lettersStaff}
       />
 
       <Modal

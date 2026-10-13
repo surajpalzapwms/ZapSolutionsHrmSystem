@@ -1,6 +1,7 @@
 // controllers/hrm/saturdayHolidayController.js
 import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
+import { invalidateHolidayCheckCache } from "../services/leave.js";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -67,6 +68,7 @@ export const saveSaturdayRules = asyncHandler(async (req, res) => {
   }
 
   await SaturdayHolidayRule.bulkWrite(ops);
+  invalidateHolidayCheckCache();
 
   const saved = await SaturdayHolidayRule.getFullYear(numericYear);
   res.json({

@@ -8,7 +8,17 @@ const PayrollSummary = ({ summary }) => {
   const cards = [
     { label: "Total Records", value: summary.count, icon: Users, color: "text-blue-600 bg-blue-50" },
     { label: "Total Net Pay", value: formatCurrency(summary.totalNet), icon: Wallet, color: "text-indigo-600 bg-indigo-50" },
-    { label: "Pending", value: summary.pending, icon: Clock, color: "text-yellow-600 bg-yellow-50" },
+    {
+      label: "Pending",
+      // The pending summary loads separately from the list — show a
+      // placeholder instead of a misleading ₹0 while it's on its way.
+      value:
+        summary.pendingLoading && !summary.pending
+          ? "Loading…"
+          : formatCurrency(summary.pending),
+      icon: Clock,
+      color: "text-yellow-600 bg-yellow-50",
+    },
     { label: "Paid", value: summary.paid, icon: CheckCircle, color: "text-green-600 bg-green-50" },
   ];
 

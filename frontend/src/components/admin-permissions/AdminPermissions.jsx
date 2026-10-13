@@ -1,5 +1,5 @@
 // src/components/admin-permissions/AdminPermissions.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ShieldCheck, UserCog, ShieldPlus } from "lucide-react";
 import Card from "../common/Card";
 import Button from "../common/Button";
@@ -142,7 +142,9 @@ const AdminPermissions = () => {
     }
   };
 
-  const content = useMemo(() => {
+  // Plain render helper: the old useMemo here closed over stale handlers
+  // (handleRevoke / modal openers) and a small table gains nothing from it.
+  const renderContent = () => {
     if (loading) {
       return (
         <div className="py-12">
@@ -232,7 +234,7 @@ const AdminPermissions = () => {
         </table>
       </div>
     );
-  }, [accounts, loading, savingId]);
+  };
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
@@ -241,7 +243,7 @@ const AdminPermissions = () => {
         <h1 className="text-xl font-bold text-gray-800">Admin Permissions</h1>
       </div>
     
-      <Card noPadding>{content}</Card>
+      <Card noPadding>{renderContent()}</Card>
 
       <Modal
         isOpen={Boolean(editingAccount)}

@@ -76,7 +76,10 @@ saturdayHolidayRuleSchema.statics.getOccurrenceOfDate = function (date) {
 // from May 2026 onward. Attendance for earlier months (e.g. Feb, Mar 2026)
 // should never be blocked by this rule, even if a rule document happens to
 // exist for that year/month.
-const SATURDAY_RULE_EFFECTIVE_FROM = new Date(Date.UTC(2026, 4, 1)); // May 1, 2026
+// Exported so other modules that need to replicate this cutoff (e.g. the
+// holiday-window preloader in services/leave.js) read it from one place
+// instead of hard-coding a second copy that could drift out of sync.
+export const SATURDAY_RULE_EFFECTIVE_FROM = new Date(Date.UTC(2026, 4, 1)); // May 1, 2026
 
 /** True if `date` is a Saturday covered by that month's recurring-holiday rule. */
 saturdayHolidayRuleSchema.statics.isSaturdayHoliday = async function (date) {

@@ -1,4 +1,3 @@
-// controllers/hrm/attendanceController.js
 import mongoose from "mongoose";
 import Attendance from "../models/Attendance.js";
 import Holiday from "../models/holiday.js";
@@ -9,7 +8,6 @@ import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import { classifyAttendance, getDayRange, toDateOnlyString } from "../utils/dateHelpers.js";
 import { getDateStringIST } from "../services/leave.js";
 
-// Swap for your real activity logger if one exists in Zap Solutionz.
 const logActivity = async (_req, _entry) => {};
 
 const assertValidId = (id) => {
@@ -26,17 +24,9 @@ const assertValidUserId = (id) => {
 
 const ORDINAL = { 1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th" };
 
-// Attendance.userId points at the login User account, while the staff
-// lifecycle (joining date/status/relievingDate) lives on Staff — the two
-// are only linked by email. This checks that the date being marked falls
-// within the staff member's actual employment window (their joining date
-// through their relieving date, if they've left) rather than blocking
-// them outright the moment they're marked "Relieving" — an admin should
-// still be able to backfill/correct attendance for months they actually
-// worked, just not for dates before they joined or after they left.
 const assertStaffCanMarkAttendance = async (userId, forDate) => {
   const user = await User.findById(userId).select("email").lean();
-  if (!user?.email) return; // no linked Staff record to check against
+  if (!user?.email) return;
   const staff = await Staff.findOne({ email: user.email.toLowerCase().trim() })
     .select("status staffName date relievingDate")
     .lean();
@@ -54,7 +44,7 @@ const assertStaffCanMarkAttendance = async (userId, forDate) => {
     }
   }
 
-  if (staff.status === "Relieving" && staff.relievingDate) {
+  if (staff.status === "Relieved" && staff.relievingDate) {
     const relievingDate = normalizedDateOf(staff.relievingDate);
     if (markDate > relievingDate) {
       throw new ApiError(
@@ -64,15 +54,6 @@ const assertStaffCanMarkAttendance = async (userId, forDate) => {
     }
   }
 };
-
-/**
- * Rejects attendance on a Sunday, a manually-added Holiday (including
- * one-off "Emergency" closures like heavy rain), or a Saturday the admin
- * has marked as a recurring holiday for that month (e.g. 2nd & 4th
- * Saturday for one month, 3rd & 4th for another).
- */
-
-// controllers/hrm/attendanceController.js  (add this export)
 
 /** GET /me/month?year=YYYY&month=1-12 — full calendar for the logged-in user. */
 export const getMyMonthCalendar = asyncHandler(async (req, res) => {
@@ -110,6 +91,26 @@ export const getMyMonthCalendar = asyncHandler(async (req, res) => {
     }
   }
 
+  // Collect this month's Saturdays and resolve all Saturday-holiday-rule
+  // checks in parallel up front — previously each was awaited one at a
+  // time inside the render loop below, serializing up to 5 DB round trips
+  // per request.
+  const saturdays = [];
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCDay() === 6) saturdays.push(date);
+  }
+  const saturdayResults = await Promise.all(
+    saturdays.map((date) => SaturdayHolidayRule.isSaturdayHoliday(date)),
+  );
+  const saturdayHolidayByDate = {};
+  saturdays.forEach((date, i) => {
+    const { isHoliday, occurrence } = saturdayResults[i];
+    if (isHoliday) {
+      saturdayHolidayByDate[toDateOnlyString(date)] = `${ORDINAL[occurrence]} Saturday`;
+    }
+  });
+
   const records = [];
   for (let day = 1; day <= daysInMonth; day++) {
     const date = new Date(Date.UTC(year, month - 1, day));
@@ -126,12 +127,9 @@ export const getMyMonthCalendar = asyncHandler(async (req, res) => {
     } else if (dow === 0) {
       status = "holiday";
       holidayName = "Sunday";
-    } else if (dow === 6) {
-      const { isHoliday, occurrence } = await SaturdayHolidayRule.isSaturdayHoliday(date);
-      if (isHoliday) {
-        status = "holiday";
-        holidayName = `${ORDINAL[occurrence]} Saturday`;
-      }
+    } else if (saturdayHolidayByDate[dateKey]) {
+      status = "holiday";
+      holidayName = saturdayHolidayByDate[dateKey];
     }
 
     if (!status && attendance) {
@@ -149,6 +147,7 @@ export const getMyMonthCalendar = asyncHandler(async (req, res) => {
 
   res.json({ success: true, year, month, records });
 });
+
 const guardAgainstHolidayOrSunday = async (date) => {
   const d = new Date(date);
   if (d.getUTCDay() === 0) {
@@ -171,11 +170,6 @@ const guardAgainstHolidayOrSunday = async (date) => {
   }
 };
 
-// The `date` field is the "YYYY-MM-DD" IST calendar day (see Attendance
-// model), not the UTC calendar day. Using UTC here would shift any login
-// between 00:00–05:29 IST back onto the previous day, since that window is
-// still the previous UTC day (IST = UTC+5:30). getDateStringIST is the same
-// IST-aware helper used across leave/sign-in so both stay consistent.
 const normalizedDateOf = (loginTime) => getDateStringIST(loginTime);
 
 /** GET / — list attendance, paginated, with optional filters. */

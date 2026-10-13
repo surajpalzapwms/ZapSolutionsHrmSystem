@@ -1,4 +1,6 @@
 // src/components/login/index.jsx
+import BrandLogo from "../common/BrandLogo";
+import { useBrand } from "../../contexts/BrandContext";
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Lock, Mail, User, Eye, EyeOff, Phone } from "lucide-react";
@@ -8,6 +10,7 @@ import Button from "../common/Button";
 import { showToast } from "../../utils/toast";
 
 const Login = () => {
+  const brand = useBrand();
   const navigate = useNavigate();
   const [isSignUp, setIsSignUp] = useState(false);
   const [adminExists, setAdminExists] = useState(true);
@@ -46,8 +49,6 @@ const Login = () => {
     };
   }, []);
 
-  // Never allow sign-up mode to be entered once an admin exists, even if
-  // the toggle was clicked before the check above finished.
   useEffect(() => {
     if (adminExists && isSignUp) setIsSignUp(false);
   }, [adminExists, isSignUp]);
@@ -64,8 +65,15 @@ const Login = () => {
       }
     }
     
-    if (!form.email) next.email = "Email is required";
-    else if (!/\S+@\S+\.\S+/.test(form.email)) next.email = "Email is invalid";
+    if (isSignUp) {
+      if (!form.email) next.email = "Email is required";
+      else if (!/\S+@\S+\.\S+/.test(form.email)) next.email = "Email is invalid";
+    } else if (!form.email.trim()) {
+      // Login accepts an e-mail OR a Staff ID (e.g. ZS0019).
+      next.email = "Email or Staff ID is required";
+    } else if (form.email.includes("@") && !/\S+@\S+\.\S+/.test(form.email)) {
+      next.email = "Email is invalid";
+    }
     
     if (!form.password) next.password = "Password is required";
     else if (form.password.length < 6)
@@ -100,7 +108,7 @@ const handleSubmit = async (e) => {
     try {
       if (isSignUp) {
 
-        const { data } = await api.post("/api/auth/register", {
+        await api.post("/api/auth/register", {
           firstName: form.firstName,
           lastName: form.lastName,
           email: form.email,
@@ -121,7 +129,7 @@ const handleSubmit = async (e) => {
         });
       } else {
         const { data } = await api.post("/api/auth/login", {
-          email: form.email,
+          email: form.email.trim(),
           password: form.password,
         });
       
@@ -145,6 +153,8 @@ const handleSubmit = async (e) => {
           })
         );
 
+        // Left over from the old multi-company version.
+        localStorage.removeItem("selectedCompany");
         showToast("success", "Logged in successfully");
         navigate("/", { replace: true });
       }
@@ -187,26 +197,23 @@ const handleSubmit = async (e) => {
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-gradient-to-br from-blue-50 to-indigo-100">
       {/* Left side with Brand/Image - Black background */}
-      <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-gray-900 to-black items-center justify-center p-8">
+      <div
+        className="hidden lg:flex lg:w-1/2 items-center justify-center p-8"
+        style={{ background: `linear-gradient(135deg, ${brand.sidebarColor}, #000000)` }}
+      >
         <div className="text-center max-w-md">
           {/* Smaller rounded logo with border */}
-          <div className="mx-auto">
-            <img
-              src="/mainlogo.png"
-              alt="Company logo"
-              className="w-full h-full object-cover"
+          <div className="mx-auto mb-4 flex justify-center">
+            <BrandLogo
+              className="max-h-40 w-auto object-contain"
+              badgeClassName="h-20 w-20 text-4xl"
             />
           </div>
-          <h1 className="text-white text-3xl font-bold">HRM Portal</h1>
-          <p className="text-gray-400 mt-2 text-sm">
-            Manage staff, payroll, and attendance in one place.
-          </p>
+          <h1 className="text-white text-3xl font-bold">{brand.loginTitle}</h1>
+          <p className="text-gray-400 mt-2 text-sm">{brand.tagline}</p>
 
           <div className="mt-8 text-sm text-gray-500 border-t border-gray-800 pt-6">
-            <p>
-              Access is limited to authorised personnel and is logged for
-              security.
-            </p>
+            <p>{brand.loginSubtitle}</p>
           </div>
         </div>
       </div>
@@ -218,11 +225,10 @@ const handleSubmit = async (e) => {
           <div className="bg-white rounded-2xl shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.3)] px-6 sm:px-8 pb-8 pt-12 mt-8">
             {/* Logo at the top - overlapping the card */}
             <div className="absolute left-1/2 transform -translate-x-1/2 -top-6">
-              <div className="overflow-hidden rounded-t-2xl bg-white">
-                <img
-                  src="/mainlogo.png"
-                  alt="Company logo"
-                  className="object-cover"
+              <div className="overflow-hidden rounded-t-2xl bg-white px-3">
+                <BrandLogo
+                  className="h-14 w-auto object-contain"
+                  badgeClassName="h-12 w-12 text-xl"
                 />
               </div>
             </div>
@@ -283,13 +289,13 @@ const handleSubmit = async (e) => {
 
               <div>
                 <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
-                  <Mail size={14} /> Username or email
+                  <Mail size={14} /> {isSignUp ? "Email" : "Email or Staff ID"}
                 </label>
                 <InputField
-                  type="email"
+                  type={isSignUp ? "email" : "text"}
                   value={form.email}
                   onChange={handleChange("email")}
-                  placeholder="suraj.pal@zapwms.com"
+                  placeholder={isSignUp ? "suraj.pal@zapwms.com" : "suraj.pal@zapwms.com or ZS0019"}
                   error={errors.email}
                 />
               </div>
@@ -359,7 +365,7 @@ const handleSubmit = async (e) => {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full py-2.5 px-4 rounded-lg font-medium transition-all duration-200 bg-blue-600 hover:bg-blue-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-70 disabled:cursor-not-allowed text-sm sm:text-base cursor-pointer"
+                className="w-full py-2.5 px-4 rounded-lg font-medium transition-all duration-200 bg-[var(--brand-primary)] hover:brightness-90 text-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] focus:ring-offset-2 disabled:opacity-70 disabled:cursor-not-allowed text-sm sm:text-base cursor-pointer"
               >
                 {loading ? (
                   <div className="flex items-center justify-center gap-2">
@@ -406,7 +412,7 @@ const handleSubmit = async (e) => {
                       <button
                         type="button"
                         onClick={toggleMode}
-                        className="text-blue-600 hover:text-blue-700 font-medium hover:underline"
+                        className="text-[var(--brand-primary)] hover:brightness-90 font-medium hover:underline"
                       >
                         Sign in
                       </button>
@@ -417,7 +423,7 @@ const handleSubmit = async (e) => {
                       <button
                         type="button"
                         onClick={toggleMode}
-                        className="text-blue-600 hover:text-blue-700 font-medium hover:underline"
+                        className="text-[var(--brand-primary)] hover:brightness-90 font-medium hover:underline"
                       >
                         Sign up
                       </button>

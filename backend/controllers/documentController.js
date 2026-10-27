@@ -7,18 +7,23 @@
 //                 GET/POST /api/documents/staff/:staffId
 //                 DELETE /api/documents/staff/:staffId/:type
 //   Files:        GET /api/documents/photo/:staffId?v=&s=   (signed, no login)
+//                 GET /api/documents/user-photo/:userId?v=&s= (account photo, no Staff record)
 //                 GET /api/documents/file/:docId?e=&s=      (signed, expires)
 //
 // Upload body (JSON): { type, data: <base64 or data: URI>, mimeType, fileName, number }
 import mongoose from "mongoose";
 import Staff from "../models/Staff.js";
 import StaffDocument, { DOCUMENT_LABELS, DOCUMENT_TYPES } from "../models/StaffDocument.js";
+import User from "../models/User.js";
+import UserPhoto from "../models/UserPhoto.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import {
   documentUrlFor,
   photoUrlFor,
+  userPhotoUrlFor,
   verifyDocumentSignature,
   verifyPhotoSignature,
+  verifyUserPhotoSignature,
 } from "../utils/fileSigning.js";
 
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -152,14 +157,74 @@ const removeType = async (staff, rawType) => {
   return type;
 };
 
+// ── Accounts with no Staff record (super admin, admin not on staff list) ──
+// They can still have a profile photo — stored per login account in
+// UserPhoto. Other documents (Aadhaar, PAN, …) only exist for staff.
+const ownStaffOrNull = async (req) => {
+  const email = req.user?.email?.toLowerCase().trim();
+  return email ? Staff.findOne({ email }) : null;
+};
+
+const accountListFor = async (userId) => {
+  const user = await User.findById(userId).select("firstName lastName name email photoUpdatedAt").lean();
+  const photoUrl = userPhotoUrlFor(user);
+  return {
+    staffId: null,
+    accountOnly: true,
+    staffName: userName(user),
+    staffCode: "",
+    photoUrl,
+    documents: [
+      photoUrl
+        ? { type: "photo", label: DOCUMENT_LABELS.photo, uploaded: true, uploadedAt: user.photoUpdatedAt }
+        : { type: "photo", label: DOCUMENT_LABELS.photo, uploaded: false },
+    ],
+  };
+};
+
+const saveAccountPhoto = async (req) => {
+  const type = checkType(req.body?.type);
+  if (type !== "photo") {
+    throw new ApiError(404, "No staff profile is linked to your account yet. Contact your admin.");
+  }
+  let { data, mimeType } = req.body || {};
+  if (!data || typeof data !== "string") throw new ApiError(400, "File data is required");
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(data);
+  if (m) {
+    mimeType = mimeType || m[1];
+    data = m[2];
+  }
+  mimeType = String(mimeType || "").toLowerCase();
+  if (mimeType === "image/jpg") mimeType = "image/jpeg";
+  if (!IMAGE_TYPES.includes(mimeType)) throw new ApiError(400, "Profile photo must be an image (JPG / PNG).");
+  const buffer = Buffer.from(data, "base64");
+  if (!buffer.length) throw new ApiError(400, "The file is empty");
+  if (buffer.length > MAX_BYTES) throw new ApiError(400, "File is too large (max 8 MB)");
+
+  await UserPhoto.findOneAndUpdate(
+    { user: req.user._id },
+    { user: req.user._id, mimeType, size: buffer.length, data: buffer },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  await User.updateOne({ _id: req.user._id }, { $set: { photoUpdatedAt: new Date() } });
+};
+
 // ── Staff: own documents ──────────────────────────────────────────────────
 export const getMyDocuments = asyncHandler(async (req, res) => {
-  const staff = await ownStaff(req);
-  res.json({ success: true, data: await listFor(staff) });
+  const staff = await ownStaffOrNull(req);
+  res.json({ success: true, data: staff ? await listFor(staff) : await accountListFor(req.user._id) });
 });
 
 export const uploadMyDocument = asyncHandler(async (req, res) => {
-  const staff = await ownStaff(req);
+  const staff = await ownStaffOrNull(req);
+  if (!staff) {
+    await saveAccountPhoto(req);
+    return res.status(201).json({
+      success: true,
+      message: `${DOCUMENT_LABELS.photo} uploaded`,
+      data: await accountListFor(req.user._id),
+    });
+  }
   const type = await saveUpload(req, staff);
   res.status(201).json({
     success: true,
@@ -169,7 +234,19 @@ export const uploadMyDocument = asyncHandler(async (req, res) => {
 });
 
 export const deleteMyDocument = asyncHandler(async (req, res) => {
-  const staff = await ownStaff(req);
+  const staff = await ownStaffOrNull(req);
+  if (!staff) {
+    const type = checkType(req.params.type);
+    if (type !== "photo") throw new ApiError(404, `${DOCUMENT_LABELS[type]} is not uploaded`);
+    const removed = await UserPhoto.findOneAndDelete({ user: req.user._id });
+    if (!removed) throw new ApiError(404, `${DOCUMENT_LABELS.photo} is not uploaded`);
+    await User.updateOne({ _id: req.user._id }, { $set: { photoUpdatedAt: null } });
+    return res.json({
+      success: true,
+      message: `${DOCUMENT_LABELS.photo} removed`,
+      data: await accountListFor(req.user._id),
+    });
+  }
   const type = await removeType(staff, req.params.type);
   res.json({ success: true, message: `${DOCUMENT_LABELS[type]} removed`, data: await listFor(staff) });
 });
@@ -266,6 +343,18 @@ export const getPhotoFile = asyncHandler(async (req, res) => {
   // The URL changes whenever the photo changes, so it can be cached for long.
   res.setHeader("Cache-Control", "private, max-age=2592000, immutable");
   sendFile(res, doc);
+});
+
+export const getUserPhotoFile = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const { v, s } = req.query;
+  if (!mongoose.Types.ObjectId.isValid(userId) || !verifyUserPhotoSignature(userId, v, s)) {
+    throw new ApiError(403, "Invalid photo link");
+  }
+  const doc = await UserPhoto.findOne({ user: userId }).select("+data").lean();
+  if (!doc) throw new ApiError(404, "No photo");
+  res.setHeader("Cache-Control", "private, max-age=2592000, immutable");
+  sendFile(res, { ...doc, fileName: "photo", type: "photo" });
 });
 
 export const getDocumentFile = asyncHandler(async (req, res) => {

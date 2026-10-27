@@ -9,7 +9,8 @@
 //                          NOT counted - they are not "declared" holidays.
 //   pendingResignations -> resignation requests nobody has acted on yet
 //                          (admin / super admin with the Resignations tab).
-//   presentToday        -> staff who are present today (attendance tab).
+//   presentToday        -> staff who are present today (admins with the
+//                          attendance tab only; never sent to plain staff).
 //
 // A value of `null` means "this role doesn't get that badge".
 import Holiday from "../models/holiday.js";
@@ -18,6 +19,7 @@ import Attendance from "../models/Attendance.js";
 import Staff from "../models/Staff.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { hasTabAccess, isAdminRole } from "../config/permissions.js";
+import { getStaffVisibility, hasUserLeftBy } from "../services/staffVisibility.js";
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const pad = (n) => String(n).padStart(2, "0");
@@ -70,7 +72,21 @@ async function countHolidaysThisMonth(user, { monthStart, monthEnd }) {
 }
 
 async function countPresentToday({ todayStr, dayStart, dayEnd }) {
-  const ids = await Attendance.distinct("userId", {
+  const [ids, visibility] = await Promise.all([
+    attendanceUserIdsToday({ todayStr, dayStart, dayEnd }),
+    getStaffVisibility(),
+  ]);
+  // Not counted: disabled staff, and staff who have left (today is after
+  // their last working day) but are still logged in somewhere.
+  return ids.filter(
+    (id) =>
+      !visibility.hiddenIds.has(String(id)) &&
+      !hasUserLeftBy(visibility, id, todayStr),
+  ).length;
+}
+
+async function attendanceUserIdsToday({ todayStr, dayStart, dayEnd }) {
+  return Attendance.distinct("userId", {
     $or: [
       { date: todayStr },
       // Older / imported rows may have no `date` string - fall back to loginTime.
@@ -80,7 +96,6 @@ async function countPresentToday({ todayStr, dayStart, dayEnd }) {
     attendanceType: { $ne: "absent" },
     status: { $ne: "absent" },
   });
-  return ids.length;
 }
 
 /** GET /api/hrm/sidebar-counts */
@@ -94,9 +109,9 @@ export const getSidebarCounts = asyncHandler(async (req, res) => {
     admin && hasTabAccess(user, "resignations")
       ? Resignation.countDocuments({ status: "pending" })
       : null,
-    // Admins need the attendance tab; plain staff just get the aggregate
-    // number (no names) for their own "Attendance" entry.
-    !admin || hasTabAccess(user, "attendance") ? countPresentToday(range) : null,
+    // Only admins / the super admin with the Attendance tab see how many
+    // people are present today — plain staff never get this number.
+    admin && hasTabAccess(user, "attendance") ? countPresentToday(range) : null,
   ]);
 
   // Always fresh - this is a live "notification" number.

@@ -21,6 +21,7 @@ import { useMySalary } from "./hooks/useMySalary";
 import { staffService } from "../../services/staffService";
 import { SHORT_DAYS, MONTHS } from "../../utils/constants";
 import MonthSummaryPanel from "./MonthSummaryPanel";
+import LateComingPanel, { LateDayBadge } from "./LateComingPanel";
 import {
   LEGEND,
   TOOLTIP_STATUSES,
@@ -30,7 +31,7 @@ import {
   periodForDate,
   dateKeyOf,
 } from "./calendarHelpers";
-import { DayTooltip, MiniMonth, LeaveBalanceLine } from "./calendarGridPieces";
+import { DayTooltip, MiniMonth, LeaveBalanceLine, ReferralLine } from "./calendarGridPieces";
 
 // Header counts that a day's status contributes to.
 const COUNT_FIELD = {
@@ -256,6 +257,7 @@ const MyAttendance = () => {
                   Unpaid: {calendar?.unpaidCount ?? 0}, Swap: {calendar?.swapCount ?? 0})
                 </span>
                 <LeaveBalanceLine balance={calendar?.leaveBalance} />
+                <ReferralLine referral={profile?.referral} joinKey={joinKey} small={isAnnualView} />
                 <span className={isAnnualView ? "block text-emerald-700 font-medium text-xs mt-0.5" : "block text-emerald-700 font-medium text-sm mt-1"}>
                   Total Working Days: {calendar?.totalWorkingDays ?? 0}
                 </span>
@@ -424,7 +426,17 @@ const MyAttendance = () => {
                                 ½
                               </span>
                             )}
-                            {hasTooltip && <DayTooltip info={info} period={period} />}
+                            {info?.late && (
+                              <LateDayBadge late={info.late} monthEnabled={calendar?.lateSummary?.enabled !== false} />
+                            )}
+                            {hasTooltip && (
+                              <DayTooltip
+                                info={info}
+                                period={period}
+                                align={pos.gridColumn <= 2 ? "left" : pos.gridColumn >= 6 ? "right" : "center"}
+                                below={pos.gridRow === 1}
+                              />
+                            )}
                           </div>
                         );
                       })}
@@ -438,8 +450,17 @@ const MyAttendance = () => {
                     salaryLoading={salaryLoading}
                     advances={advancesByMonth[`${year}-${month}`] || []}
                     advancesLoading={advancesLoading}
+                    referral={profile?.referral}
+                    joinDate={profile?.date}
+                    period={`${year}-${String(month + 1).padStart(2, "0")}`}
                   />
                 </div>
+
+                {/* Read-only for staff — only the super admin can change it. */}
+                <LateComingPanel
+                  summary={calendar?.lateSummary || null}
+                  monthLabel={`${MONTHS[month]} ${year}`}
+                />
               </>
             )}
 

@@ -160,6 +160,11 @@ const MyResignation = () => {
         ? 2
         : -1;
 
+  // Past dates are allowed (staff who already left, e.g. on 10 Sep), but only
+  // up to a year back - same limit as the backend.
+  const oneYearAgo = new Date();
+  oneYearAgo.setDate(oneYearAgo.getDate() - 365);
+
   // Suggested last working day = today + notice period.
   const noticeEnd = new Date();
   noticeEnd.setDate(noticeEnd.getDate() + noticeDays);
@@ -292,7 +297,7 @@ const MyResignation = () => {
                     value={form.lastWorkingDay}
                     onChange={handleChange}
                     error={errors.lastWorkingDay}
-                    minDate={new Date()}
+                    minDate={oneYearAgo}
                     maxDate={new Date(new Date().getFullYear() + 1, 11, 31)}
                     required
                   />

@@ -17,11 +17,12 @@ const DEFAULT_LUNCH_START = "13:30";
 const DEFAULT_LUNCH_END = "14:15";
 const DEFAULT_REQUIRED_MINUTES = 7 * 60 + 45; // 7h 45m net of lunch
 
-// How often we refresh from the server while signed in — this is what
-// picks up an admin's early-sign-out approval without a page refresh.
-// Kept short so approval shows up quickly rather than needing a manual
-// browser refresh; we also refetch immediately on tab focus below.
-const STATUS_POLL_MS = 10000;
+// How often we refresh from the server while signed in. Changes made
+// elsewhere (auto sign-in/out from the office network, admin edits) are
+// also picked up instantly on tab focus / visibility and on the
+// "attendanceChanged" event below, so a slow poll is enough — the old
+// 10-second poll re-rendered the dashboard 6 times a minute for nothing.
+const STATUS_POLL_MS = 60000;
 const TICK_MS = 30000;
 
 const formatClockTime = (value) =>
@@ -275,6 +276,26 @@ const SignInOutCard = () => {
         <Card noPadding className="h-full rounded-2xl">
           <div className="flex items-center justify-center py-8">
             <Spinner size="sm" />
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Left the organization (after the last working day): nothing to sign
+  // in to any more — even if this account is still logged in.
+  if (meta?.leftOrganization) {
+    return (
+      <div className="h-full">
+        <Card noPadding className="h-full rounded-2xl">
+          <div className="p-5 flex items-start gap-3">
+            <Clock size={18} className="text-gray-400 mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-gray-700">Attendance closed</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                You have left the organization, so attendance is no longer marked for you.
+              </p>
+            </div>
           </div>
         </Card>
       </div>

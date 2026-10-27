@@ -10,6 +10,22 @@ import {
 import { isFromOfficeNetwork } from "../utils/officeNetwork.js";
 import { autoAttendanceApplies } from "../services/presence.js";
 import { encryptPassword, decryptPassword } from "../utils/passwordVault.js";
+import { photoUrlFor, userPhotoUrlFor } from "../utils/fileSigning.js";
+
+// The photo shown in the website header / app profile for this login:
+// the linked staff member's photo, else the account's own photo (super
+// admin and other accounts without a Staff record — see models/UserPhoto.js).
+const accountPhotoUrl = async (user) => {
+  if (!user) return null;
+  if (user.email) {
+    const staff = await Staff.findOne({ email: String(user.email).toLowerCase().trim() })
+      .select("_id photoUpdatedAt")
+      .lean();
+    const staffUrl = photoUrlFor(staff);
+    if (staffUrl) return staffUrl;
+  }
+  return userPhotoUrlFor(user);
+};
 
 // Keeps the admin-viewable copy of a staff member's password (shown in the
 // Staff History view) in step with the password they actually log in with.
@@ -315,6 +331,7 @@ export const login = async (req, res) => {
         email: user.email,
         role: user.role,
         permissions: user.permissions,
+        photoUrl: await accountPhotoUrl(user),
         token,
       },
     });
@@ -334,7 +351,7 @@ export const getMe = async (req, res) => {
       (await User.findById(req.user.id).select("-password").lean()) || {};
     res.status(200).json({
       success: true,
-      data: user,
+      data: { ...user, photoUrl: await accountPhotoUrl(user) },
     });
   } catch (error) {
     res.status(500).json({

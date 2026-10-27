@@ -1,7 +1,8 @@
 // utils/letterFields.js
 //
-// What the "Generate letter" form asks for, per letter (offer / joining /
-// confirmation), and how the answers are stored.
+// What the "Generate letter" form asks for, per letter (all six: offer /
+// joining / confirmation / termination / leaving / experience), and how the
+// answers are stored.
 //
 // Every field gets its CURRENT value from (first match wins):
 //   1. what was typed the last time this letter was generated
@@ -48,7 +49,7 @@ const FIELD_DEFS = {
     profile: true,
     placeholder: "e.g. Full time / Mon till Saturday / 10.00 AM till 6.30 PM",
   },
-  contactNo: { label: "Mobile", kind: "text", profile: true, placeholder: "+91 91368 69647" },
+  contactNo: { label: "Mobile", kind: "phone", profile: true, placeholder: "Phone number" },
   email: { label: "Email", kind: "text", profile: false },
   address: { label: "Permanent address", kind: "textarea", profile: true },
   currentAddress: { label: "Current address (blank = Same As Above)", kind: "textarea", profile: true },
@@ -59,6 +60,29 @@ const FIELD_DEFS = {
   trialDays: { label: "Trial period (working days)", kind: "number", profile: false, min: 1, max: 60 },
   signatory: { label: "Signed by (name under Admin Team)", kind: "text", profile: false, placeholder: "e.g. Amit" },
   letterDate: { label: "Date on the letter", kind: "date", profile: false },
+  // Termination / Leaving / Experience. ANY date may be chosen — past, today
+  // or future (a staff member who is still working can get a letter dated
+  // ahead to their planned last day). When the staff member resigned, the
+  // last working day from the resignation is filled in automatically.
+  lastWorkingDay: { label: "Last working day", kind: "date", profile: false },
+  terminationReason: {
+    label: "Reason for termination (optional — printed on the letter)",
+    kind: "textarea",
+    profile: false,
+    placeholder: "e.g. continued absence without information",
+  },
+};
+
+// Letters whose date is the LAST WORKING DAY rather than a joining date.
+export const RELIEVING_LETTERS = ["termination", "leaving", "experience"];
+
+// Date printed on a Termination / Leaving / Experience letter: the last
+// working day once it has come; for a last day still in the future (staff
+// member still working) the letter is dated today and states the future
+// last working day in its text.
+export const relievingLetterDate = (lwdYmd) => {
+  const today = ymd(new Date());
+  return lwdYmd && lwdYmd <= today ? lwdYmd : today;
 };
 
 // Which fields each letter uses, and whether they are asked.
@@ -107,6 +131,32 @@ const LETTER_FIELDS = {
     ["currentAddress", false],
     ["workSchedule", false],
     ["signatory", false],
+    ["letterDate", false],
+  ],
+  termination: [
+    ["staffName", "required"],
+    ["gender", "required"],
+    ["designation", "ifEmpty"],
+    ["lastWorkingDay", "required"],
+    ["terminationReason", "ifEmpty"],
+    ["date", false],
+    ["letterDate", false],
+  ],
+  leaving: [
+    ["staffName", "required"],
+    ["gender", "required"],
+    ["designation", "ifEmpty"],
+    ["date", "required"],
+    ["lastWorkingDay", "required"],
+    ["letterDate", false],
+  ],
+  experience: [
+    ["staffName", "required"],
+    ["gender", "required"],
+    ["designation", "required"],
+    ["department", "ifEmpty"],
+    ["date", "required"],
+    ["lastWorkingDay", "required"],
     ["letterDate", false],
   ],
 };
@@ -167,7 +217,7 @@ export const normaliseValue = (key, value) => {
  *         salaryAt(date) -> amount|null, ids: { aadhaar, pan }, company }
  */
 export const currentValues = (type, ctx) => {
-  const { staff = {}, saved = {}, salaryAt = () => null, ids = {}, company = {} } = ctx;
+  const { staff = {}, saved = {}, salaryAt = () => null, ids = {}, company = {}, resignation = null } = ctx;
   const has = (k) => saved && !isEmpty(saved[k]);
   const pick = (k, fromProfile) => (has(k) ? saved[k] : fromProfile);
 
@@ -192,8 +242,15 @@ export const currentValues = (type, ctx) => {
   const salaryDate = type === "confirmation" ? confYmd || ymd(new Date()) : joinYmd || ymd(new Date());
   const payrollSalary = salaryAt(new Date(`${salaryDate}T06:30:00Z`));
 
-  const defaultLetterDate =
-    type === "confirmation" ? confYmd || ymd(new Date()) : joinYmd || ymd(new Date());
+  // Last working day: typed last time → the relieving date on the profile
+  // → the last working day the staff member asked for in their resignation.
+  const lwdYmd = ymd(pick("lastWorkingDay", staff.relievingDate || resignation?.lastWorkingDay || ""));
+
+  const defaultLetterDate = RELIEVING_LETTERS.includes(type)
+    ? relievingLetterDate(lwdYmd)
+    : type === "confirmation"
+      ? confYmd || ymd(new Date())
+      : joinYmd || ymd(new Date());
 
   return {
     staffName: pick("staffName", staff.staffName || ""),
@@ -214,16 +271,19 @@ export const currentValues = (type, ctx) => {
     salary: pick("salary", payrollSalary ? Number(payrollSalary) : ""),
     trialDays: Number(pick("trialDays", 10)) || 10,
     signatory: pick("signatory", company.signatory || ""),
+    lastWorkingDay: lwdYmd,
+    terminationReason: pick("terminationReason", ""),
     letterDate: ymd(pick("letterDate", defaultLetterDate)),
   };
 };
 
 /** Form description: [{ key, label, kind, required, missing, value, … }] */
-export const describeFields = (type, values) =>
+export const describeFields = (type, values, hints = {}) =>
   (LETTER_FIELDS[type] || []).map(([key, ask]) => {
     const def = FIELD_DEFS[key];
     const value = values[key];
     return {
+      hint: hints[key] || "",
       key,
       label: def.label,
       kind: def.kind,
@@ -250,6 +310,14 @@ export const applyAnswers = (type, current, answers = {}, staff = {}) => {
     if (!(key in answers)) continue;
     const v = normaliseValue(key, answers[key]);
     if (v !== undefined) values[key] = v;
+  }
+  // Relieving letters: the letter is dated on the last working day unless HR
+  // picked a different letter date themselves.
+  if (RELIEVING_LETTERS.includes(type) && values.lastWorkingDay) {
+    const letterDateTouched = "letterDate" in answers && ymd(answers.letterDate) !== current.letterDate;
+    if (!letterDateTouched && current.letterDate === relievingLetterDate(current.lastWorkingDay)) {
+      values.letterDate = relievingLetterDate(values.lastWorkingDay);
+    }
   }
   // Keep the salary table in step with the probation length.
   if (type === "offer") {
@@ -295,4 +363,6 @@ export const staffForLetter = (staff, values) => ({
   email: values.email || staff.email,
   address: values.address ?? staff.address,
   currentAddress: values.currentAddress ?? staff.currentAddress,
+  relievingDate: values.lastWorkingDay ? new Date(`${values.lastWorkingDay}T00:00:00.000Z`) : staff.relievingDate,
+  terminationReason: values.terminationReason || "",
 });

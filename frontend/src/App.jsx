@@ -24,6 +24,9 @@ const MobileDashboard = lazy(() => import("./components/MobileDashboard"));
 const StaffMember = lazy(() => import("./components/staff/index"));
 const HrmDashboard = lazy(() => import("./components/hrm/HrmDashboard"));
 const Advance = lazy(() => import("./components/advance/index"));
+const FinalSettlement = lazy(() =>
+  import("./components/final-settlement/index"),
+);
 const Expenses = lazy(() => import("./components/expenses/index"));
 const Holidays = lazy(() => import("./components/holidays/index"));
 const Payroll = lazy(() => import("./components/payroll/index"));
@@ -50,6 +53,7 @@ const AddStaffMember = lazy(() =>
 const LeaveAndAttendance = lazy(() => import("./components/attendance/index"));
 const MyAttendance = lazy(() => import("./components/attendance/MyAttendance"));
 const LeaveManagement = lazy(() => import("./components/leave/index"));
+const Settings = lazy(() => import("./components/settings/Settings"));
 const AdminPermissions = lazy(() =>
   import("./components/admin-permissions/AdminPermissions"),
 );
@@ -300,6 +304,14 @@ function App() {
                 />
               </Route>
               <Route
+                path="finalsettlement"
+                element={
+                  <AdminRoute requiredTab="finalsettlement">
+                    <FinalSettlement />
+                  </AdminRoute>
+                }
+              />
+              <Route
                 path="advance"
                 element={
                   <AdminRoute requiredTab="advance">
@@ -312,6 +324,14 @@ function App() {
                 element={
                   <AdminRoute requiredTab="expenses">
                     <Expenses />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="settings"
+                element={
+                  <AdminRoute requiredTab="settings">
+                    <Settings />
                   </AdminRoute>
                 }
               />

@@ -6,6 +6,7 @@ import StaffAdvance from "../models/StaffAdvance.js";
 import { buildLeaveEncashmentLedger } from "./leaveEncashment.js";
 import { calculateSalary } from "../controllers/payrollController.js";
 import { getOrCompute } from "./responseCache.js";
+import { getEffectiveConfirmationDate } from "./leave.js";
 
 // Runs `fn` over `items` with at most `limit` at a time, keeping order.
 const mapWithLimit = async (items, limit, fn) => {
@@ -33,7 +34,76 @@ const safeMonthSalary = async (staffId, period) => {
   }
 };
 
-const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+const round2 = (n) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
+
+// "YYYY-MM-DD" of a stored date in India time (dates picked on the website
+// are often saved as IST midnight = previous day 18:30 UTC).
+const IST_OFFSET_MS = 330 * 60 * 1000;
+const istKey = (d) => {
+  if (!d) return null;
+  const t = new Date(d);
+  if (Number.isNaN(t.getTime())) return null;
+  return new Date(t.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+};
+
+// How one month's salary was worked out — shown behind the "View details"
+// button on the website and in the app, and printed in the PDF.
+//   Salary for payable days (per day × payable days)
+//   − Unpaid leave / absent days (per day × unpaid days)
+//   − Late coming
+//   − Referral commission
+//   = Net salary
+//   + Allowances − Deductions (saved on that month's payroll, if any)
+//   = Salary earned for the month
+const monthBreakdown = (salary, records) => {
+  if (!salary) return null;
+  const list = (key) =>
+    records.flatMap((r) =>
+      (Array.isArray(r[key]) ? r[key] : []).map((x) => ({
+        type: x.type || "",
+        amount: round2(x.amount),
+      })),
+    );
+  const allowances = list("allowances");
+  const deductions = list("deductions");
+  const totalAllowance = round2(
+    records.reduce((s, r) => s + (Number(r.totalAllowance) || 0), 0),
+  );
+  const totalDeduction = round2(
+    records.reduce((s, r) => s + (Number(r.totalDeduction) || 0), 0),
+  );
+  const perDay = Number(salary.perDaySalary) || 0;
+  return {
+    basicSalary: round2(salary.basicSalary),
+    totalDaysInMonth: salary.totalDaysInMonth ?? 0,
+    perDaySalary: round2(perDay),
+    payableDays: salary.payableDays ?? 0,
+    payableNote: salary.payableNote || null,
+    salaryForPayableDays: round2(perDay * (salary.payableDays || 0)),
+    unpaidLeaveDays: round2(salary.unpaidLeaveDays),
+    unpaidLeaveDates: salary.unpaidLeaveDates || [],
+    unmarkedDates: salary.unmarkedDates || [],
+    halfDayDates: salary.halfDayDates || [],
+    leaveDeduction: round2(salary.leaveDeduction),
+    lateDeduction: round2(salary.lateDeduction),
+    lateMinutes: salary.lateMinutes || 0,
+    lateDays: salary.lateDays || 0,
+    referralCommission: round2(salary.referralCommission),
+    referralOrganization: salary.referralOrganization || "",
+    referralPercent: salary.referralPercent || 0,
+    netSalary: round2(salary.netSalary),
+    allowances,
+    totalAllowance,
+    deductions,
+    totalDeduction,
+    advanceRecovered: round2(
+      records.reduce(
+        (s, r) => s + ((Number(r.paidAmount) || 0) > 0 ? Number(r.advanceDeduction) || 0 : 0),
+        0,
+      ),
+    ),
+  };
+};
 const EPS_DAYS = 0.001;
 
 const periodOf = (d) => {
@@ -119,6 +189,18 @@ const computeFinalSettlementUncached = async (staffId) => {
   const relievingDate = new Date(staff.relievingDate);
   relievingDate.setUTCHours(0, 0, 0, 0);
   const relievingPeriod = periodOf(relievingDate);
+
+  // Left DURING probation / internship = never confirmed before the
+  // relieving date (no confirmation date, or one that falls after it).
+  // Such staff earn no leave, so the statement shows no Leave Summary /
+  // encashment, and the month-wise salary runs from the JOINING month.
+  // Uses the stored confirmation date, or — when it was never saved — the
+  // one the leave rules derive (joining / internship end + probation), so a
+  // confirmed staff member with no saved date is NOT treated as probation.
+  const effectiveConfirmDate = getEffectiveConfirmationDate(staff);
+  const confirmKey = istKey(effectiveConfirmDate);
+  const relieveKey = istKey(staff.relievingDate);
+  const probationExit = !confirmKey || (relieveKey && confirmKey > relieveKey);
   const daysInRelievingMonth = new Date(
     Date.UTC(relievingDate.getUTCFullYear(), relievingDate.getUTCMonth() + 1, 0),
   ).getUTCDate();
@@ -136,13 +218,13 @@ const computeFinalSettlementUncached = async (staffId) => {
   // THAT month's own per-day salary (basic / days in month).
   const leave = await buildLeaveEncashmentLedger({
     staffId,
-    confirmationDate: staff.confirmationDate ?? null,
+    confirmationDate: probationExit ? null : staff.confirmationDate ?? null,
     asOf: relievingDate,
     relievingDate,
   });
-  const paidRemaining = leave.totals.plRemaining;
-  const leaveEncashment = leave.totals.encashment;
-  const encashedMonths = leave.months
+  const paidRemaining = probationExit ? 0 : leave.totals?.plRemaining || 0;
+  const leaveEncashment = probationExit ? 0 : leave.totals?.encashment || 0;
+  const encashedMonths = (probationExit ? [] : leave.months || [])
     .filter((m) => m.plRemaining > EPS_DAYS)
     .map((m) => ({
       period: m.period,
@@ -160,7 +242,7 @@ const computeFinalSettlementUncached = async (staffId) => {
     period: { $lte: relievingPeriod },
   })
     .select(
-      "period status paidAmount advanceDeduction previousPendingAmount totalAllowance totalDeduction",
+      "period status paidAmount advanceDeduction previousPendingAmount totalAllowance totalDeduction allowances deductions",
     )
     .lean();
 
@@ -178,6 +260,9 @@ const computeFinalSettlementUncached = async (staffId) => {
     : confirmPeriod;
   let startPeriod =
     effectiveConfirmPeriod || firstPayrollPeriod || joinPeriod || relievingPeriod;
+  // Left during probation: every month from joining is listed (each with
+  // its unpaid leave and amount), not just the relieving month.
+  if (probationExit) startPeriod = joinPeriod || firstPayrollPeriod || relievingPeriod;
   if (joinPeriod && startPeriod < joinPeriod) startPeriod = joinPeriod;
   if (startPeriod > relievingPeriod) startPeriod = relievingPeriod;
 
@@ -267,6 +352,7 @@ const computeFinalSettlementUncached = async (staffId) => {
       earned,
       paid,
       pending,
+      breakdown: monthBreakdown(salary, records),
       payrollStatus: records.length
         ? records[0].status
         : beforePayroll
@@ -305,9 +391,13 @@ const computeFinalSettlementUncached = async (staffId) => {
     staff: {
       staffId: staff.staffId,
       staffName: staff.staffName,
-      confirmationDate: staff.confirmationDate,
+      joiningDate: staff.date ?? null,
+      // Not shown ("—") when they left before being confirmed.
+      confirmationDate: probationExit ? null : staff.confirmationDate || effectiveConfirmDate,
       relievingDate: staff.relievingDate,
     },
+    // true = left during probation / internship (never confirmed).
+    probationExit,
     monthlySalary: round2(monthlySalary),
     perDaySalary,
     leaveBalance: {

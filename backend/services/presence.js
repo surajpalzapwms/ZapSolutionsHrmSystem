@@ -76,6 +76,7 @@ export const autoAttendanceApplies = (role) => {
   return true;
 };
 import { markCalendarDataChanged } from "./calendarHealCache.js";
+import { isUserLeftOrganization } from "./staffVisibility.js";
 
 const num = (v, d) => {
   const n = parseInt(v, 10);
@@ -280,6 +281,11 @@ export const handlePresenceEvent = async ({
   }
 
   const userId = user._id;
+  // Left the organization: nothing is marked any more (see staffVisibility).
+  if (await isUserLeftOrganization(userId, now)) {
+    return { skipped: "left_organization", inOffice, action: "none" };
+  }
+
   const today = getDateStringIST(now);
   let rec = await findAttendanceByUserAndDate(userId, today);
 

@@ -18,7 +18,7 @@ const initials = (name = "") => {
   return (w.length === 1 ? w[0].slice(0, 2) : w[0][0] + w[w.length - 1][0]).toUpperCase();
 };
 
-const StaffDocumentsSection = ({ staffId, staffName }) => {
+const StaffDocumentsSection = ({ staffId, staffName, onPhotoChanged }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);
@@ -72,6 +72,7 @@ const StaffDocumentsSection = ({ staffId, staffName }) => {
       const payload = { type, number, ...(await readFileForUpload(file)) };
       const res = await documentService.uploadForStaff(staffId, payload);
       setData(res.data?.data || null);
+      if (type === "photo") onPhotoChanged?.(res.data?.data?.photoUrl || null);
       showToast("success", res.data?.message || "Uploaded");
     } catch (err) {
       showToast("error", err.response?.data?.message || "Upload failed");
@@ -86,6 +87,7 @@ const StaffDocumentsSection = ({ staffId, staffName }) => {
     try {
       const res = await documentService.deleteForStaff(staffId, doc.type);
       setData(res.data?.data || null);
+      if (doc.type === "photo") onPhotoChanged?.(res.data?.data?.photoUrl || null);
       showToast("success", res.data?.message || "Removed");
     } catch (err) {
       showToast("error", err.response?.data?.message || "Could not remove");

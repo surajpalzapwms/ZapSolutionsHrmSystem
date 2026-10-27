@@ -1,6 +1,7 @@
 import { formatDateToDDMMMYYYY } from "./dateUtils";
 import { formatNumber } from "./numberUtils";
-import { getBrand } from "./brand";
+import { getBrand, formatMoneyPdf, formatPlainNumber } from "./brand";
+import { monthBreakdownLines, monthTotals } from "./settlementBreakdown";
 
 // Company name and logo come from src/utils/brand.js.
 
@@ -21,13 +22,8 @@ const COLORS = {
   warnText: [150, 90, 10],
 };
 
-const money = (value) => {
-  const num = Number(value) || 0;
-  return `Rs. ${num.toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-};
+// Amount in the company currency chosen in Settings (PDF-safe text).
+const money = (value) => formatMoneyPdf(value);
 
 const days = (value, decimals = 1) => `${formatNumber(value, decimals)} days`;
 
@@ -117,11 +113,7 @@ function drawTable(
 const n2 = (v) => String(Math.round((Number(v) || 0) * 100) / 100);
 const nz = (v) => (Number(v) ? n2(v) : "-");
 
-const m2 = (v) =>
-  (Number(v) || 0).toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+const m2 = (v) => formatPlainNumber(v);
 const mz = (v) => (Number(v) ? m2(v) : "-");
 
 // Month-wise leave statement, Sick + Casual FIRST then Paid:
@@ -416,6 +408,115 @@ function drawLeaveLedger(
   return y + 18;
 }
 
+// Month-wise salary with the full "how this month's amount came" breakdown
+// under every month (same lines as the View details button on screen).
+function drawMonthSalaryDetails(doc, { x, y, width, title, months, pageHeight, margin }) {
+  const ensureSpace = (needed) => {
+    if (y + needed > pageHeight - margin - 20) {
+      doc.addPage();
+      y = margin;
+    }
+  };
+  const right = x + width - 10;
+  const cols = { unpaid: x + width * 0.46, earned: x + width * 0.62, paid: x + width * 0.78 };
+
+  ensureSpace(44);
+  doc.setFillColor(...COLORS.headerBand);
+  doc.rect(x, y, width, 22, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10.5);
+  doc.text(title, x + 10, y + 14.5);
+  y += 22;
+
+  const header = () => {
+    doc.setFillColor(...COLORS.rowAlt);
+    doc.rect(x, y, width, 18, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...COLORS.textMuted);
+    doc.text("Month", x + 10, y + 12);
+    doc.text("Unpaid leave", cols.unpaid, y + 12, { align: "right" });
+    doc.text("Earned", cols.earned, y + 12, { align: "right" });
+    doc.text("Paid", cols.paid, y + 12, { align: "right" });
+    doc.text("Pending", right, y + 12, { align: "right" });
+    y += 18;
+  };
+  header();
+
+  months.forEach((m) => {
+    const lines = monthBreakdownLines(m);
+    ensureSpace(22 + Math.min(lines.length, 4) * 13);
+    // Month summary row
+    doc.setFillColor(...(m.pending > 0 ? COLORS.amber : [255, 255, 255]));
+    doc.rect(x, y, width, 20, "F");
+    doc.setDrawColor(...COLORS.border);
+    doc.setLineWidth(0.5);
+    doc.line(x, y, x + width, y);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9.5);
+    doc.setTextColor(...COLORS.textDark);
+    doc.text(
+      `${m.label}  (${formatNumber((m.payableDays || 0) - (m.unpaidDays || 0), 1)}/${m.totalDays || 0} days paid)`,
+      x + 10,
+      y + 13,
+    );
+    doc.setTextColor(...(Number(m.unpaidDays) ? COLORS.plTaken : COLORS.textMuted));
+    doc.text(Number(m.unpaidDays) ? `${n2(m.unpaidDays)} d` : "-", cols.unpaid, y + 13, { align: "right" });
+    doc.setTextColor(...COLORS.textDark);
+    doc.text(m2(m.earned), cols.earned, y + 13, { align: "right" });
+    doc.text(m2(m.paid), cols.paid, y + 13, { align: "right" });
+    doc.setTextColor(...(m.pending > 0 ? COLORS.amberText : COLORS.plNotTaken));
+    doc.text(m.pending > 0 ? m2(m.pending) : "Settled", right, y + 13, { align: "right" });
+    y += 20;
+
+    // Breakdown lines
+    lines.forEach((l) => {
+      const label = `${l.sign && l.sign !== "=" ? `${l.sign} ` : ""}${l.label}`;
+      doc.setFontSize(8.5);
+      const subLines = l.sub ? doc.splitTextToSize(String(l.sub), width * 0.6) : [];
+      const h = 12 + subLines.length * 10;
+      ensureSpace(h);
+      doc.setFont("helvetica", l.kind === "total" ? "bold" : "normal");
+      doc.setTextColor(...(l.kind === "muted" ? COLORS.textMuted : COLORS.textDark));
+      doc.text(label, x + 24, y + 9);
+      const color =
+        l.sign === "-" ? COLORS.plTaken : l.kind === "pending" ? COLORS.amberText : COLORS.textDark;
+      doc.setTextColor(...color);
+      doc.text(`${l.sign === "-" ? "- " : ""}${money(l.amount)}`, right, y + 9, { align: "right" });
+      if (subLines.length) {
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(7.5);
+        doc.setTextColor(...COLORS.textMuted);
+        doc.text(subLines, x + 32, y + 19);
+      }
+      y += h;
+    });
+    y += 4;
+  });
+
+  // Totals
+  const t = monthTotals(months);
+  ensureSpace(20);
+  doc.setFillColor(...COLORS.rowAlt);
+  doc.rect(x, y, width, 20, "F");
+  doc.setDrawColor(...COLORS.border);
+  doc.line(x, y, x + width, y);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.textDark);
+  doc.text("Total", x + 10, y + 13);
+  doc.setTextColor(...COLORS.plTaken);
+  doc.text(t.unpaidDays ? `${n2(t.unpaidDays)} d` : "-", cols.unpaid, y + 13, { align: "right" });
+  doc.setTextColor(...COLORS.textDark);
+  doc.text(m2(t.earned), cols.earned, y + 13, { align: "right" });
+  doc.text(m2(t.paid), cols.paid, y + 13, { align: "right" });
+  doc.setTextColor(...COLORS.amberText);
+  doc.text(m2(t.pending), right, y + 13, { align: "right" });
+  y += 20;
+  return y + 18;
+}
+
 /**
  * Renders the Full & Final Settlement Statement and saves it as a PDF.
  * @param {object} data - the settlement payload as returned by the API
@@ -430,6 +531,8 @@ export const generateSettlementPDF = async (data) => {
   const contentWidth = pageWidth - margin * 2;
 
   let y = margin;
+  // Left during probation: no salary rate rows, no leave sections.
+  const probation = !!data.probationExit;
 
   // ---- Header: logo + title ------------------------------------------------
   try {
@@ -484,21 +587,32 @@ export const generateSettlementPDF = async (data) => {
     margin,
     rows: [
       ["Staff Name", data.staff.staffName || "\u2014"],
+      ...(data.staff.staffId ? [["Staff ID", data.staff.staffId]] : []),
+      [
+        probation ? "Joining Date (Probation)" : "Joining Date",
+        formatDateToDDMMMYYYY(data.staff.joiningDate) || "\u2014",
+      ],
       [
         "Date of Confirmation",
-        formatDateToDDMMMYYYY(data.staff.confirmationDate) || "\u2014",
+        probation
+          ? "\u2014 (left during probation)"
+          : formatDateToDDMMMYYYY(data.staff.confirmationDate) || "\u2014",
       ],
       [
-        "Relieving Date",
+        probation ? "Termination / Relieving Date" : "Relieving Date",
         formatDateToDDMMMYYYY(data.staff.relievingDate) || "\u2014",
       ],
-      ["Monthly Salary", money(data.monthlySalary)],
-      ["Per Day Salary", money(data.perDaySalary)],
+      ...(probation
+        ? []
+        : [
+            ["Monthly Salary", money(data.monthlySalary)],
+            ["Per Day Salary", money(data.perDaySalary)],
+          ]),
     ],
   });
 
   // ---- Leave Summary -----------------------------------------------------
-  y = drawTable(doc, {
+  if (!probation) y = drawTable(doc, {
     x: margin,
     y,
     width: contentWidth,
@@ -554,7 +668,7 @@ export const generateSettlementPDF = async (data) => {
   });
 
   // ---- Month-wise leave statement ----------------------------------------
-  const ledgerMonths = data.leaveBalance.monthly || [];
+  const ledgerMonths = probation ? [] : data.leaveBalance?.monthly || [];
   if (ledgerMonths.length) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(10.5);
@@ -580,7 +694,7 @@ export const generateSettlementPDF = async (data) => {
   }
 
   // ---- Warning note (relieving month didn't qualify for accrual) --------
-  if (data.leaveBalance.relievingMonthAccrualQualified === false) {
+  if (!probation && data.leaveBalance?.relievingMonthAccrualQualified === false) {
     const note =
       "The staff member worked fewer than 20 days (holidays included) in their final calendar month, so that month did not earn any additional Paid/Sick/Casual leave.";
     doc.setFontSize(9.5);
@@ -600,23 +714,15 @@ export const generateSettlementPDF = async (data) => {
     y += boxHeight + 18;
   }
 
-  // ---- Month-wise salary ---------------------------------------------------
-  y = drawTable(doc, {
+  // ---- Month-wise salary (with how each month's amount came) --------------
+  y = drawMonthSalaryDetails(doc, {
     x: margin,
     y,
     width: contentWidth,
-    colSplit,
-    headers: [
-      `Month-wise Salary (${data.salaryPeriod.fromLabel} - ${data.salaryPeriod.toLabel})`,
-      "",
-    ],
+    title: `Month-wise Salary (${data.salaryPeriod.fromLabel} - ${data.salaryPeriod.toLabel})`,
+    months: data.months || [],
     pageHeight,
     margin,
-    rows: data.months.map((m) => [
-      `${m.label}  (earned ${money(m.earned)}, paid ${money(m.paid)})`,
-      m.pending > 0 ? `Pending ${money(m.pending)}` : "Settled",
-      { highlight: m.pending > 0 },
-    ]),
   });
 
   // ---- Final Settlement Amount --------------------------------------------
@@ -632,16 +738,17 @@ export const generateSettlementPDF = async (data) => {
       money(m.pending),
     ]);
   });
-  (fs.leaveEncashmentMonths || []).forEach((m) => {
+  (probation ? [] : fs.leaveEncashmentMonths || []).forEach((m) => {
     settlementRows.push([
       `Paid Leave ${m.label} (${n2(m.days)} days x ${money(m.perDaySalary)})`,
       money(m.amount),
     ]);
   });
-  settlementRows.push([
-    `Leave encashment - Paid Leave only (${formatNumber(fs.leaveEncashmentDays, 2)} days)`,
-    money(fs.leaveEncashment),
-  ]);
+  if (!probation)
+    settlementRows.push([
+      `Leave encashment - Paid Leave only (${formatNumber(fs.leaveEncashmentDays, 2)} days)`,
+      money(fs.leaveEncashment),
+    ]);
   settlementRows.push(["Total Amount Payable", money(fs.totalAmountPayable)]);
   if (fs.outstandingAdvance > 0) {
     settlementRows.push([
@@ -673,14 +780,20 @@ export const generateSettlementPDF = async (data) => {
   const pendingText = data.pendingMonths.length
     ? `salary for ${data.pendingMonths.map((m) => m.label).join(", ")}`
     : "no pending salary";
-  const notePoints = [
-    "Salary up to the last paid month has already been disbursed.",
-    `The balance of ${money(fs.balancePayable)} covers ${pendingText} and encashment of ${formatNumber(
-      fs.leaveEncashmentDays,
-      2,
-    )} days of unused Paid Leave.`,
-    "Sick and Casual leave are not encashed, and the balance is payable as full and final settlement.",
-  ];
+  const notePoints = probation
+    ? [
+        "Salary up to the last paid month has already been disbursed.",
+        `The balance of ${money(fs.balancePayable)} covers ${pendingText}, after unpaid leave and other deductions shown month by month above.`,
+        "The staff member left during the probation period, so no leave was earned and there is no leave encashment. The balance is payable as full and final settlement.",
+      ]
+    : [
+        "Salary up to the last paid month has already been disbursed.",
+        `The balance of ${money(fs.balancePayable)} covers ${pendingText} and encashment of ${formatNumber(
+          fs.leaveEncashmentDays,
+          2,
+        )} days of unused Paid Leave.`,
+        "Sick and Casual leave are not encashed, and the balance is payable as full and final settlement.",
+      ];
 
   doc.setFont("helvetica", "bold");
   doc.setFontSize(9.5);

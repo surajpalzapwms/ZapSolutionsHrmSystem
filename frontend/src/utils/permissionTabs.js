@@ -24,9 +24,11 @@ export const TAB_TREE = [
     label: "Staff Basic Payroll",
     subTabs: [{ key: "staffbasicpayroll.add", label: "Add / Revise Salary" }],
   },
+  { key: "finalsettlement", label: "Final Settlement" },
   { key: "advance", label: "Advance" },
   { key: "expenses", label: "Expenses" },
   { key: "resignations", label: "Resignations" },
+  { key: "settings", label: "Settings (logo, currency)" },
 ];
 
 export const ALL_TAB_KEYS = TAB_TREE.flatMap((tab) => [

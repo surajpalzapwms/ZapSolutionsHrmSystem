@@ -1,6 +1,6 @@
 // src/components/staff/LetterDetailsModal.jsx
-// Opens when HR clicks "Generate" for an Offer / Joining / Confirmation
-// letter. The backend says which details the letter needs and which of them
+// Opens when HR clicks "Generate" for any of the six letters (Offer /
+// Joining / Confirmation / Termination / Leaving / Experience). The backend says which details the letter needs and which of them
 // are still MISSING for this staff member (GET …/:type/form) — only those
 // are asked. Anything already on the staff profile, in Staff Basic Payroll
 // or My Documents, or typed the last time this letter was generated, is not
@@ -13,6 +13,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { FilePlus2 } from "lucide-react";
 import Modal from "../common/Modal";
 import Spinner from "../common/Spinner";
+import PhoneInput from "../common/PhoneInput";
 import { letterService } from "../../services/letterService";
 import { showToast } from "../../utils/toast";
 
@@ -33,6 +34,7 @@ const Field = ({ field, value, onChange, probationMonths }) => {
       {field.required && <span className="text-red-500"> *</span>}
     </span>
   );
+  const hint = field.hint ? <span className="block text-[11px] text-blue-600 mt-1">{field.hint}</span> : null;
 
   if (field.kind === "select") {
     return (
@@ -50,11 +52,27 @@ const Field = ({ field, value, onChange, probationMonths }) => {
     );
   }
 
+  if (field.kind === "phone") {
+    return (
+      <div className="block">
+        {label}
+        <PhoneInput
+          name={field.key || "phone"}
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.placeholder || "Phone number"}
+        />
+        {hint}
+      </div>
+    );
+  }
+
   if (field.kind === "textarea") {
     return (
       <label className="block sm:col-span-2">
         {label}
         <textarea className={inputCls} rows={2} value={value || ""} placeholder={field.placeholder} onChange={(e) => onChange(e.target.value)} />
+        {hint}
       </label>
     );
   }
@@ -91,18 +109,20 @@ const Field = ({ field, value, onChange, probationMonths }) => {
     );
   }
 
+  // Dates: no min / max — any past, current or future date can be chosen.
   return (
-    <label className="block">
+    <label className={`block ${field.hint ? "sm:col-span-2" : ""}`}>
       {label}
       <input
         className={inputCls}
         type={field.kind === "date" ? "date" : field.kind === "number" ? "number" : "text"}
-        min={field.min}
-        max={field.max}
+        min={field.kind === "date" ? undefined : field.min}
+        max={field.kind === "date" ? undefined : field.max}
         value={value ?? ""}
         placeholder={field.placeholder}
         onChange={(e) => onChange(e.target.value)}
       />
+      {hint}
     </label>
   );
 };
@@ -142,7 +162,12 @@ const LetterDetailsModal = ({ isOpen, onClose, staff, letter, form: initialForm 
   }, [isOpen, letter, staff, initialForm]);
 
   const fields = form?.fields || [];
-  const shown = useMemo(() => (showAll ? fields : fields.filter((f) => f.missing)), [fields, showAll]);
+  // The last working day is always shown on Termination / Leaving /
+  // Experience letters, so HR can see (and change) the date being printed.
+  const shown = useMemo(
+    () => (showAll ? fields : fields.filter((f) => f.missing || f.key === "lastWorkingDay")),
+    [fields, showAll],
+  );
   const hiddenCount = fields.length - fields.filter((f) => f.missing).length;
 
   const title = values.gender === "Female" ? "Ms." : values.gender === "Male" ? "Mr." : "";
@@ -209,6 +234,18 @@ const LetterDetailsModal = ({ isOpen, onClose, staff, letter, form: initialForm 
               {values.designation ? (
                 <>
                   {" "}· post <b>{values.designation}</b>
+                </>
+              ) : null}
+              {values.lastWorkingDay ? (
+                <>
+                  {" "}· last working day{" "}
+                  <b>
+                    {new Date(`${values.lastWorkingDay}T00:00:00`).toLocaleDateString("en-IN", {
+                      day: "numeric",
+                      month: "long",
+                      year: "numeric",
+                    })}
+                  </b>
                 </>
               ) : null}
             </div>

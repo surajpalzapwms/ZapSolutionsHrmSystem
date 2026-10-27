@@ -1,5 +1,6 @@
 // src/contexts/BrandContext.jsx
-import { getBrand } from "../utils/brand";
+import { useSyncExternalStore } from "react";
+import { getBrand, subscribeBrand } from "../utils/brand";
 
-// The brand is fixed (single company), so this just returns it.
-export const useBrand = () => getBrand();
+// Re-renders the component whenever the Settings are saved / loaded.
+export const useBrand = () => useSyncExternalStore(subscribeBrand, getBrand, getBrand);

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import Card from "./common/Card";
 import SignInOutCard from "./dashboard/SignInOutCard";
+import BirthdayCelebration from "./dashboard/BirthdayCelebration";
 import { isAdminUser, isSuperAdminUser, hasTabAccess } from "../utils/authUser";
 
 const QUICK_LINKS = [
@@ -56,6 +57,8 @@ const MobileDashboard = () => {
           <SignInOutCard />
         </div>
       )}
+
+      <BirthdayCelebration className="mb-4" limit={4} />
 
       <div className="grid grid-cols-2 gap-3">
         {visibleLinks.map((item) => (

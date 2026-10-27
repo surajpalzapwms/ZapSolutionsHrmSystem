@@ -10,9 +10,28 @@
 //     (full & final encashment) is added:
 //       Total payable = Salary + total Paid Leave left − Advance given
 import React from "react";
-import { Wallet, CalendarCheck, HandCoins, Calculator } from "lucide-react";
+import { Wallet, CalendarCheck, HandCoins, Calculator, Building2 } from "lucide-react";
 import { formatCurrency } from "../../utils/numberUtils";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
+import { referralLabel } from "./salaryBreakdown";
+
+const IST_OFFSET_MS = 5.5 * 3600 * 1000;
+const istPeriodOf = (value) => {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const t = new Date(d.getTime() + IST_OFFSET_MS);
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}`;
+};
+const periodLabel = (p) => {
+  if (!p) return "";
+  const [y, m] = p.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+};
 
 const days = (n) => {
   const v = Math.round((Number(n) || 0) * 100) / 100;
@@ -48,7 +67,19 @@ const MonthSummaryPanel = ({
   advancesLoading,
   isRelievingMonth = false,
   finalPaidLeave = null, // { days, amount, months: [{ label, days, perDaySalary, amount }] }
+  // Referral organisation (set by the super admin in Staff Details).
+  referral = null,
+  joinDate = null,
+  period = null, // "YYYY-MM" of this panel's month
+  adminView = false,
 }) => {
+  const hasReferral =
+    !!referral?.organizationName && Number(referral?.commissionPercent) > 0;
+  const referralPeriod = hasReferral
+    ? istPeriodOf(joinDate) // always the first (joining) month only
+    : "";
+  const referralThisMonth = hasReferral && period && referralPeriod === period;
+  const takenThisMonth = Number(salary?.referralCommission) > 0;
   const plLeftAmount = pl?.credited ? Number(pl.plLeftAmount ?? pl.amount) || 0 : 0;
   const plTakenAmount = pl?.credited ? Number(pl.plTakenAmount) || 0 : 0;
   const salaryAmount = salary ? Number(salary.netSalary) || 0 : 0;
@@ -95,28 +126,122 @@ const MonthSummaryPanel = ({
         ) : !salary ? (
           <p className="text-xs text-gray-400 py-1">No salary for this month.</p>
         ) : (
-          <Line
-            label={salary.isEstimate ? "Salary (estimate)" : `Salary (${salary.status || "saved"})`}
-            sub={
-              salary.payableDays != null && salary.totalDays != null
-                ? `${salary.payableDays}/${salary.totalDays} days paid${
-                    salary.unpaidDays ? ` · ${salary.unpaidDays} unpaid` : ""
-                  }${
-                    // Why the month is short (joining / relieving date / month
-                    // not finished) — from the backend calculation.
-                    salary.payableNote && salary.payableDays < salary.totalDays
-                      ? ` · ${salary.payableNote}`
-                      : ""
-                  }`
-                : undefined
-            }
-            value={formatCurrency(salaryAmount)}
-            className="text-blue-800"
-          />
+          <>
+            {/* Full breakdown — every step shown, 2 decimal places */}
+            {Number(salary.basicSalary) > 0 && (
+              <Line label="Basic salary (month)" value={formatCurrency(salary.basicSalary)} />
+            )}
+            {Number(salary.perDaySalary) > 0 && (
+              <Line
+                label="Per day salary"
+                sub={salary.totalDays ? `${formatCurrency(salary.basicSalary)} ÷ ${salary.totalDays} days` : undefined}
+                value={formatCurrency(salary.perDaySalary)}
+                className="text-gray-600"
+              />
+            )}
+            {salary.payableDays != null && salary.totalDays != null && (
+              <Line
+                label="Days paid"
+                sub={
+                  salary.payableNote && salary.payableDays < salary.totalDays
+                    ? salary.payableNote
+                    : undefined
+                }
+                value={`${round2(salary.payableDays - (Number(salary.unpaidDays) || 0))}/${salary.totalDays}`}
+                className="text-gray-600"
+              />
+            )}
+            {Number(salary.leaveDeduction) > 0 && (
+              <Line
+                label={`− Leave deduction`}
+                sub={
+                  salary.unpaidDays
+                    ? `${days(salary.unpaidDays)} unpaid × ${formatCurrency(salary.perDaySalary)}`
+                    : undefined
+                }
+                value={formatCurrency(salary.leaveDeduction)}
+                className="text-red-600"
+              />
+            )}
+            {Number(salary.lateDeduction) > 0 && (
+              <Line
+                label="− Late coming"
+                value={formatCurrency(salary.lateDeduction)}
+                className="text-red-600"
+              />
+            )}
+            {Number(salary.referralCommission) > 0 && (
+              <Line
+                label={`− ${referralLabel(salary)}`}
+                sub={
+                  salary.referralCommissionCapped
+                    ? "First month · limited to the salary earned"
+                    : `First month · ${round2(salary.referralPercent)}% of ${formatCurrency(salary.basicSalary)}`
+                }
+                value={formatCurrency(salary.referralCommission)}
+                className="text-purple-700"
+              />
+            )}
+            {Number(salary.advanceDeduction) > 0 && (
+              <Line
+                label="− Advance recovered"
+                value={formatCurrency(salary.advanceDeduction)}
+                className="text-orange-600"
+              />
+            )}
+            <div className="mt-1 pt-1 border-t border-gray-100">
+              <Line
+                label={salary.isEstimate ? "= Salary (estimate)" : `= Salary (${salary.status || "saved"})`}
+                value={formatCurrency(salaryAmount)}
+                className="text-blue-800"
+              />
+            </div>
+          </>
         )}
-        {Number(salary?.advanceDeduction) > 0 && (
-          <p className="text-[10px] text-gray-400">
-            {formatCurrency(salary.advanceDeduction)} advance already recovered in this payroll
+        {salary && salary.lateDeductionEnabled === false && (
+          <p className="text-[10px] text-gray-400">Late coming not deducted this month</p>
+        )}
+      </Section>
+
+      {/* Referral organisation — always shown, so it is clear which
+          month's salary the commission comes out of. */}
+      <Section icon={Building2} title="Referral organisation">
+        {hasReferral ? (
+          referralThisMonth || takenThisMonth ? (
+            // Joining (first) month only — show the commission amount.
+            <>
+              <Line
+                label={referral.organizationName}
+                sub={`${round2(referral.commissionPercent)}% of first month salary · ${
+                  periodLabel(referralPeriod) || "joining month"
+                }`}
+                value={
+                  takenThisMonth
+                    ? formatCurrency(salary.referralCommission)
+                    : salary?.basicSalary
+                    ? formatCurrency(round2((Number(salary.basicSalary) * Number(referral.commissionPercent)) / 100))
+                    : `${round2(referral.commissionPercent)}%`
+                }
+                className="text-purple-700"
+              />
+              <p className="text-[11px] text-gray-500">
+                {takenThisMonth
+                  ? "Taken from this month's salary (shown above)."
+                  : "Commission month — no salary earned yet to take it from."}
+              </p>
+            </>
+          ) : (
+            // Any other month: no commission, no amount shown.
+            <p className="text-xs text-gray-500 py-1">
+              Referred by {referral.organizationName}. Commission was taken
+              only from the {periodLabel(referralPeriod) || "first month"} salary
+              — nothing is deducted this month.
+            </p>
+          )
+        ) : (
+          <p className="text-xs text-gray-400 py-1">
+            No referral organisation.
+            {adminView && " The super admin can set one in Staff → View details → Referral Organisation."}
           </p>
         )}
       </Section>

@@ -4,10 +4,12 @@ import { Eye, EyeOff, RefreshCw, Copy, Check, RotateCcw } from "lucide-react";
 import { useForm } from "../../hooks/useForm";
 import { staffService } from "../../services/staffService";
 import InputField from "../common/InputField";
+import PhoneInput from "../common/PhoneInput";
 import DatePicker from "../common/DatePicker";
 import Select from "../common/Select";
 import Button from "../common/Button";
 import { showToast } from "../../utils/toast";
+import { leftBeforeConfirmation } from "../../utils/staffStatus";
 import {
   validateRequired,
   validateEmail,
@@ -743,7 +745,7 @@ const StaffForm = ({
 
       {/* Contact Number / Joining Date */}
       <div className="grid grid-cols-2 gap-4">
-        <InputField
+        <PhoneInput
           label="Contact Number"
           name="contactNo"
           value={form.contactNo}
@@ -1135,7 +1137,9 @@ const StaffForm = ({
               {form.status === "Relieved" && (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-4">
-                    {confirmationDateBlock}
+                    {/* Relieved before the confirmation date = never
+                        confirmed, so no Confirmation Date is shown. */}
+                    {!leftBeforeConfirmation(form) && confirmationDateBlock}
                     <DatePicker
                       label="Relieved Date"
                       name="relievingDate"
@@ -1147,8 +1151,10 @@ const StaffForm = ({
                     <p className="font-medium text-orange-700">Information:</p>
                     <p>
                       Relieved Date is the last working day. You can leave it
-                      blank and add it later. Confirmation Date controls when
-                      leave balance starts.
+                      blank and add it later.{" "}
+                      {leftBeforeConfirmation(form)
+                        ? "Relieved before the confirmation date, so this staff member is treated as not confirmed."
+                        : "Confirmation Date controls when leave balance starts."}
                     </p>
                   </div>
                 </div>

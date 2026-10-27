@@ -23,9 +23,11 @@ export const TAB_TREE = [
     label: "Staff Basic Payroll",
     subTabs: [{ key: "staffbasicpayroll.add", label: "Add / Revise Salary" }],
   },
+  { key: "finalsettlement", label: "Final Settlement" },
   { key: "advance", label: "Advance" },
   { key: "expenses", label: "Expenses" },
   { key: "resignations", label: "Resignations" },
+  { key: "settings", label: "Settings (logo, currency)" },
 ];
 
 // Flat list of every valid tab + sub-tab key, e.g. ["staff", "staff.add", ...]

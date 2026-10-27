@@ -3,7 +3,12 @@ import {
   getOrCompute,
   registerCacheWarmer,
 } from "../services/responseCache.js";
-import { refreshPendingPayrollForPeriod } from "./payrollController.js";
+import {
+  refreshPendingPayrollForPeriod,
+  getBasicSalaryForPeriod,
+} from "./payrollController.js";
+import StaffBasicPayroll from "../models/StaffBasicPayroll.js";
+import { loadLateSummary } from "../services/lateDeduction.js";
 import {
   Attendance,
   Leave,
@@ -73,7 +78,12 @@ import Holiday from "../models/holiday.js";
 import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
 import { isFromOfficeNetwork } from "../utils/officeNetwork.js";
 import { isAdminRole } from "../config/permissions.js";
+import { photoUrlFor } from "../utils/fileSigning.js";
 import { autoAttendanceApplies } from "../services/presence.js";
+import {
+  isUserLeftOrganization,
+  LEFT_ORGANIZATION_MESSAGE,
+} from "../services/staffVisibility.js";
 
 const ORDINAL_SATURDAY = {
   1: "1st Saturday Holiday",
@@ -1128,67 +1138,111 @@ export const applyMyLeave = async (req, res) => {
       return res.status(400).json({ success: false, message: probationBlockMessage });
     }
 
-    const resolvedLeaveType = leaveType || "unpaid";
-    const isBalanceTracked =
-      resolvedLeaveType === "paid" ||
-      resolvedLeaveType === "sick" ||
-      resolvedLeaveType === "casual";
+    // ── Leave-type split ──────────────────────────────────────────────────
+    // A range request can mix several types, e.g. 21–30 Oct as
+    // 1 Sick + 3 Casual + rest Paid. The form sends
+    //   allocations: [{ leaveType: "sick", days: 1 }, { leaveType: "casual", days: 3 }, ...]
+    // in the order the days should be used (earliest dates first). Older
+    // callers still send a single `leaveType`, which becomes one allocation
+    // covering the whole range.
+    const TRACKED = ["paid", "sick", "casual"];
+    let allocations;
+    if (Array.isArray(req.body.allocations) && req.body.allocations.length) {
+      allocations = [];
+      for (const a of req.body.allocations) {
+        const t = a?.leaveType;
+        const days = Number(a?.days);
+        if (!validLeaveTypes.includes(t)) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid leave type '${t}' in allocations`,
+          });
+        }
+        if (!Number.isFinite(days) || days < 0 || days % 1 !== 0) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid day count for ${t} leave`,
+          });
+        }
+        if (allocations.some((x) => x.leaveType === t)) {
+          return res.status(400).json({
+            success: false,
+            message: `Leave type '${t}' is listed more than once`,
+          });
+        }
+        if (days > 0) allocations.push({ leaveType: t, days });
+      }
+      if (!allocations.length) {
+        return res.status(400).json({
+          success: false,
+          message: "Allocate at least one day to a leave type",
+        });
+      }
+    } else {
+      // Single type: covers every day (Infinity) — tracked types are still
+      // capped by their balance below, the rest falls back to unpaid.
+      allocations = [{ leaveType: leaveType || "unpaid", days: Infinity }];
+    }
 
     // Balance check up front, same rule the admin-side applyLeave/
-    // approveLeaveRequest endpoints enforce: a staff member must have at
-    // least a full day (>= 1) of accrued balance left to take that type of
-    // leave. Previously this self-service endpoint never checked at all —
-    // a request just sat as "pending" with no feedback until an admin
-    // rejected it at approval time, so someone with e.g. only 0.5 accrued
-    // sick days could still submit (and think they'd succeeded).
-    let remainingForBatchType = Infinity;
-    if (isBalanceTracked) {
-      const confirmationDate = staff.confirmationDate ?? null;
-      const relievingDate =
-        staff.status === "Relieved" ? staff.relievingDate : null;
+    // approveLeaveRequest endpoints enforce. Pending requests of the same
+    // type this year are also a promise on that balance, so they're
+    // subtracted to avoid double-booking.
+    const confirmationDate = staff.confirmationDate ?? null;
+    const relievingDate = staff.status === "Relieved" ? staff.relievingDate : null;
+    const batchYear = new Date(`${fromDate}T00:00:00.000Z`).getUTCFullYear();
+    const yearStart = new Date(Date.UTC(batchYear, 0, 1, 0, 0, 0, 0));
+    const yearEnd = new Date(Date.UTC(batchYear, 11, 31, 23, 59, 59, 999));
+    const remainingByType = {};
+    for (const a of allocations) {
+      if (!TRACKED.includes(a.leaveType)) continue;
       const availableApproved = await getRemainingForType(
         userId,
         confirmationDate,
-        resolvedLeaveType,
+        a.leaveType,
         new Date(),
         relievingDate,
       );
-
-      // Also account for this staff member's own already-pending requests
-      // of the same type this year — those haven't been deducted from
-      // `availableApproved` yet (only approved leave counts against it),
-      // but they're still a promise on the same balance, so a new batch
-      // shouldn't be allowed to double-book days that are already spoken
-      // for by an earlier pending request.
-      const batchYear = new Date(`${fromDate}T00:00:00.000Z`).getUTCFullYear();
-      const yearStart = new Date(Date.UTC(batchYear, 0, 1, 0, 0, 0, 0));
-      const yearEnd = new Date(Date.UTC(batchYear, 11, 31, 23, 59, 59, 999));
-      const pendingSameTypeAgg = await Leave.aggregate([
+      const pendingAgg = await Leave.aggregate([
         {
           $match: {
             userId,
-            leaveType: resolvedLeaveType,
+            leaveType: a.leaveType,
             status: "pending",
             leaveDate: { $gte: yearStart, $lte: yearEnd },
           },
         },
         { $group: { _id: null, total: { $sum: { $ifNull: ["$dayValue", 1] } } } },
       ]);
-      const pendingSameType = pendingSameTypeAgg[0]?.total || 0;
+      const remaining = availableApproved - (pendingAgg[0]?.total || 0);
+      remainingByType[a.leaveType] = remaining;
 
-      remainingForBatchType = availableApproved - pendingSameType;
-
-      if (remainingForBatchType < dayValue) {
+      const needed = Number.isFinite(a.days) ? a.days * dayValue : dayValue;
+      if (remaining < needed) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient ${resolvedLeaveType} leave balance for this calendar year. Choose Unpaid leave instead, or pick a different leave type.`,
+          message: Number.isFinite(a.days)
+            ? `Insufficient ${a.leaveType} leave balance: you asked for ${a.days} day(s) but only ${Math.max(0, remaining)} remain this year.`
+            : `Insufficient ${a.leaveType} leave balance for this calendar year. Choose Unpaid leave instead, or pick a different leave type.`,
         });
       }
     }
-    // Unpaid, Swap and any other non-tracked type are never balance-checked,
-    // so they can be requested directly at any time (previously Unpaid was
-    // blocked while any Sick/Casual/Paid balance remained, which made the
-    // Unpaid box in the form fail on submit).
+    // Unpaid, Swap and any other non-tracked type are never balance-checked.
+
+    // Picks the leave type for the next working day: the first allocation
+    // that still has days (and, for tracked types, balance) left. Once every
+    // allocation is used up the remaining days fall back to unpaid, so the
+    // staff member still gets the days off requested.
+    const takeNextType = () => {
+      for (const a of allocations) {
+        if (a.days < dayValue) continue;
+        if (TRACKED.includes(a.leaveType) && remainingByType[a.leaveType] < dayValue) continue;
+        a.days -= dayValue;
+        if (TRACKED.includes(a.leaveType)) remainingByType[a.leaveType] -= dayValue;
+        return a.leaveType;
+      }
+      return "unpaid";
+    };
 
     // Walk each calendar day in the range.
     const batchId = `${userId}-${Date.now()}`;
@@ -1222,36 +1276,18 @@ export const applyMyLeave = async (req, res) => {
           });
           if (existing) {
             skipped.push({ date: dayStr, reason: "Already requested" });
-          } else if (isBalanceTracked && remainingForBatchType < dayValue) {
-            // The balance ran out partway through a multi-day range — every
-            // day beyond this point in the SAME batch/type falls back to
-            // unpaid leave rather than being silently dropped, so the staff
-            // member still gets the day(s) off requested; they just aren't
-            // drawn from a balance that no longer has anything left.
-            const leave = new Leave({
-              userId,
-              leaveDate: parsedLeaveDate,
-              reason,
-              leaveType: "unpaid",
-              status: "pending",
-              batchId,
-              dayValue,
-            });
-            await leave.save();
-            created.push(leave);
           } else {
             const leave = new Leave({
               userId,
               leaveDate: parsedLeaveDate,
               reason,
-              leaveType: resolvedLeaveType,
+              leaveType: takeNextType(),
               status: "pending",
               batchId,
               dayValue,
             });
             await leave.save();
             created.push(leave);
-            if (isBalanceTracked) remainingForBatchType -= dayValue;
           }
         }
       }
@@ -1898,6 +1934,13 @@ export const recordAttendance = async (req, res) => {
 export const performSelfCheckIn = async (userId, { source = "self", at } = {}) => {
   const now = at || new Date();
 
+  // A staff member who has left (today is after their last working day) is
+  // never marked present — even if they are still logged in on the website
+  // or the app, or still in the office network.
+  if (await isUserLeftOrganization(userId, now)) {
+    return { ok: false, status: 403, leftOrganization: true, message: LEFT_ORGANIZATION_MESSAGE };
+  }
+
   const holidayCheck = await isHolidayOrSunday(now);
   if (holidayCheck.isHoliday) {
     return {
@@ -2296,11 +2339,15 @@ export const getMyTodayAttendance = async (req, res) => {
   try {
     const userId = req.user._id || req.user.id;
     const dateString = getDateStringIST(new Date());
-    const record = await findAttendanceByUserAndDate(userId, dateString);
+    const [record, leftOrganization] = await Promise.all([
+      findAttendanceByUserAndDate(userId, dateString),
+      isUserLeftOrganization(userId),
+    ]);
     res.json({
       success: true,
-      attendance: record || null,
-      meta: buildAttendanceMeta(req.user, record),
+      // After the last working day there is no "today" to show.
+      attendance: leftOrganization ? null : record || null,
+      meta: { ...buildAttendanceMeta(req.user, leftOrganization ? null : record), leftOrganization },
     });
   } catch (error) {
     console.error("Get My Attendance Failed:", error.message);
@@ -3557,6 +3604,8 @@ const buildStaffSummaryData = async () => {
           staffName: staff.staffName,
           email: staff.email || "",
           contactNo: staff.contactNo || "",
+          // Profile photo (uploaded from the app or website) — null = initials.
+          photoUrl: photoUrlFor(staff),
           status: staff.status || "Probation",
           // Joining date — needed by the calendar view so it can floor its
           // year/month picker at the month the staff member actually
@@ -3870,6 +3919,55 @@ const buildMonthDays = (
     ),
     isCurrentMonth,
   };
+};
+
+// ── Late coming on the calendar ─────────────────────────────────────────
+// Adds `late` to every Present day that was signed in after the 15-minute
+// buffer (minutes late, minutes made up by staying after shift end, minutes
+// and ₹ deducted, waived / pending flags) and returns the month summary.
+// Uses exactly the same rules as payroll (services/lateDeduction.js), so
+// the calendar and the salary always agree. Never throws — a failure here
+// must not stop the calendar from loading.
+const attachLateInfoToMonth = async ({
+  staffId,
+  attendanceUserId,
+  year,
+  month, // 0-11
+  days,
+  attendanceRecords,
+  basicPayroll,
+}) => {
+  try {
+    const period = `${year}-${String(month + 1).padStart(2, "0")}`;
+    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    const basic = basicPayroll
+      ? getBasicSalaryForPeriod(basicPayroll, new Date(year, month + 1, 0))
+      : 0;
+    const perDaySalary = daysInMonth ? basic / daysInMonth : 0;
+    // Only days the calendar shows as Present can carry a late deduction
+    // (holidays, leave, unpaid, half days, future days are skipped).
+    const skipKeys = new Set(
+      Object.values(days)
+        .filter((d) => d.status !== "present")
+        .map((d) => d.date),
+    );
+    const summary = await loadLateSummary({
+      employeeId: staffId,
+      attendanceUserId,
+      period,
+      perDaySalary,
+      skipKeys,
+      records: attendanceRecords,
+    });
+    summary.dates.forEach((l) => {
+      const d = Number(l.date.slice(8, 10));
+      if (days[d]) days[d].late = l;
+    });
+    return { period, ...summary };
+  } catch (lateErr) {
+    console.error("Late-coming lookup failed (calendar view):", lateErr);
+    return null;
+  }
 };
 
 // Thrown by buildStaffCalendarPayload for the two "can't proceed" cases
@@ -4421,6 +4519,11 @@ const buildStaffCalendarPayload = async (staffId, query) => {
     const [attendanceRecords, leaveRecords, holidays, saturdayHolidays] =
       viewRecords;
 
+    // Basic salary record (for the per-minute late-coming amount).
+    const basicPayroll = await StaffBasicPayroll.findOne({ employeeId: staffId })
+      .lean()
+      .catch(() => null);
+
     if (isAnnual) {
       const allHolidaysForYear = [...holidays, ...saturdayHolidays];
 
@@ -4443,6 +4546,28 @@ const buildStaffCalendarPayload = async (staffId, query) => {
           days,
         });
       }
+
+      // Late coming for every month (in parallel); the per-month total is
+      // kept on the month without the per-date list (already on each day).
+      const lateByMonth = await Promise.all(
+        months.map((mm) =>
+          attachLateInfoToMonth({
+            staffId,
+            attendanceUserId,
+            year,
+            month: mm.month,
+            days: mm.days,
+            attendanceRecords,
+            basicPayroll,
+          }),
+        ),
+      );
+      months.forEach((mm, i) => {
+        const ls = lateByMonth[i];
+        if (!ls) return;
+        const { dates, ...totals } = ls;
+        mm.lateSummary = totals;
+      });
 
       return {
         staffId,
@@ -4485,6 +4610,16 @@ const buildStaffCalendarPayload = async (staffId, query) => {
       joinCutoff,
     );
 
+    const lateSummary = await attachLateInfoToMonth({
+      staffId,
+      attendanceUserId,
+      year,
+      month,
+      days,
+      attendanceRecords,
+      basicPayroll,
+    });
+
     return {
       staffId,
       attendanceUserId,
@@ -4506,6 +4641,7 @@ const buildStaffCalendarPayload = async (staffId, query) => {
       totalWorkingDays,
       leaveBalance,
       paidLeaveValue,
+      lateSummary,
       days,
     };
   }

@@ -18,7 +18,10 @@ import {
   PERIOD_STYLES,
   dateKeyOf,
 } from "./calendarHelpers";
+import { lateExplainLines } from "./lateHelpers";
+import { breakdownLines, referralLabel } from "./salaryBreakdown";
 
+import { formatMoney } from "../../utils/brand";
 export const DayEditButton = ({ onClick }) => (
   <button
     type="button"
@@ -39,7 +42,22 @@ export const DayEditButton = ({ onClick }) => (
 // `period` (optional): { type, label, rangeText } — the internship or
 // probation period this day falls in. Shown as an extra line, and on its
 // own for a day with no attendance/leave/holiday yet.
-export const DayTooltip = ({ info, period = null }) => {
+// `align` keeps the tooltip inside the month card: days in the first two
+// columns open to the right, the last two columns open to the left, the
+// rest are centred. `below` opens it under the first week's days. Long text
+// wraps (max ~16rem) instead of running off the edge, so the WHOLE detail
+// is always visible.
+const TOOLTIP_X = {
+  left: "left-0",
+  right: "right-0",
+  center: "left-1/2 -translate-x-1/2",
+};
+const ARROW_X = {
+  left: "left-3",
+  right: "right-3",
+  center: "left-1/2 -translate-x-1/2",
+};
+export const DayTooltip = ({ info, period = null, align = "center", below = false }) => {
   const hasStatus = !!info && TOOLTIP_STATUSES.includes(info.status);
   if (!hasStatus && !period) return null;
   const split = hasStatus && isSplitDay(info);
@@ -47,9 +65,11 @@ export const DayTooltip = ({ info, period = null }) => {
     split || info?.status === "present" || info?.status === "half";
   return (
     <div
-      className="pointer-events-none absolute left-1/2 bottom-full z-20 mb-2 w-max -translate-x-1/2
+      className={`pointer-events-none absolute ${TOOLTIP_X[align] || TOOLTIP_X.center} ${
+        below ? "top-full mt-2" : "bottom-full mb-2"
+      } z-30 w-max max-w-[16rem] whitespace-normal break-words text-left leading-snug
         rounded-lg bg-gray-900 px-3 py-2 text-xs text-white opacity-0 shadow-lg
-        transition-opacity duration-150 group-hover:opacity-100"
+        transition-opacity duration-150 group-hover:opacity-100`}
     >
       {period && (
         <div className={hasStatus ? "mb-1 pb-1 border-b border-gray-700" : ""}>
@@ -101,19 +121,27 @@ export const DayTooltip = ({ info, period = null }) => {
           </span>
         </div>
       )}
+      {hasStatus && info.late && (
+        <div className="mt-1 pt-1 border-t border-gray-700 text-amber-300 space-y-0.5">
+          {lateExplainLines(info.late).map((line, i) => (
+            <div key={i}>
+              {i === 0 ? "⏰ " : ""}
+              {line}
+            </div>
+          ))}
+          {info.late.waived && <div>Waived by admin</div>}
+        </div>
+      )}
       <div
-        className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent
-          border-t-gray-900"
+        className={`absolute ${ARROW_X[align] || ARROW_X.center} border-4 border-transparent ${
+          below ? "bottom-full border-b-gray-900" : "top-full border-t-gray-900"
+        }`}
       />
     </div>
   );
 };
 
-const fmtMoney = (n) =>
-  `₹${Number(n || 0).toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+const fmtMoney = (n) => formatMoney(n);
 
 const SALARY_STATUS_STYLES = {
   paid: "bg-green-100 text-green-700",
@@ -180,12 +208,7 @@ export const PaidLeaveAmount = ({ pl, labelClass, valueClass, deduction = null }
 // Builds a hover tooltip explaining WHY a month's figure is what it is.
 const salaryTooltip = (salary) => {
   if (salary.payableDays == null || salary.totalDays == null) return undefined;
-  let text = `Payable ${salary.payableDays}/${salary.totalDays} day${
-    salary.totalDays === 1 ? "" : "s"
-  }`;
-  if (salary.unpaidDays) {
-    text += ` · ${salary.unpaidDays} unpaid`;
-  }
+  let text = breakdownLines(salary).join("\n");
   if (salary.differsFromSaved) {
     text += `\nSaved payroll: ${fmtMoney(salary.savedNetSalary)} (${
       salary.status || "saved"
@@ -195,6 +218,11 @@ const salaryTooltip = (salary) => {
     const shown = salary.unmarkedDates.slice(0, 6).join(", ");
     const extra = salary.unmarkedDates.length > 6 ? ", …" : "";
     text += `\nNo attendance/leave record found for: ${shown}${extra}`;
+  }
+  if (salary.halfDayDates?.length) {
+    const shown = salary.halfDayDates.slice(0, 6).join(", ");
+    const extra = salary.halfDayDates.length > 6 ? ", …" : "";
+    text += `\nHalf days deducted (0.5 day each): ${shown}${extra}`;
   }
   return text;
 };
@@ -296,11 +324,17 @@ const MiniMonthInner = ({
         }): ${fmtMoney(salary.savedNetSalary)}`
       : `Payroll status: ${salary.status || "pending"}`
     : "No salary record for this month";
+  const salaryHeaderTitle = salary
+    ? `${salaryTitle}\n\n${breakdownLines(salary).join("\n")}`
+    : salaryTitle;
 
   return (
-    <div className="border border-gray-200 rounded-xl overflow-hidden">
+    // No overflow-hidden here: it used to clip the day tooltips (e.g.
+    // "…5 min grace) · stayed 15 min extra · 19 min = ₹27.24" lost its
+    // start). The header gets its own rounded top instead.
+    <div className="border border-gray-200 rounded-xl">
       {/* Unified light-blue header block: month name + weekday row */}
-      <div>
+      <div className="rounded-t-xl overflow-hidden">
         <button
           type="button"
           onDoubleClick={
@@ -323,8 +357,8 @@ const MiniMonthInner = ({
           {/* Sal + PL Amount on the right (only while "View Salary" is on) */}
           {showSalary &&
             (salary ? (
-              <span className="flex items-baseline gap-3 text-xs whitespace-nowrap">
-                <span title={salaryTitle}>
+              <span className="flex flex-wrap items-baseline justify-end gap-x-3 gap-y-0.5 text-xs whitespace-nowrap">
+                <span title={salaryHeaderTitle}>
                   <span className="font-medium text-sky-700">Sal:</span>{" "}
                   <span className="font-bold text-sky-900">
                     {fmtMoney(salary.netSalary)}
@@ -344,6 +378,16 @@ const MiniMonthInner = ({
                   labelClass="font-medium text-sky-700"
                   valueClass="font-bold text-sky-900"
                 />
+                {Number(salary.referralCommission) > 0 && (
+                  <span title={`${referralLabel(salary)} — first month salary`}>
+                    <span className="font-medium text-purple-700">
+                      {salary.referralOrganization || "Comm"}:
+                    </span>{" "}
+                    <span className="font-bold text-purple-900">
+                      {fmtMoney(salary.referralCommission)}
+                    </span>
+                  </span>
+                )}
               </span>
             ) : (
               <span className="text-xs font-medium text-sky-700" title={salaryTitle}>
@@ -389,6 +433,8 @@ const MiniMonthInner = ({
           const isToday = isCurrentMonth && today === day;
           const isSelected = isDeletable && selectedDay === day;
           const isSplit = isSplitDay(info);
+          const col = (firstDow + day - 1) % 7;
+          const row = Math.floor((firstDow + day - 1) / 7);
 
           return (
             <div
@@ -431,7 +477,14 @@ const MiniMonthInner = ({
                   ½
                 </span>
               )}
-              {hasTooltip && <DayTooltip info={info} period={period} />}
+              {hasTooltip && (
+                <DayTooltip
+                  info={info}
+                  period={period}
+                  align={col <= 1 ? "left" : col >= 5 ? "right" : "center"}
+                  below={row === 0}
+                />
+              )}
             </div>
           );
         })}
@@ -452,8 +505,17 @@ const fmtNum = (n) => {
   return Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/\.?0+$/, "");
 };
 
-export const LeaveBalanceLine = ({ balance }) => {
+export const LeaveBalanceLine = ({ balance, leftBeforeConfirmation = false }) => {
   if (!balance) return null;
+  // Left the organization before the confirmation date: never confirmed, so
+  // no confirmation date is shown.
+  if (leftBeforeConfirmation) {
+    return (
+      <span className="block text-gray-500 font-medium text-sm mt-1">
+        Left before confirmation — no paid leave accrued
+      </span>
+    );
+  }
   if (!balance.confirmationDate) {
     return (
       <span className="block text-amber-700 font-medium text-sm mt-1">
@@ -505,6 +567,32 @@ export const LeaveBalanceLine = ({ balance }) => {
           timeZone: "Asia/Kolkata",
         })}
         ; earlier leave is Unpaid
+      </span>
+    </span>
+  );
+};
+
+// "Referred by Navkar · 25% of first month salary (September 2026)".
+// Shown to the staff member on their own calendar (website + app) once the
+// super admin has set a referral organisation.
+export const ReferralLine = ({ referral, joinKey = null, small = false }) => {
+  if (!referral?.organizationName || !(Number(referral.commissionPercent) > 0)) return null;
+  // Always the first (joining) month only.
+  const period = joinKey ? joinKey.slice(0, 7) : "";
+  let label = "first month";
+  if (period) {
+    const [y, m] = period.split("-").map(Number);
+    label = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  return (
+    <span className={`block font-medium text-purple-700 ${small ? "text-xs mt-0.5" : "text-sm mt-1"}`}>
+      Referred by {referral.organizationName}
+      <span className="font-normal text-gray-500">
+        {" "}· {Number(referral.commissionPercent).toFixed(2)}% commission from first month salary ({label})
       </span>
     </span>
   );

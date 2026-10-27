@@ -2,7 +2,7 @@
 // Builds a single "Employee Payslip" PDF (styled after the company payslip
 // template) from a Payroll record and triggers a browser download.
 import { getMonthName } from "./dateUtils";
-import { getBrand } from "./brand";
+import { getBrand, formatMoneyPdf } from "./brand";
 
 // Company name / finance title come from src/utils/brand.js.
 
@@ -17,13 +17,8 @@ const COLORS = {
   textMuted: [130, 130, 130],
 };
 
-const money = (value) => {
-  const num = Number(value) || 0;
-  return `Rs. ${num.toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-};
+// Amount in the company currency chosen in Settings (PDF-safe text).
+const money = (value) => formatMoneyPdf(value);
 
 /** "2026-06" -> "Jun 2026" */
 export const formatPeriodLabel = (period, short = false) => {
@@ -48,13 +43,21 @@ export const buildPayslipData = (payroll, staffRecord = {}) => {
     department: staffRecord.projectName || staff.projectName || "Development",
     designation: "Programming Team",
     payDate: payroll.paymentDate || null,
-    basicSalary: payroll.adjustedBasicSalary ?? payroll.basicSalary ?? 0,
+    // Full monthly basic; every deduction is listed separately below so the
+    // payslip adds up: Basic − deductions = Net.
+    basicSalary: payroll.basicSalary ?? payroll.adjustedBasicSalary ?? 0,
+    adjustedBasicSalary: payroll.adjustedBasicSalary ?? payroll.basicSalary ?? 0,
+    referralCommission: payroll.referralCommission || 0,
+    referralOrganization: payroll.referral?.organizationName || "",
+    referralPercent: payroll.referral?.percent || 0,
+    unpaidLeaves: payroll.attendanceInfo?.unpaidLeaves || 0,
     allowances: payroll.allowances || [],
     totalAllowance: payroll.totalAllowance || 0,
     deductions: payroll.deductions || [],
     totalDeduction: payroll.totalDeduction || 0,
     advanceDeduction: payroll.advanceDeduction || 0,
     leaveDeduction: payroll.attendanceInfo?.leaveDeduction || 0,
+    lateDeduction: payroll.attendanceInfo?.lateDeduction || 0,
     netSalary: payroll.netSalary || 0,
     bankAccount: payroll.bankAccount || "NA",
     paymentMethod: payroll.paymentMethod || "bank",
@@ -208,15 +211,47 @@ export const generatePayslipPDF = async (data) => {
   // amount is 0 — so the section keeps a consistent multi-row layout that
   // matches the reference template instead of collapsing to a single
   // "No deductions" line whenever nothing happens to be non-zero.
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  // Days before joining / after leaving in this month (not leave, simply
+  // not employed) — whatever the basic minus all other deductions leaves.
+  const notPayable = r2(
+    Number(data.basicSalary) -
+      Number(data.leaveDeduction) -
+      Number(data.lateDeduction || 0) -
+      Number(data.referralCommission || 0) -
+      (Number(data.adjustedBasicSalary) + Number(data.advanceDeduction)),
+  );
   const deductionRows = [
     ...data.deductions.map((d) => [d.type, money(d.amount)]),
     ["Advance Deduction", money(data.advanceDeduction)],
-    ["Leave Deduction", money(data.leaveDeduction)],
+    [
+      Number(data.unpaidLeaves) > 0
+        ? `Leave Deduction (${r2(data.unpaidLeaves)} day${Number(data.unpaidLeaves) === 1 ? "" : "s"})`
+        : "Leave Deduction",
+      money(data.leaveDeduction),
+    ],
+    ...(Number(data.lateDeduction) > 0
+      ? [["Late Coming Deduction", money(data.lateDeduction)]]
+      : []),
+    ...(Number(data.referralCommission) > 0
+      ? [[
+          `${data.referralOrganization || "Referral"} Commission${
+            data.referralPercent ? ` (${r2(data.referralPercent)}%)` : ""
+          }`,
+          money(data.referralCommission),
+        ]]
+      : []),
+    ...(notPayable > 0.009
+      ? [["Days not employed this month", money(notPayable)]]
+      : []),
   ];
   const totalDeductions =
     Number(data.totalDeduction) +
     Number(data.advanceDeduction) +
-    Number(data.leaveDeduction);
+    Number(data.leaveDeduction) +
+    Number(data.lateDeduction || 0) +
+    Number(data.referralCommission || 0) +
+    (notPayable > 0.009 ? notPayable : 0);
 
   y = drawSection(
     "Deductions",

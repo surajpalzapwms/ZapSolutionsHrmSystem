@@ -32,6 +32,7 @@ import {
   downloadCsv,
 } from "../../utils/payrollHelpers";
 
+import { formatMoney } from "../../utils/brand";
 const Payroll = () => {
   const [isMobileView, setIsMobileView] = useState(false);
 
@@ -383,7 +384,7 @@ const Payroll = () => {
                       >
                         <td className="px-3 py-2">{getPeriodLabel(record)}</td>
                         <td className="px-3 py-2 text-right text-green-600 font-medium">
-                          ₹{getNet(record).toLocaleString("en-IN")}
+                          {formatMoney(getNet(record))}
                         </td>
                         <td className="px-3 py-2 text-right">
                           <span
@@ -393,7 +394,7 @@ const Payroll = () => {
                                 : "text-gray-400"
                             }
                           >
-                            ₹{pending.toLocaleString("en-IN")}
+                            {formatMoney(pending)}
                           </span>
                         </td>
                       </tr>

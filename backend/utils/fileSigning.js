@@ -36,6 +36,17 @@ export const photoUrlFor = (staff) => {
 export const verifyPhotoSignature = (staffId, v, s) =>
   safeEqual(s, sign(`photo:${staffId}:${v}`));
 
+/** Relative URL of an ACCOUNT's own photo (no Staff record), or null. */
+export const userPhotoUrlFor = (user) => {
+  if (!user?._id || !user.photoUpdatedAt) return null;
+  const id = String(user._id);
+  const v = new Date(user.photoUpdatedAt).getTime();
+  return `/api/documents/user-photo/${id}?v=${v}&s=${sign(`uphoto:${id}:${v}`)}`;
+};
+
+export const verifyUserPhotoSignature = (userId, v, s) =>
+  safeEqual(s, sign(`uphoto:${userId}:${v}`));
+
 /** Relative, short-lived URL of one uploaded document. */
 export const documentUrlFor = (doc) => {
   if (!doc?._id) return null;

@@ -24,6 +24,9 @@ import Modal from "../common/Modal";
 import Spinner from "../common/Spinner";
 import DatePicker from "../common/DatePicker";
 import SignInOutCard from "../dashboard/SignInOutCard";
+import MySettlementCard from "../staff/MySettlementCard";
+import { hasLeftOrganization } from "../../utils/staffStatus";
+import BirthdayCelebration from "../dashboard/BirthdayCelebration";
 import { staffService } from "../../services/staffService";
 import { holidayService } from "../../services/holidayService";
 import { payrollService } from "../../services/payrollService";
@@ -42,6 +45,7 @@ import {
   leaveTypeLabel,
 } from "../leave-requests/leaveRequestHelpers";
 
+import { formatMoney } from "../../utils/brand";
 const RANGE_TABS = [
   { key: "today", label: "Today" },
   { key: "month", label: "This Month" },
@@ -68,8 +72,7 @@ const fmtClockTime = (value) =>
       })
     : "—";
 
-const fmtMoney = (n) =>
-  `₹${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtMoney = (n) => formatMoney(n);
 
 // "2026-07" -> "Jul 2026"
 const MONTH_SHORT = [
@@ -213,6 +216,8 @@ const HrmDashboard = () => {
   // Admin only: true while the pending payroll summary / staff summary are
   // still loading in the background (the page itself is already shown).
   const [slowLoading, setSlowLoading] = useState(false);
+  // Admin only: true while payroll / advances / expenses are still loading.
+  const [moneyLoading, setMoneyLoading] = useState(false);
   const [staff, setStaff] = useState([]);
   const [holidays, setHolidays] = useState([]);
   const [payroll, setPayroll] = useState([]);
@@ -308,29 +313,34 @@ const HrmDashboard = () => {
             setSlowLoading(false);
           });
 
-          const [
-            staffRes,
-            holidayRes,
-            payrollRes,
-            advanceRes,
-            expenseRes,
-            attendanceRes,
-            leaveRes,
-          ] = await Promise.allSettled([
-            staffService.getAll(),
-            holidayService.getAll(),
+          // PERFORMANCE: payroll / advances / expenses (whole history) are
+          // only needed for their own cards, so they no longer hold the
+          // page behind the spinner — the dashboard shows as soon as the
+          // staff / attendance / leave / holiday lists are in, and those
+          // three cards fill in a moment later.
+          setMoneyLoading(true);
+          Promise.allSettled([
             payrollService.getAll(),
             advanceService.getAll(),
             officeExpenseService.getAll(),
-            attendanceService.getAttendance({ from }),
-            attendanceService.getLeaves({ from }),
-          ]);
+          ]).then(([payrollRes, advanceRes, expenseRes]) => {
+            if (!mounted) return;
+            setPayroll(unwrap(payrollRes));
+            setAdvances(unwrap(advanceRes));
+            setExpenses(unwrap(expenseRes));
+            setMoneyLoading(false);
+          });
+
+          const [staffRes, holidayRes, attendanceRes, leaveRes] =
+            await Promise.allSettled([
+              staffService.getAll(),
+              holidayService.getAll(),
+              attendanceService.getAttendance({ from }),
+              attendanceService.getLeaves({ from }),
+            ]);
           if (!mounted) return;
           setStaff(unwrap(staffRes));
           setHolidays(unwrap(holidayRes));
-          setPayroll(unwrap(payrollRes));
-          setAdvances(unwrap(advanceRes));
-          setExpenses(unwrap(expenseRes));
           setAttendance(unwrap(attendanceRes));
           setLeaves(unwrap(leaveRes));
         } else {
@@ -845,7 +855,7 @@ const HrmDashboard = () => {
     {
       key: "totalPayroll",
       label: "Total Payroll",
-      value: fmtMoney(stats.totalPayroll),
+      value: moneyLoading ? "Loading…" : fmtMoney(stats.totalPayroll),
       sub: rangeLabel,
       icon: DollarSign,
       color: "text-purple-600 bg-purple-50",
@@ -855,7 +865,7 @@ const HrmDashboard = () => {
       key: "pendingPayroll",
       label: "Pending Payroll",
       value:
-        slowLoading && range === "today"
+        (slowLoading && range === "today") || (moneyLoading && range !== "today")
           ? "Loading…"
           : fmtMoney(stats.pendingPayroll),
       sub: rangeLabel,
@@ -866,7 +876,7 @@ const HrmDashboard = () => {
     {
       key: "totalAdvances",
       label: "Total Advances",
-      value: fmtMoney(stats.totalAdvances),
+      value: moneyLoading ? "Loading…" : fmtMoney(stats.totalAdvances),
       sub: rangeLabel,
       icon: Wallet,
       color: "text-pink-600 bg-pink-50",
@@ -875,7 +885,7 @@ const HrmDashboard = () => {
     {
       key: "totalExpense",
       label: "Total Expense",
-      value: fmtMoney(stats.totalExpense),
+      value: moneyLoading ? "Loading…" : fmtMoney(stats.totalExpense),
       sub: rangeLabel,
       icon: CreditCard,
       color: "text-indigo-600 bg-indigo-50",
@@ -1321,11 +1331,18 @@ const HrmDashboard = () => {
           </NavLink>
         </div>
 
+        {/* Birthdays: today's (with 🎉 Wish) + upcoming */}
+        <BirthdayCelebration />
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:flex-1 lg:min-h-0">
           {/* Left: Sign in / out on top, Quick Actions below — half each */}
           <div className="flex flex-col gap-4 lg:min-h-0">
             <div className="lg:flex-1 lg:min-h-0">
-              <SignInOutCard />
+              {hasLeftOrganization(myProfile) ? (
+                <MySettlementCard staff={myProfile} />
+              ) : (
+                <SignInOutCard />
+              )}
             </div>
 
             <div className="lg:flex-1 lg:min-h-0 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col">
@@ -1457,6 +1474,9 @@ const HrmDashboard = () => {
 
   return (
     <div className="p-6">
+      {/* Birthdays: today's (with 🎉 Wish) + upcoming */}
+      <BirthdayCelebration className="mb-6" />
+
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         {cards.map((c) => {

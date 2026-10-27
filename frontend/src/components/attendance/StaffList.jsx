@@ -3,6 +3,7 @@ import React, { useMemo } from "react";
 import { Clock, Eye } from "lucide-react";
 import Table from "../common/Table";
 import Button from "../common/Button";
+import StaffAvatar from "../common/StaffAvatar";
 
 const Badge = ({ children, className = "" }) => (
   <span
@@ -23,7 +24,10 @@ const StaffList = ({ staffList, onRecordAttendance, onView }) => {
       key: "staffName",
       header: "Name",
       render: (row) => (
-        <span className="font-medium text-gray-800">{row.staffName}</span>
+        <div className="flex items-center gap-2.5">
+          <StaffAvatar name={row.staffName} photoUrl={row.photoUrl} size={30} />
+          <span className="font-medium text-gray-800">{row.staffName}</span>
+        </div>
       ),
     },
     {

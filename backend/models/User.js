@@ -22,7 +22,8 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Contact number is required"],
       trim: true,
-      match: [/^[0-9+\-\s]{7,15}$/, "Please enter a valid contact number"],
+      // "+<country code> <number>", e.g. "+91 9876543210" (old plain digits still pass).
+      match: [/^\+?[0-9\s\-]{7,22}$/, "Please enter a valid contact number"],
     },
     email: {
       type: String,
@@ -75,6 +76,12 @@ const userSchema = new mongoose.Schema(
     shiftEndTime: {
       type: String,
       default: "18:30",
+    },
+    // Set when this ACCOUNT (no Staff record, e.g. the super admin) has its
+    // own profile photo — see models/UserPhoto.js.
+    photoUpdatedAt: {
+      type: Date,
+      default: null,
     },
   },
   {

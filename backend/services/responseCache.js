@@ -22,6 +22,8 @@
 // instead of all doing the same heavy work in parallel (the dashboard and
 // the Payroll tab often ask for the pending summary at the same moment).
 
+import { getCompanyId } from "../utils/tenant.js";
+
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_ENTRIES = 500;
 
@@ -74,7 +76,9 @@ export const invalidateResponseCache = () => {
  * result for `ttlMs`, and returns it. Errors are never cached.
  */
 export const getOrCompute = async (rawKey, compute, ttlMs = DEFAULT_TTL_MS) => {
-  const key = rawKey;
+  // Keyed per company: one backend serves several companies, and a cached
+  // staff summary / pending summary must never be served to another one.
+  const key = `${getCompanyId() || "_"}::${rawKey}`;
   const hit = store.get(key);
   if (hit && hit.expiresAt > Date.now()) return hit.value;
 

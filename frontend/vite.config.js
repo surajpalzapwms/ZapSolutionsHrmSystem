@@ -5,6 +5,11 @@ import tailwindcss from "@tailwindcss/vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Debug console.log calls (some forms log 40 lines per save) are removed
+  // from the production build; warnings and errors are kept.
+  esbuild: {
+    pure: ["console.log", "console.debug"],
+  },
   build: {
     target: "es2020",
     // exceljs (~940 KB) is intentionally its own lazy chunk, loaded only

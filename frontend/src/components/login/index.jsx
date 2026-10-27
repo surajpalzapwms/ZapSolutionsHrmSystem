@@ -6,6 +6,8 @@ import { useNavigate, Link } from "react-router-dom";
 import { Lock, Mail, User, Eye, EyeOff, Phone } from "lucide-react";
 import api from "../../utils/api";
 import InputField from "../common/InputField";
+import PhoneInput from "../common/PhoneInput";
+import { isValidPhone } from "../../utils/phone";
 import Button from "../common/Button";
 import { showToast } from "../../utils/toast";
 
@@ -60,7 +62,7 @@ const Login = () => {
       if (!form.firstName) next.firstName = "First name is required";
       if (!form.lastName) next.lastName = "Last name is required";
       if (!form.contactNumber) next.contactNumber = "Contact number is required";
-      else if (!/^[0-9]{10,15}$/.test(form.contactNumber.replace(/[\s\-()]/g, ''))) {
+      else if (!isValidPhone(form.contactNumber)) {
         next.contactNumber = "Please enter a valid phone number";
       }
     }
@@ -276,11 +278,11 @@ const handleSubmit = async (e) => {
                     <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
                       <Phone size={14} /> Contact Number
                     </label>
-                    <InputField
-                      type="tel"
+                    <PhoneInput
+                      name="contactNumber"
                       value={form.contactNumber}
                       onChange={handleChange("contactNumber")}
-                      placeholder="+1 234 567 8900"
+                      placeholder="Phone number"
                       error={errors.contactNumber}
                     />
                   </div>

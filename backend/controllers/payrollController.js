@@ -14,10 +14,12 @@ import {
 import Holiday from "../models/holiday.js";
 import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
 import { getRemainingForType } from "../services/leaveBalance.js";
+import { buildLateSummary, isLateDeductionEnabled, getShiftForUser } from "../services/lateDeduction.js";
 import mongoose from "mongoose";
 import PDFDocument from "pdfkit";
-import { getCompanyProfile } from "../services/companyProfile.js";
+import { getCompanyProfile, formatMoney } from "../services/companyProfile.js";
 import { isAdminRole } from "../config/permissions.js";
+import { calculateReferralCommission } from "../utils/referral.js";
 import {
   getOrCompute,
   registerCacheWarmer,
@@ -155,7 +157,7 @@ const mapWithLimit = async (items, limit, fn) => {
 // latest effectiveFrom (i.e. the revision that was "current" as of that
 // month). Falls back to currentBasicSalary if there's no usable history
 // (e.g. legacy records saved before salaryHistory existed).
-const getBasicSalaryForPeriod = (basicPayroll, periodEnd) => {
+export const getBasicSalaryForPeriod = (basicPayroll, periodEnd) => {
   const history = Array.isArray(basicPayroll.salaryHistory)
     ? basicPayroll.salaryHistory
     : [];
@@ -600,6 +602,13 @@ const calculateSalary = async (
   //   3. one date is one cell — it can never cost more than one day.
   const unpaidByDate = new Map();
   const unmarkedDates = []; // past working days with no attendance/leave/holiday
+  const halfDayDates = []; // Half Day attendance with nothing covering the other half
+  // Late-coming (see services/lateDeduction.js) — filled in below once we
+  // know which days are holidays / unpaid.
+  let lateSummary = null;
+  let attendanceRecordsForLate = [];
+  let lateUserId = null;
+  let lateDayOffKeys = new Set();
   if (payableDays > 0) {
     // Attendance date key: the stored IST "YYYY-MM-DD" when present, else
     // derived from loginTime in IST (never the server's local time).
@@ -656,8 +665,10 @@ const calculateSalary = async (
           $lte: new Date(rangeEndUTC.getTime() + padMs),
         },
       })
-        .select("date loginTime status attendanceType")
+        .select("date loginTime logoutTime status attendanceType isLeaveDay lateDeductionWaived lunchSkipped lunchTakenMinutes")
         .session(session);
+      attendanceRecordsForLate = records;
+      lateUserId = staffUser._id;
       records.forEach((rec) => {
         if (rec.status === "absent" || rec.attendanceType === "absent") return;
         const key = attKey(rec);
@@ -701,6 +712,10 @@ const calculateSalary = async (
       allKeys.push(dayKey(c));
     }
     await Promise.all(allKeys.map((k) => getDayOff(k)));
+    for (const k of allKeys) {
+      const off = await getDayOff(k); // cached — instant
+      if (off?.isDayOff) lateDayOffKeys.add(k);
+    }
 
     // Half-day Unpaid entries are tracked separately so that — and ONLY when
     // they add up to less than a full day — they can be auto-covered by an
@@ -771,10 +786,22 @@ const calculateSalary = async (
     ) {
       const key = dayKey(c);
       if (unpaidByDate.has(key)) continue; // already deducted as unpaid leave
-      if (attendanceByDate.has(key)) continue; // came in (full or half)
       if (leaveKeys.has(key)) continue; // covered by paid/sick/casual/swap/etc.
+      const worked = attendanceByDate.get(key);
+      if (worked === "present") continue; // came in for the full day
       const dayOff = await getDayOff(key); // cached — instant
       if (dayOff.isDayOff) continue; // Sunday / company holiday is a paid day off
+      if (worked === "half") {
+        // BUGFIX: a Half Day (worked only half, nothing filed for the other
+        // half) used to count as a full paid day, so two half days on the
+        // calendar took nothing off the salary. The unworked half is now
+        // deducted (0.5 day). A half day topped up with Paid / Sick /
+        // Casual / Swap / Unpaid leave is skipped above (leaveKeys /
+        // unpaidByDate) — that leave decides the other half.
+        unpaidByDate.set(key, 0.5);
+        halfDayDates.push(key);
+        continue;
+      }
       unpaidByDate.set(key, 1);
       unmarkedDates.push(key);
     }
@@ -827,7 +854,49 @@ const calculateSalary = async (
   const unpaidLeaveDays = [...unpaidByDate.values()].reduce((a, b) => a + b, 0);
   const leaveDeduction = unpaidLeaveDays * perDaySalary;
   const effectiveDays = Math.max(0, payableDays - unpaidLeaveDays);
-  const netSalary = Math.max(0, perDaySalary * effectiveDays);
+
+  // ── Late coming (per-minute, after the 15-minute buffer) ─────────────
+  // Minutes signed in late past the buffer are deducted at the per-minute
+  // rate, minus any time the staff member stayed after shift end that same
+  // day. The super admin can switch it off for the month or waive single
+  // dates on the attendance calendar. Sundays / holidays / days already
+  // unpaid are never charged again.
+  if (payableDays > 0 && lateUserId) {
+    const [lateEnabled, lateShift] = await Promise.all([
+      isLateDeductionEnabled(employeeId, period, session),
+      getShiftForUser(lateUserId, session),
+    ]);
+    const skipKeys = new Set([...lateDayOffKeys, ...unpaidByDate.keys()]);
+    lateSummary = buildLateSummary({
+      records: attendanceRecordsForLate.map((r) => (r.toObject ? r.toObject() : r)),
+      ...lateShift,
+      perDaySalary,
+      enabled: lateEnabled,
+      fromKey: startKey,
+      toKey: endKey,
+      skipKeys,
+    });
+  }
+  const lateDeduction = lateSummary ? lateSummary.totalDeduction : 0;
+  const earnedBeforeReferral = Math.max(
+    0,
+    perDaySalary * effectiveDays - lateDeduction,
+  );
+
+  // ── Referral organisation commission (first month only) ─────────────
+  // e.g. 20,000 basic, Navkar 25% -> 5,000 goes to Navkar. Taken from the
+  // full basic salary, only in the commission month, never below zero.
+  const referralCalc =
+    payableDays > 0
+      ? calculateReferralCommission(
+          employee,
+          period,
+          fullBasicSalary,
+          earnedBeforeReferral,
+        )
+      : { referral: null, applies: false, commission: 0, commissionFull: 0, capped: false };
+  const referralCommission = referralCalc.commission;
+  const netSalary = Math.max(0, earnedBeforeReferral - referralCommission);
 
   // ── Advance recovery (admin-controlled) ──────────────────────────────
   // The outstanding advance is NOT deducted automatically any more. The
@@ -880,8 +949,22 @@ const calculateSalary = async (
     unpaidLeaveDays,
     unpaidLeaveDates,
     unmarkedDates,
+    halfDayDates,
     leaveDeduction,
     effectiveDays,
+    lateDeduction,
+    lateDeductionEnabled: lateSummary ? lateSummary.enabled : true,
+    lateMinutes: lateSummary ? lateSummary.totalDeductibleMinutes : 0,
+    lateDays: lateSummary ? lateSummary.deductedDays : 0,
+    lateSummary,
+    earnedBeforeReferral,
+    referralCommission,
+    referralCommissionFull: referralCalc.commissionFull,
+    referralCommissionCapped: referralCalc.capped,
+    referralApplies: referralCalc.applies,
+    referralOrganization: referralCalc.referral?.organizationName || "",
+    referralPercent: referralCalc.referral?.percent || 0,
+    referralPeriod: referralCalc.referral?.period || null,
     netSalary,
     advances,
     outstandingAdvance,
@@ -895,6 +978,18 @@ const calculateSalary = async (
     totalPayable: toExactAmount(finalSalary + previousPendingAmount),
   };
 };
+
+// Referral fields stored on a Payroll doc, from calculateSalary()'s result.
+const referralPayrollFields = (salaryData) => ({
+  referralCommission: toFixedAmount(salaryData.referralCommission || 0),
+  referral: salaryData.referralApplies
+    ? {
+        organizationName: salaryData.referralOrganization,
+        percent: salaryData.referralPercent,
+        period: salaryData.referralPeriod,
+      }
+    : undefined,
+});
 
 // Shared with the Full & Final Settlement (services/settlementService.js),
 // so the settlement uses exactly the same month salary as payroll.
@@ -949,6 +1044,7 @@ export const refreshPendingPayrollForPeriod = async (employeeId, period) => {
   payroll.netSalaryExact = netSalaryExact;
   payroll.advanceDeduction = toFixedAmount(salaryData.advanceDeduction);
   payroll.previousPendingAmount = toFixedAmount(salaryData.previousPendingAmount);
+  Object.assign(payroll, referralPayrollFields(salaryData));
   payroll.totalPayable = totalPayable;
   payroll.paidAmount = 0;
   payroll.pendingAmount = totalPayable;
@@ -960,6 +1056,11 @@ export const refreshPendingPayrollForPeriod = async (employeeId, period) => {
     perDaySalary: salaryData.perDaySalary,
     effectiveDays: salaryData.effectiveDays,
     leaveDeduction: toFixedAmount(salaryData.leaveDeduction),
+    lateDeduction: toFixedAmount(salaryData.lateDeduction),
+    lateMinutes: salaryData.lateMinutes,
+    lateDays: salaryData.lateDays,
+    lateDeductionEnabled: salaryData.lateDeductionEnabled,
+    referralCommission: toFixedAmount(salaryData.referralCommission || 0),
     isFull:
       salaryData.unpaidLeaveDays === 0 &&
       salaryData.payableDays === salaryData.totalDaysInMonth,
@@ -1009,6 +1110,8 @@ export const exportPayrollsCSV = async (req, res) => {
       "Total Allowance",
       "Deductions",
       "Advance Deduction",
+      "Referral Organisation",
+      "Referral Commission",
       "Net Salary",
       "Paid Amount",
       "Pending Amount",
@@ -1028,6 +1131,8 @@ export const exportPayrollsCSV = async (req, res) => {
         p.totalAllowance,
         p.totalDeduction,
         p.advanceDeduction,
+        p.referral?.organizationName || "",
+        p.referralCommission || 0,
         p.netSalary,
         p.paidAmount,
         p.pendingAmount,
@@ -1533,15 +1638,14 @@ const formatPeriodLabel = (period) => {
   return `${monthNames[(month || 1) - 1] || ""} ${year}`.trim();
 };
 
-const formatCurrency = (value) =>
-  `Rs. ${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-
 // @desc    Download a single payroll record as a PDF payslip
 // @route   GET /api/hrm/payroll/:id/payslip-export
 // @access  Private (self can only download their own; admins can download any)
 export const exportPayslipPdf = async (req, res) => {
   try {
     const company = await getCompanyProfile();
+    // Amounts on the payslip use the currency chosen on the Settings page.
+    const formatCurrency = (value) => formatMoney(value, company);
     const payroll = await Payroll.findById(req.params.id).populate(
       "employeeId",
       "staffName email projectName staffId contactNo employmentType",
@@ -1702,19 +1806,25 @@ export const exportPayslipPdf = async (req, res) => {
     // ── Cream line-item box: rows of "label : amount", ending in a bold total bar ──
     const drawLineItemBox = (rows, totalLabel, totalValueText, boxTopY) => {
       const rowH = 18;
-      const boxHeight = rows.length * rowH + 10;
+      // Long labels (e.g. "Basic Salary (after late coming …, Navkar
+      // commission 25% …)") wrap onto extra lines instead of overlapping.
+      doc.font("Helvetica").fontSize(9.5);
+      const heights = rows.map(([label]) =>
+        Math.max(rowH, doc.heightOfString(label, { width: 220 }) + 6),
+      );
+      const boxHeight = heights.reduce((a, b) => a + b, 0) + 10;
       doc.rect(marginX, boxTopY, contentWidth, boxHeight).fill(CREAM);
 
       let rowY = boxTopY + 6;
       doc.font("Helvetica").fontSize(9.5).fillColor(TEXT_DARK);
-      rows.forEach(([label, amount]) => {
+      rows.forEach(([label, amount], i) => {
         doc.text(label, marginX + 14, rowY, { width: 220 });
         doc.text(":", marginX + 240, rowY);
         doc.text(amount, marginX + contentWidth - 110, rowY, {
           width: 96,
           align: "right",
         });
-        rowY += rowH;
+        rowY += heights[i];
       });
 
       const totalY = boxTopY + boxHeight + 4;
@@ -1732,8 +1842,21 @@ export const exportPayslipPdf = async (req, res) => {
       return totalY + 22;
     };
 
-    // Earnings
-    const basic = payroll.adjustedBasicSalary ?? payroll.basicSalary ?? 0;
+    // Earnings — the FULL monthly basic; everything taken off it (leave,
+    // late coming, referral commission, advance…) is itemised under
+    // Deductions, so the payslip adds up: Basic + allowances − deductions =
+    // Net. e.g. 20,000.00 − 1,333.33 leave − 5,000.00 Navkar = 13,666.67.
+    const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const basic = payroll.basicSalary ?? payroll.adjustedBasicSalary ?? 0;
+    const adjusted = payroll.adjustedBasicSalary ?? payroll.basicSalary ?? 0;
+    const leaveCut = Number(payroll.attendanceInfo?.leaveDeduction) || 0;
+    const lateCut = Number(payroll.attendanceInfo?.lateDeduction) || 0;
+    const referralCut = Number(payroll.referralCommission) || 0;
+    const advanceCut = Number(payroll.advanceDeduction) || 0;
+    const unpaidDays = Number(payroll.attendanceInfo?.unpaidLeaves) || 0;
+    // Days before joining / after leaving (not leave — simply not employed).
+    const notPayable = r2(basic - leaveCut - lateCut - referralCut - (adjusted + advanceCut));
+
     const earningsRows = [["Basic Salary", formatCurrency(basic)]];
     (payroll.allowances || []).forEach((a) =>
       earningsRows.push([a.type, formatCurrency(a.amount)]),
@@ -1755,17 +1878,32 @@ export const exportPayslipPdf = async (req, res) => {
       d.type,
       formatCurrency(d.amount),
     ]);
-    if (payroll.advanceDeduction) {
+    if (leaveCut > 0)
       deductionRows.push([
-        "Advance Recovery",
-        formatCurrency(payroll.advanceDeduction),
+        `Leave Deduction (${r2(unpaidDays)} day${unpaidDays === 1 ? "" : "s"})`,
+        formatCurrency(leaveCut),
       ]);
-    }
+    if (lateCut > 0) deductionRows.push(["Late Coming Deduction", formatCurrency(lateCut)]);
+    if (referralCut > 0)
+      deductionRows.push([
+        `${payroll.referral?.organizationName || "Referral"} Commission${
+          payroll.referral?.percent ? ` (${r2(payroll.referral.percent)}%)` : ""
+        }`,
+        formatCurrency(referralCut),
+      ]);
+    if (advanceCut > 0) deductionRows.push(["Advance Recovery", formatCurrency(advanceCut)]);
+    if (notPayable > 0.009)
+      deductionRows.push(["Days not employed this month", formatCurrency(notPayable)]);
     if (deductionRows.length === 0) deductionRows.push(["No deductions", "NA"]);
 
     y = drawRibbon("Deductions", y);
     const totalDeductions =
-      (payroll.totalDeduction || 0) + (payroll.advanceDeduction || 0);
+      (payroll.totalDeduction || 0) +
+      leaveCut +
+      lateCut +
+      referralCut +
+      advanceCut +
+      (notPayable > 0.009 ? notPayable : 0);
     y = drawLineItemBox(
       deductionRows,
       "Total Deductions",
@@ -1901,7 +2039,21 @@ export const previewPayroll = async (req, res) => {
       unpaidLeaveDates: salaryData.unpaidLeaveDates,
       unmarkedDates: salaryData.unmarkedDates,
       leaveDeduction: toFixedAmount(salaryData.leaveDeduction),
+      lateDeduction: toFixedAmount(salaryData.lateDeduction),
+      lateMinutes: salaryData.lateMinutes,
+      lateDays: salaryData.lateDays,
+      lateDeductionEnabled: salaryData.lateDeductionEnabled,
+      lateSummary: salaryData.lateSummary,
       effectiveDays: salaryData.effectiveDays,
+      // Referral organisation commission (first month only).
+      earnedBeforeReferral: toFixedAmount(salaryData.earnedBeforeReferral),
+      referralCommission: toFixedAmount(salaryData.referralCommission),
+      referralCommissionFull: toFixedAmount(salaryData.referralCommissionFull),
+      referralCommissionCapped: salaryData.referralCommissionCapped,
+      referralApplies: salaryData.referralApplies,
+      referralOrganization: salaryData.referralOrganization,
+      referralPercent: salaryData.referralPercent,
+      referralPeriod: salaryData.referralPeriod,
       netSalary: toFixedAmount(salaryData.netSalary),
       // Advance recovery is chosen by the admin — these tell the form how
       // much is still owed and the most that can be taken this month.
@@ -2120,6 +2272,7 @@ export const createPayroll = async (req, res) => {
       netSalaryExact,
       advanceDeduction: toFixedAmount(salaryData.advanceDeduction),
       advanceBalanceAfter: toFixedAmount(salaryData.advanceBalanceAfter),
+      ...referralPayrollFields(salaryData),
       previousPendingAmount: toFixedAmount(salaryData.previousPendingAmount),
       totalPayable,
       paidAmount: paidAmountValue,
@@ -2166,6 +2319,11 @@ export const createPayroll = async (req, res) => {
         perDaySalary: salaryData.perDaySalary,
         effectiveDays: salaryData.effectiveDays,
         leaveDeduction: toFixedAmount(salaryData.leaveDeduction),
+        lateDeduction: toFixedAmount(salaryData.lateDeduction),
+        lateMinutes: salaryData.lateMinutes,
+        lateDays: salaryData.lateDays,
+        lateDeductionEnabled: salaryData.lateDeductionEnabled,
+        referralCommission: toFixedAmount(salaryData.referralCommission || 0),
         isFull:
           salaryData.unpaidLeaveDays === 0 &&
           salaryData.payableDays === salaryData.totalDaysInMonth,
@@ -2535,6 +2693,7 @@ export const recalculatePayroll = async (req, res) => {
     payroll.previousPendingAmount = toFixedAmount(
       salaryData.previousPendingAmount,
     );
+    Object.assign(payroll, referralPayrollFields(salaryData));
     payroll.totalPayable = totalPayable;
     payroll.paidAmount = paidAmountValue;
     payroll.pendingAmount = pendingAmount;
@@ -2546,6 +2705,11 @@ export const recalculatePayroll = async (req, res) => {
       perDaySalary: salaryData.perDaySalary,
       effectiveDays: salaryData.effectiveDays,
       leaveDeduction: toFixedAmount(salaryData.leaveDeduction),
+      lateDeduction: toFixedAmount(salaryData.lateDeduction),
+      lateMinutes: salaryData.lateMinutes,
+      lateDays: salaryData.lateDays,
+      lateDeductionEnabled: salaryData.lateDeductionEnabled,
+      referralCommission: toFixedAmount(salaryData.referralCommission || 0),
       isFull:
         salaryData.unpaidLeaveDays === 0 &&
         salaryData.payableDays === salaryData.totalDaysInMonth,
@@ -2654,7 +2818,7 @@ export const getMySalarySlips = async (req, res) => {
 
     const rows = await Payroll.find(query)
       .select(
-        "payrollCode employeeId period basicSalary adjustedBasicSalary totalAllowance totalDeduction advanceDeduction netSalary netSalaryExact paidAmount paymentDate paymentMethod status payments",
+        "payrollCode employeeId period basicSalary adjustedBasicSalary totalAllowance totalDeduction advanceDeduction referralCommission referral attendanceInfo netSalary netSalaryExact paidAmount paymentDate paymentMethod status payments",
       )
       .populate("employeeId", "staffName staffId projectName")
       .sort({ period: -1 })
@@ -2673,8 +2837,15 @@ export const getMySalarySlips = async (req, res) => {
         employee: p.employeeId,
         basicSalary: p.adjustedBasicSalary ?? p.basicSalary,
         totalAllowance: p.totalAllowance || 0,
-        totalDeduction: (p.totalDeduction || 0) + (p.advanceDeduction || 0),
-        netSalary: p.netSalaryExact ?? p.netSalary,
+        totalDeduction:
+          Math.round(((p.totalDeduction || 0) + (p.advanceDeduction || 0)) * 100) / 100,
+        leaveDeduction: p.attendanceInfo?.leaveDeduction || 0,
+        lateDeduction: p.attendanceInfo?.lateDeduction || 0,
+        advanceDeduction: p.advanceDeduction || 0,
+        referralCommission: p.referralCommission || 0,
+        referralOrganization: p.referral?.organizationName || "",
+        referralPercent: p.referral?.percent || 0,
+        netSalary: Math.round((p.netSalaryExact ?? p.netSalary ?? 0) * 100) / 100,
         paidAmount: p.paidAmount,
         paidOn: p.paymentDate || lastPayment || null,
         paymentMethod: p.paymentMethod,

@@ -1,3 +1,48 @@
+# Staff profile photos on the website (14 Oct 2026)
+
+- New `components/common/StaffAvatar.jsx`: round photo with initials as fallback.
+- Photo (uploaded from the app or the website) now shows in the **Staff tab table**, the **Staff
+  Details** header and the **Attendance staff list**. Before, only the profile menu, birthday card
+  and the documents section drew photos, so a photo uploaded in the app never appeared in the lists.
+- Uploading / removing a photo in Staff Details refreshes the table and the header immediately.
+- Needs the matching backend change (`photoUrl` on `/api/staff` and on the leave staff summary).
+
+# Letters, resignation date & birthday wishes (13 Oct 2026)
+
+## HR letters (backend + website + app)
+- All six letters (Offer, Joining, Confirmation, Termination, Leaving, Experience) now open the
+  "Generate letter" details form and are made by the server — the app shows/downloads exactly
+  the same PDF as the website.
+- Termination letter: an admin / super admin can pick ANY staff member and generate it. The
+  form asks for the last working day (any date: past, today or future) and an optional reason.
+  Once generated, it unlocks in that staff member's app.
+- Leaving / Experience letters: the last working day comes from the staff member's resignation
+  (approved, else pending). With no resignation, HR picks any date — today or a future date for
+  someone still working. Approving a resignation later moves an already generated letter to the
+  approved date. Wording switches to future tense ("will be relieved on …") for a future date.
+- Letter date for these three = the last working day once it has come; today while it is still
+  in the future.
+- Mobile app: letter tiles are never locked for admin / super admin — they open the Generate
+  Letters screen (pick staff, generate, view, download, withdraw). Staff tiles stay locked until
+  HR generates the letter.
+
+## Birthday wishes (app + website)
+- On the birthday itself, from 12:00 midnight India time, every colleague gets a "🎉 Wish"
+  button (Home "Birthday today" card + Upcoming Birthdays list in the app; dashboard card on the
+  website). It opens a party modal (balloons, cake, confetti, gifts) with ready-made wishes and
+  a box to write any message (300 chars).
+- The birthday person sees how many colleagues wished them and can read every message.
+- Card reloads itself at midnight. DOB is read in India time so the day is never off by one.
+
+## Speed
+- Letter status no longer queries resignations; admin app skips the "my letters" call.
+- App letters screen loads the staff member's letters and history once (switching type is instant).
+- Birthday photos: full staff list fetched at most every 5 min instead of on every Home focus.
+
+## Fix
+- frontend: `Leavehistorymodal.jsx` renamed to `LeaveHistoryModal.jsx` (the imports use that
+  name; the build failed on Linux/Vercel).
+
 # HRM – cleanup & performance changes
 
 ## Why it was slow

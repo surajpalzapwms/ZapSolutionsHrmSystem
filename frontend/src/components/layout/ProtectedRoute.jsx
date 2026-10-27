@@ -8,17 +8,21 @@ import api from "../../utils/api";
 // someone logged in. Once per page load, ask the server what is true now and
 // update the saved login, so the sidebar / routes / dashboard follow it.
 // Returns true when something changed.
+// The same call also brings the account's profile photo (photoUrl), so the
+// header shows the photo uploaded from the app / website.
 const refreshSession = async () => {
   const before = getCurrentUser();
-  if (!before || isSuperAdminUser(before)) return false; // super admin always has every tab
+  if (!before) return false;
   try {
     const res = await api.get("/api/auth/me");
     const me = res.data?.data;
     if (!me) return false;
+    const superAdmin = isSuperAdminUser(before); // always has every tab
     const next = {
       ...before,
-      role: me.role ?? before.role,
-      permissions: me.permissions ?? before.permissions,
+      role: superAdmin ? before.role : (me.role ?? before.role),
+      permissions: superAdmin ? before.permissions : (me.permissions ?? before.permissions),
+      photoUrl: me.photoUrl || null,
     };
     // Left over from the old multi-company version.
     delete next.company;

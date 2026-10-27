@@ -10,6 +10,7 @@
 //   • a past/current month with no saved payroll shows a live estimate
 //   • months before the joining month (or in the future) are skipped
 import { useCallback, useEffect, useRef, useState } from "react";
+import { breakdownFromSaved, breakdownFromLive } from "../salaryBreakdown";
 import { payrollService } from "../../../services/payrollService";
 import { advanceService } from "../../../services/advanceService";
 
@@ -50,6 +51,7 @@ export const useMySalary = (employeeId, year, joinKey) => {
             if (m < 0 || m > 11) return;
             byMonth[m] = {
               ...rec,
+              ...breakdownFromSaved(rec),
               payableDays: rec.attendanceInfo?.payableDays,
               totalDays: rec.attendanceInfo?.totalWorkingDays,
               unpaidDays: rec.attendanceInfo?.unpaidLeaves,
@@ -92,6 +94,7 @@ export const useMySalary = (employeeId, year, joinKey) => {
             const savedNet = Number(saved.netSalary || 0);
             byMonth[month] = {
               ...saved,
+              ...breakdownFromLive(data),
               netSalary: liveRounded,
               savedNetSalary: savedNet,
               differsFromSaved: Math.abs(liveRounded - savedNet) >= 0.01,
@@ -100,10 +103,13 @@ export const useMySalary = (employeeId, year, joinKey) => {
               totalDays: data.totalDaysInMonth,
               unpaidDays: data.unpaidLeaveDays,
               leaveDeduction: data.leaveDeduction ?? 0,
+              lateDeduction: data.lateDeduction ?? 0,
+              lateDeductionEnabled: data.lateDeductionEnabled !== false,
             };
             return;
           }
           byMonth[month] = {
+            ...breakdownFromLive(data),
             netSalary: data.finalSalary ?? data.netSalary,
             isEstimate: true,
             payableDays: data.payableDays,
@@ -111,6 +117,8 @@ export const useMySalary = (employeeId, year, joinKey) => {
             totalDays: data.totalDaysInMonth,
             unpaidDays: data.unpaidLeaveDays,
             leaveDeduction: data.leaveDeduction ?? 0,
+              lateDeduction: data.lateDeduction ?? 0,
+              lateDeductionEnabled: data.lateDeductionEnabled !== false,
           };
         });
 

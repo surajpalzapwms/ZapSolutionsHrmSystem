@@ -1,11 +1,13 @@
 // src/components/layout/DashboardLayout.jsx
-import React, { Suspense, memo, useEffect, useState } from "react";
+import React, { Suspense, memo, useCallback, useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { LogOut, Menu, Bell } from "lucide-react";
 import HolidayAnnouncement from "../dashboard/HolidayAnnouncement";
 import Sidebar from "../common/Sidebar";
+import ProfileMenu from "./ProfileMenu";
 import Spinner from "../common/Spinner";
 import { getCurrentUser } from "../../utils/authUser";
+import { useBrand } from "../../contexts/BrandContext";
 
 const formatDateTime = (d) =>
   d.toLocaleString("en-US", {
@@ -45,6 +47,9 @@ const PageFallback = () => (
 const noop = () => {};
 
 const DashboardLayout = () => {
+  // Re-mount the open page when the payroll currency changes so every
+  // amount on it is shown in the new currency straight away.
+  const brand = useBrand();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [user, setUser] = useState(getCurrentUser);
@@ -61,12 +66,12 @@ const DashboardLayout = () => {
     };
   }, []);
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     ["token", "user", "email", "role", "username", "selectedCompany"].forEach((k) =>
       localStorage.removeItem(k),
     );
     navigate("/login", { replace: true });
-  };
+  }, [navigate]);
 
   const fullName =
     user?.name ||
@@ -131,18 +136,16 @@ const DashboardLayout = () => {
 
             <LiveClock />
 
-            <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
-              <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm font-semibold">
-                {initials || "U"}
-              </div>
-
-              <div className="hidden sm:block leading-tight">
-                <p className="text-sm font-medium text-gray-800 truncate max-w-[160px]">
-                  {displayName}
-                </p>
-                <p className="text-xs text-gray-500 capitalize">{role}</p>
-              </div>
-            </div>
+            {/* Avatar (profile photo) — opens the profile card with
+                Add / Change photo and Log out together. */}
+            <ProfileMenu
+              user={user}
+              displayName={displayName}
+              role={role}
+              initials={initials}
+              onLogout={handleLogout}
+              onUserChange={setUser}
+            />
 
             <button
               onClick={handleLogout}
@@ -156,7 +159,7 @@ const DashboardLayout = () => {
 
         <main className="flex-1 overflow-y-auto">
           <Suspense fallback={<PageFallback />}>
-            <Outlet />
+            <Outlet key={`${brand.currencyCode}-${brand.numberLocale}`} />
           </Suspense>
         </main>
       </div>

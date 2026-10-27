@@ -131,6 +131,45 @@ const attendanceSchema = new mongoose.Schema(
     earlySignOutApprovedAt: {
       type: Date,
     },
+    // ── Late-coming deduction (see services/lateDeduction.js) ────────────
+    // Super admin can waive the late-coming deduction for THIS date only
+    // (attendance calendar). The month-wide switch lives in
+    // models/LateDeductionSetting.js.
+    lateDeductionWaived: {
+      type: Boolean,
+      default: false,
+    },
+    lateDeductionWaivedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    lateDeductionWaivedAt: {
+      type: Date,
+    },
+    // ── Lunch (only used to reduce a late-coming deduction) ───────────────
+    // lunchSkipped = true  → staff did NOT take lunch: the whole lunch window
+    //                        counts as working time against the late minutes.
+    // lunchTakenMinutes    → staff DID take lunch and this is how long it was.
+    //                        Whatever is under the allowed lunch (45 min)
+    //                        counts as working time. null = not recorded
+    //                        (standard lunch assumed, no credit).
+    lunchSkipped: {
+      type: Boolean,
+      default: false,
+    },
+    lunchTakenMinutes: {
+      type: Number,
+      min: 0,
+      max: 480,
+      default: null,
+    },
+    lunchUpdatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    lunchUpdatedAt: {
+      type: Date,
+    },
   },
   {
     timestamps: true,

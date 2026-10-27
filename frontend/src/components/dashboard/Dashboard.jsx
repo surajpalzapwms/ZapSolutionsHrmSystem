@@ -22,6 +22,7 @@ import { attendanceService } from "../../services/attendanceService";
 import { advanceService } from "../../services/advanceService";
 import { staffBasicPayrollService } from "../../services/staffBasicPayrollService";
 
+import { formatMoney } from "../../utils/brand";
 const TABS = ["Today", "This Month", "This Year", "All", "Custom"];
 
 const asList = (res) => res?.value?.data?.data ?? res?.value?.data ?? [];
@@ -172,10 +173,7 @@ const Dashboard = () => {
       },
       {
         label: "Total Expense",
-        value: `$${Number(stats.totalExpense).toLocaleString(undefined, {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`,
+        value: formatMoney(stats.totalExpense),
         sub: "All time",
         icon: Receipt,
         color: "text-red-600 bg-red-50",

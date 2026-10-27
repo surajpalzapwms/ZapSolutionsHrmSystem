@@ -9,7 +9,6 @@ import {
   Cake,
   Briefcase,
   Phone,
-  FileText,
   KeyRound,
   Eye,
   EyeOff,
@@ -17,12 +16,12 @@ import {
 } from "lucide-react";
 
 import Modal from "../common/Modal";
-import Button from "../common/Button";
-import StaffSettlementModal from "./StaffSettlementModal";
+import StaffAvatar from "../common/StaffAvatar";
 import StaffDocumentsSection from "./StaffDocumentsSection";
+import StaffReferralSection from "./StaffReferralSection";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
 import { staffService } from "../../services/staffService";
-import { getDisplayStatus } from "../../utils/staffStatus";
+import { getDisplayStatus, leftBeforeConfirmation } from "../../utils/staffStatus";
 
 const STATUS_COLORS = {
   Internship: "bg-purple-100 text-purple-700",
@@ -38,6 +37,7 @@ const DateRow = ({
   value,
   tone = "text-gray-700",
   hint,
+  emptyText = "Not set",
   compact = false,
 }) => (
   <div
@@ -60,7 +60,7 @@ const DateRow = ({
           value ? "text-gray-800" : "text-gray-400"
         }`}
       >
-        {value ? formatDateToDDMMMYYYY(value) : "Not set"}
+        {value ? formatDateToDDMMMYYYY(value) : emptyText}
       </p>
 
       {hint && (
@@ -76,9 +76,8 @@ const StaffDetailsModal = ({
   isOpen,
   onClose,
   staff,
+  onPhotoChanged,
 }) => {
-  const [showSettlement, setShowSettlement] = useState(false);
-
   // Login password (as originally entered) — fetched from the admin-only
   // endpoint each time a staff member's details are opened.
   const [loginInfo, setLoginInfo] = useState(null); // { email, password }
@@ -167,14 +166,17 @@ const StaffDetailsModal = ({
 
         {/* Staff Basic Information */}
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-lg font-bold text-gray-800">
-              {staff.staffName}
-            </h3>
+          <div className="flex min-w-0 items-center gap-3">
+            <StaffAvatar name={staff.staffName} photoUrl={staff.photoUrl} size={56} />
+            <div className="min-w-0">
+              <h3 className="text-lg font-bold text-gray-800">
+                {staff.staffName}
+              </h3>
 
-            <p className="text-sm text-gray-500">
-              {staff.email || "No email on file"}
-            </p>
+              <p className="text-sm text-gray-500">
+                {staff.email || "No email on file"}
+              </p>
+            </div>
           </div>
 
           <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
@@ -327,10 +329,18 @@ const StaffDetailsModal = ({
             {/* Row 2: Confirmation Started + Leaving Date */}
             <div className="grid grid-cols-2 gap-2">
 
+              {/* Left before the confirmation date = never confirmed, so
+                  the date is not shown. */}
               <DateRow
                 icon={CalendarCheck}
                 label="Confirmation Started"
-                value={staff.confirmationDate}
+                value={leftBeforeConfirmation(staff) ? null : staff.confirmationDate}
+                emptyText={leftBeforeConfirmation(staff) ? "Not confirmed" : "Not set"}
+                hint={
+                  leftBeforeConfirmation(staff)
+                    ? "Left before the confirmation date"
+                    : undefined
+                }
                 tone="text-green-600"
                 compact
               />
@@ -422,41 +432,19 @@ const StaffDetailsModal = ({
           </div>
         )}
 
+        {/* Referral organisation + first-month commission */}
+        {staff._id && <StaffReferralSection staff={staff} />}
+
         {/* Profile photo + Aadhaar / PAN / light bill */}
-        {staff._id && <StaffDocumentsSection staffId={staff._id} staffName={staff.staffName} />}
-
-        {/* Full & Final Settlement — only once the staff member has actually left */}
-        {staff.status === "Relieved" && staff.relievingDate && (
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
-              Full &amp; Final Settlement
-            </p>
-
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2.5">
-              <div className="flex items-start gap-3">
-                <FileText size={18} className="mt-0.5 flex-shrink-0 text-orange-500" />
-                <div>
-                  <p className="text-sm font-semibold text-gray-800">Settlement Statement</p>
-                  <p className="text-xs text-gray-500">
-                    Leave balance, days worked and the final payable amount
-                  </p>
-                </div>
-              </div>
-
-              <Button size="sm" variant="outline" onClick={() => setShowSettlement(true)}>
-                View
-              </Button>
-            </div>
-          </div>
+        {staff._id && (
+          <StaffDocumentsSection
+            staffId={staff._id}
+            staffName={staff.staffName}
+            onPhotoChanged={onPhotoChanged}
+          />
         )}
 
       </div>
-
-      <StaffSettlementModal
-        isOpen={showSettlement}
-        onClose={() => setShowSettlement(false)}
-        staff={staff}
-      />
     </Modal>
   );
 };

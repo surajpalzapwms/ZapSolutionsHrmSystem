@@ -115,6 +115,21 @@ const staffSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // ── Referral organisation (set by the SUPER ADMIN only) ──────────────
+    // The organisation that referred this staff member (e.g. "Navkar") and
+    // the % of the staff member's first month basic salary that goes to it
+    // as commission. It is ALWAYS taken from the first (joining) month only;
+    // commissionPeriod is kept only for old records and is ignored.
+    // from — empty means the joining month. See utils/referral.js.
+    referral: {
+      organizationName: { type: String, trim: true, default: "" },
+      commissionPercent: { type: Number, min: 0, max: 100, default: 0 },
+      commissionPeriod: { type: String, trim: true, default: "" },
+      remarks: { type: String, trim: true, default: "" },
+      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      updatedByName: { type: String, default: "" },
+      updatedAt: { type: Date, default: null },
+    },
     enabled: {
       type: Boolean,
       default: true,

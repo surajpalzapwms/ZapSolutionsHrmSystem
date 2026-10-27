@@ -12,6 +12,7 @@ import { useMRCalendar } from "./hooks/useMRCalendar";
 import { SHORT_DAYS, MONTHS } from "../../utils/constants";
 import { showToast } from "../../utils/toast";
 import { attendanceService } from "../../services/attendanceService";
+import { breakdownFromSaved, breakdownFromLive } from "./salaryBreakdown";
 import { payrollService } from "../../services/payrollService";
 import { advanceService } from "../../services/advanceService";
 import { staffService } from "../../services/staffService";
@@ -19,6 +20,10 @@ import MonthSummaryPanel from "./MonthSummaryPanel";
 import { eachDateInRange } from "../../utils/dateUtils";
 import EditDayModal from "./EditDayModal";
 import BulkMarkMonthModal from "./BulkMarkMonthModal.jsx";
+import LateComingPanel, { LateDayBadge } from "./LateComingPanel";
+import { lateDeductionService } from "../../services/lateDeductionService";
+import { isSuperAdminUser } from "../../utils/authUser";
+import { leftBeforeConfirmation } from "../../utils/staffStatus";
 import {
   LEGEND,
   TOOLTIP_STATUSES,
@@ -33,8 +38,10 @@ import {
   MiniMonth,
   SalaryBoxContent,
   LeaveBalanceLine,
+  ReferralLine,
 } from "./calendarGridPieces";
 
+import { formatMoney } from "../../utils/brand";
 // Annual view badge: the total PAID LEAVE amount the company has given this
 // staff member this year (Jan up to the current month, or the whole year for
 // a past year). Only the paid-leave value is counted — NOT the salary and
@@ -42,11 +49,7 @@ import {
 // calendar payload's `paidLeaveValue[month]` (backend
 // services/leaveEncashment.js): PL days credited that month × that month's
 // per-day salary — the same "PL Amt" shown on each month card.
-const fmtINR = (n) =>
-  `₹${Number(n || 0).toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+const fmtINR = (n) => formatMoney(n);
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -199,6 +202,9 @@ const MRCalendarView = ({
   const [editingDay, setEditingDay] = useState(null);
   const [editBusy, setEditBusy] = useState(false);
   const [bulkTarget, setBulkTarget] = useState(null); // { month } | null
+  // Late-coming switches (month / single date) — super admin only.
+  const canEditLate = isSuperAdminUser();
+  const [lateBusy, setLateBusy] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const openBulkForMonth = useCallback((m) => setBulkTarget({ month: m }), []);
 
@@ -215,6 +221,22 @@ const MRCalendarView = ({
   // Advances given to this staff member, grouped by "YYYY-M" (month 0-11)
   // of the advance date — the Monthly view's summary panel shows the ones
   // given in the month on the selected tab. Rejected advances are ignored.
+  // Referral organisation (set by the super admin in Staff Details).
+  const [staffReferral, setStaffReferral] = useState(staff.referral || null);
+  useEffect(() => {
+    if (!staff.staffId) return;
+    let cancelled = false;
+    staffService
+      .getById(staff.staffId)
+      .then((res) => {
+        if (!cancelled) setStaffReferral(res.data?.data?.referral || null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [staff.staffId, refreshKey]);
+
   const [advancesByMonth, setAdvancesByMonth] = useState({});
   const [advancesLoading, setAdvancesLoading] = useState(false);
   useEffect(() => {
@@ -306,6 +328,7 @@ const MRCalendarView = ({
         // A saved doc has no day-by-day list, only the attendanceInfo counts.
         byMonth[monthIdx] = {
           ...rec,
+          ...breakdownFromSaved(rec),
           payableDays: rec.attendanceInfo?.payableDays,
           totalDays: rec.attendanceInfo?.totalWorkingDays,
           unpaidDays: rec.attendanceInfo?.unpaidLeaves,
@@ -361,6 +384,7 @@ const MRCalendarView = ({
             const savedNet = Number(saved.netSalary || 0);
             byMonth[month] = {
               ...saved,
+              ...breakdownFromLive(data),
               netSalary: liveRounded,
               savedNetSalary: savedNet,
               differsFromSaved: Math.abs(liveRounded - savedNet) >= 0.01,
@@ -369,11 +393,15 @@ const MRCalendarView = ({
               totalDays: data.totalDaysInMonth,
               unpaidDays: data.unpaidLeaveDays,
               leaveDeduction: data.leaveDeduction ?? 0,
+              lateDeduction: data.lateDeduction ?? 0,
+              lateDeductionEnabled: data.lateDeductionEnabled !== false,
               unmarkedDates: data.unmarkedDates,
+              halfDayDates: data.halfDayDates,
             };
             return;
           }
           byMonth[month] = {
+            ...breakdownFromLive(data),
             netSalary: data.finalSalary ?? data.netSalary,
             isEstimate: true,
             payableDays: data.payableDays,
@@ -381,6 +409,8 @@ const MRCalendarView = ({
             totalDays: data.totalDaysInMonth,
             unpaidDays: data.unpaidLeaveDays,
             leaveDeduction: data.leaveDeduction ?? 0,
+              lateDeduction: data.lateDeduction ?? 0,
+              lateDeductionEnabled: data.lateDeductionEnabled !== false,
             // Dates counted unpaid because the calendar had NO attendance,
             // leave or holiday record for them at all — as opposed to an
             // explicit approved Unpaid leave. If a date shows up here that
@@ -390,6 +420,8 @@ const MRCalendarView = ({
             // which is the most common cause of a much-lower-than-expected
             // month.
             unmarkedDates: data.unmarkedDates,
+            // Half Days with nothing covering the other half — 0.5 day each.
+            halfDayDates: data.halfDayDates,
           };
         }
       });
@@ -569,6 +601,54 @@ const MRCalendarView = ({
     }
   };
 
+  // Super admin: deduct / don't deduct late coming for the whole month.
+  const handleLateMonthToggle = async (deductLate) => {
+    setLateBusy(true);
+    try {
+      const period = `${year}-${String(month + 1).padStart(2, "0")}`;
+      const res = await lateDeductionService.setMonth({ staffId: staff.staffId, period, deductLate });
+      showToast("success", res.data?.message || "Late-coming setting saved");
+      await fetchCalendar(); // salary reloads with the calendar
+    } catch (err) {
+      showToast("error", err.response?.data?.message || "Could not change the late-coming setting");
+    } finally {
+      setLateBusy(false);
+    }
+  };
+
+  // Super admin: waive / deduct late coming for one date.
+  const handleLateDayToggle = async (date, waived) => {
+    setLateBusy(true);
+    try {
+      const res = await lateDeductionService.setDay({ staffId: staff.staffId, date, waived });
+      showToast("success", res.data?.message || `${date} updated`);
+      await fetchCalendar();
+    } catch (err) {
+      showToast("error", err.response?.data?.message || `Could not update ${date}`);
+    } finally {
+      setLateBusy(false);
+    }
+  };
+
+  // Super admin: lunch not taken / minutes of lunch taken for one date.
+  const handleLateLunchChange = async (date, lunchSkipped, lunchTakenMinutes = null) => {
+    setLateBusy(true);
+    try {
+      const res = await lateDeductionService.setLunch({
+        staffId: staff.staffId,
+        date,
+        lunchSkipped,
+        lunchTakenMinutes,
+      });
+      showToast("success", res.data?.message || `${date} lunch updated`);
+      await fetchCalendar();
+    } catch (err) {
+      showToast("error", err.response?.data?.message || `Could not update lunch for ${date}`);
+    } finally {
+      setLateBusy(false);
+    }
+  };
+
   const handleDeleteAttendance = async () => {
     const isAnnual = viewMode === "annual";
     const info = isAnnual
@@ -732,7 +812,12 @@ const MRCalendarView = ({
               (Taken — Paid: {calendar?.paidCount ?? 0}, Sick: {calendar?.sickCount ?? 0}, Casual: {calendar?.casualCount ?? 0},
               Unpaid: {calendar?.unpaidCount ?? 0}, Swap: {calendar?.swapCount ?? 0})
             </span>
-            <LeaveBalanceLine balance={calendar?.leaveBalance} />
+            <LeaveBalanceLine balance={calendar?.leaveBalance} leftBeforeConfirmation={leftBeforeConfirmation(staff)} />
+            <ReferralLine
+              referral={staffReferral}
+              joinKey={staff.date ? new Date(new Date(staff.date).getTime() + 19800000).toISOString().slice(0, 10) : null}
+              small={isAnnualView}
+            />
             <span className={isAnnualView ? "block text-emerald-700 font-medium text-xs mt-0.5" : "block text-emerald-700 font-medium text-sm mt-1"}>
               Total Working Days: {calendar?.totalWorkingDays ?? 0}{" "}
               {/* <span className="text-gray-400 font-normal">
@@ -931,7 +1016,16 @@ const MRCalendarView = ({
                         ½
                       </span>
                     )}
-                    {hasTooltip && <DayTooltip info={info} />}
+                    {info?.late && (
+                      <LateDayBadge late={info.late} monthEnabled={calendar?.lateSummary?.enabled !== false} />
+                    )}
+                    {hasTooltip && (
+                      <DayTooltip
+                        info={info}
+                        align={(monthFirstDow + day - 1) % 7 <= 1 ? "left" : (monthFirstDow + day - 1) % 7 >= 5 ? "right" : "center"}
+                        below={Math.floor((monthFirstDow + day - 1) / 7) === 0}
+                      />
+                    )}
                   </div>
                 );
               })}
@@ -947,8 +1041,22 @@ const MRCalendarView = ({
               advancesLoading={advancesLoading}
               isRelievingMonth={isRelieved && year === maxYear && month === maxMonth}
               finalPaidLeave={finalPaidLeave}
+              referral={staffReferral}
+              joinDate={staff.date}
+              period={`${year}-${String(month + 1).padStart(2, "0")}`}
+              adminView
             />
             </div>
+
+            <LateComingPanel
+              summary={calendar?.lateSummary || null}
+              monthLabel={`${MONTHS[month]} ${year}`}
+              canEdit={canEditLate}
+              busy={lateBusy}
+              onToggleMonth={handleLateMonthToggle}
+              onToggleDay={handleLateDayToggle}
+              onChangeLunch={handleLateLunchChange}
+            />
           </>
         )}
 

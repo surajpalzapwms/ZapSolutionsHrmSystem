@@ -10,9 +10,11 @@ import {
   Receipt,
   LayoutDashboard,
   FileText,
+  FileCheck,
   CalendarPlus,
   CalendarCheck,
   ShieldCheck,
+  Settings as SettingsIcon,
   LogOut,
 } from "lucide-react";
 import BrandLogo from "./BrandLogo";
@@ -41,6 +43,7 @@ const NAV_ITEMS = [
   { label: "Staff", icon: Users, path: "/staffmemberLayout/staffmember", adminOnly: true, tabKey: "staff" },
   { label: "Staff Basic Payroll", icon: Wallet, path: "/hrmlayout/staffbasicpayroll", adminOnly: true, tabKey: "staffbasicpayroll" },
    { label: "Payroll", icon: DollarSign, path: "/hrmlayout/payroll", adminOnly: true, tabKey: "payroll" },
+  { label: "Final Settlement", icon: FileCheck, path: "/hrmlayout/finalsettlement", adminOnly: true, tabKey: "finalsettlement" },
   { label: "Advance", icon: Wallet, path: "/hrmlayout/advance", adminOnly: true, tabKey: "advance" },
     { label: "Attendance", icon: Clock, path: "/hrmlayout/leaveattendance", adminOnly: true, tabKey: "attendance", countKey: "presentToday" },
       { label: "Leave", icon: CalendarCheck, path: "/hrmlayout/leave", adminOnly: true, tabKey: "leave" },
@@ -54,6 +57,9 @@ const NAV_ITEMS = [
   // Admin: review every staff member's resignation requests (submitted from
   // either the website or the mobile app) and approve/reject them.
 
+  // Logo, company details, payroll currency. Super admin always; an admin
+  // only when the "Settings" tab was granted on the Permissions screen.
+  { label: "Settings", icon: SettingsIcon, path: "/hrmlayout/settings", adminOnly: true, tabKey: "settings" },
   // Super-admin only — manage which tabs each admin account can see.
   { label: "Admin Permissions", icon: ShieldCheck, path: "/hrmlayout/permissions", adminOnly: true, superAdminOnly: true },
   // Staff self-service — each screen only ever shows the logged-in
@@ -69,7 +75,9 @@ const NAV_ITEMS = [
   // admin open any of their calendars). `staffOnly` keeps this off the
   // admin/super-admin sidebar, where the fuller Attendance screen already
   // covers this and more.
-  { label: "Attendance", icon: Clock, path: "/hrmlayout/my-attendance", adminOnly: false, staffOnly: true, countKey: "presentToday" },
+  // No "present today" count here: only the super admin / admins see how
+  // many people are logged in (on the admin Attendance entry above).
+  { label: "Attendance", icon: Clock, path: "/hrmlayout/my-attendance", adminOnly: false, staffOnly: true },
   { label: "My Payslips", icon: FileText, path: "/hrmlayout/my-payslips", adminOnly: false, hideForSuperAdmin: true },
   { label: "My Resignation", icon: LogOut, path: "/hrmlayout/my-resignation", adminOnly: false, hideForSuperAdmin: true },
 ];

@@ -8,7 +8,10 @@ import { computeFinalSettlement } from "../services/settlementService.js";
 import BirthdayWish from "../models/BirthdayWish.js";
 import StaffDocument from "../models/StaffDocument.js";
 import { purgeStaff, previewStaffPurge } from "../services/staffPurge.js";
-import { photoUrlFor, withPhotoUrl } from "../utils/fileSigning.js";
+import { photoUrlFor, userPhotoUrlFor } from "../utils/fileSigning.js";
+import { isAdminRole } from "../config/permissions.js";
+import { getReferral, istPeriodOf } from "../utils/referral.js";
+import { refreshPendingPayrollForPeriod } from "./payrollController.js";
 
 // Truthy-string-or-boolean helper — checkboxes serialize as real booleans
 // from JSON but as "true"/"on" strings from some form submissions.
@@ -257,8 +260,55 @@ export const getMyStaffProfile = asyncHandler(async (req, res) => {
   }
 
   staff = await autoAdvanceStaff(staff);
-  res.status(200).json({ success: true, data: withPhotoUrl(staff) });
+  res.status(200).json({ success: true, data: await resolvePhotoUrls(staff) });
 });
+
+
+// Adds `photoUrl` to a staff object (or each one in an array) so the website
+// and the app show the SAME photo that was uploaded from either of them.
+// Besides the record's own photo it also finds:
+//   - a photo that exists but whose record has no `photoUpdatedAt` (repaired),
+//   - a photo uploaded on another staff record with the same e-mail,
+//   - a photo uploaded to the login account before the staff record existed.
+// null = no photo (initials are shown).
+const resolvePhotoUrls = async (input) => {
+  const isArray = Array.isArray(input);
+  const list = (isArray ? input : [input])
+    .filter(Boolean)
+    .map((s) => (typeof s.toObject === "function" ? s.toObject() : { ...s }));
+  if (list.length) {
+    try {
+      await fillBirthdayPhotos(list);
+    } catch {
+      // a photo lookup problem must never break the staff list
+    }
+    const needAccount = list.filter((s) => !s.photoUpdatedAt && !s._photoOwner && s.email);
+    let userByEmail = new Map();
+    if (needAccount.length) {
+      try {
+        const users = await User.find({
+          email: { $in: [...new Set(needAccount.map((s) => String(s.email).toLowerCase().trim()))] },
+          photoUpdatedAt: { $ne: null },
+        })
+          .select("_id email photoUpdatedAt")
+          .lean();
+        userByEmail = new Map(users.map((u) => [String(u.email).toLowerCase().trim(), u]));
+      } catch {
+        // ignore
+      }
+    }
+    for (const s of list) {
+      let url = photoUrlFor(s._photoOwner || s);
+      if (!url && s.email) {
+        const u = userByEmail.get(String(s.email).toLowerCase().trim());
+        if (u) url = userPhotoUrlFor(u);
+      }
+      s.photoUrl = url || null;
+      delete s._photoOwner;
+    }
+  }
+  return isArray ? list : list[0];
+};
 
 /** GET /api/staff — list all staff members */
 export const getAllStaff = asyncHandler(async (req, res) => {
@@ -277,11 +327,31 @@ export const getAllStaff = asyncHandler(async (req, res) => {
   }
 
   let staff = await Staff.find(filter).sort({ createdAt: -1 }).lean();
+  staff = hideOthersReferral(staff, req.user);
   // Move anyone whose internship / probation period has elapsed on to the
   // next status (Internship -> Probation -> Confirmation) automatically, so
   // the list always reflects today's real status.
   staff = await autoAdvanceStaffList(staff);
-  res.json({ success: true, count: staff.length, data: withPhotoUrl(staff) });
+  res.json({ success: true, count: staff.length, data: await resolvePhotoUrls(staff) });
+});
+
+/**
+ * GET /api/staff/left — lean list of staff who have LEFT (status Relieved,
+ * relieving date reached), for the Final Settlement dropdown. Only the few
+ * fields the page needs, no photo lookups and no auto-advance writes — the
+ * full /api/staff list does both, which made that page slow to open.
+ * Disabled staff stay hidden, same as every other dropdown.
+ */
+export const getLeftStaff = asyncHandler(async (req, res) => {
+  const staff = await Staff.find({
+    status: "Relieved",
+    relievingDate: { $ne: null, $lte: new Date() },
+    enabled: { $ne: false },
+  })
+    .select("staffName staffId date confirmationDate relievingDate status enabled")
+    .sort({ relievingDate: -1, staffName: 1 })
+    .lean();
+  res.json({ success: true, count: staff.length, data: staff });
 });
 
 /** GET /api/staff/teams — distinct list of team names */
@@ -297,8 +367,9 @@ export const getStaffById = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
   let staff = await Staff.findById(req.params.id).lean();
   if (!staff) throw new ApiError(404, "Staff member not found");
+  staff = hideOthersReferral([staff], req.user)[0];
   staff = await autoAdvanceStaff(staff);
-  res.json({ success: true, data: withPhotoUrl(staff) });
+  res.json({ success: true, data: await resolvePhotoUrls(staff) });
 });
 
 /** GET /api/staff/:id/password — admin-only: the password as originally entered */
@@ -924,6 +995,16 @@ export const updateStaff = asyncHandler(async (req, res) => {
 
   if (!updated) throw new ApiError(404, "Staff member not found");
 
+  // Joining date changed on a staff member with a referral: the first month
+  // (where the commission is taken) moved, so re-run both months' pending
+  // payroll — the old month loses the commission, the new month gets it.
+  if (updateData.date !== undefined && getReferral(updated)) {
+    await refreshReferralMonths(updated._id, [
+      istPeriodOf(existingStaff.date),
+      istPeriodOf(updated.date),
+    ]);
+  }
+
   // Keep the linked User (login) document in sync. Look it up by whatever
   // email the User was actually created under (the staff's email at the
   // time login access was granted) — that's `originalEmail` if it existed,
@@ -1164,8 +1245,12 @@ const istToday = () => {
 
 // Next birthday on/after `today` for a DOB saved as UTC midnight.
 const nextBirthday = (dateOfBirth, today) => {
-  const dob = new Date(dateOfBirth);
-  if (isNaN(dob.getTime())) return null;
+  const raw = new Date(dateOfBirth);
+  if (isNaN(raw.getTime())) return null;
+  // Read the day/month in India time: a DOB saved as UTC midnight AND one
+  // saved as India midnight (18:30 UTC the day before) both give the right
+  // day, so the Wish button opens at 12:00 midnight on the real birthday.
+  const dob = new Date(raw.getTime() + 5.5 * 3600 * 1000);
   const m = dob.getUTCMonth();
   const d = dob.getUTCDate();
   let next = new Date(today.getFullYear(), m, d);
@@ -1361,4 +1446,111 @@ export const getMyBirthdayWishes = asyncHandler(async (req, res) => {
       photoUrl: w.fromStaff ? photoUrlFor(w.fromStaff) : null,
     })),
   });
+});
+
+
+// ── Referral organisation + first-month commission ─────────────────────
+// Only the super admin sets this. Admins see it; a regular staff member
+// sees only their OWN referral (on /api/staff/me and in salary figures).
+function hideOthersReferral(list, user) {
+  if (isAdminRole(user?.role)) return list;
+  const me = String(user?.email || "").toLowerCase().trim();
+  return list.map((s) => {
+    if (!s?.referral) return s;
+    if (me && String(s.email || "").toLowerCase().trim() === me) return s;
+    const { referral, ...rest } = s;
+    return rest;
+  });
+}
+
+const referralResponse = (staff) => {
+  const r = getReferral(staff);
+  return r
+    ? {
+        ...r,
+        defaultPeriod: istPeriodOf(staff.date),
+      }
+    : { organizationName: "", percent: 0, period: null, defaultPeriod: istPeriodOf(staff.date) };
+};
+
+// Re-run any still-pending payroll for the months affected, so the saved
+// figure follows the new commission straight away.
+const refreshReferralMonths = async (staffId, periods) => {
+  for (const period of [...new Set(periods.filter(Boolean))]) {
+    try {
+      await refreshPendingPayrollForPeriod(staffId, period);
+    } catch {
+      // a refresh problem must never block saving the referral
+    }
+  }
+};
+
+/** PUT /api/staff/:id/referral — super admin only
+ *  { organizationName: "Navkar", commissionPercent: 25,
+ *    remarks? }  — always taken from the FIRST (joining) month only */
+export const setStaffReferral = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const organizationName = String(req.body.organizationName || "").trim();
+  const commissionPercent = Math.round(Number(req.body.commissionPercent) * 100) / 100;
+  const remarks = String(req.body.remarks || "").trim();
+
+  if (!organizationName) throw new ApiError(400, "Organisation name is required");
+  if (organizationName.length > 120) throw new ApiError(400, "Organisation name is too long");
+  if (!Number.isFinite(commissionPercent) || commissionPercent <= 0 || commissionPercent > 100) {
+    throw new ApiError(400, "Commission % must be more than 0 and at most 100");
+  }
+
+  const staff = await Staff.findById(req.params.id);
+  if (!staff) throw new ApiError(404, "Staff member not found");
+  const oldPeriod = getReferral(staff)?.period || null;
+  // Older records may still carry a different month chosen earlier — that
+  // month's pending payroll must lose the commission too.
+  const oldCustomPeriod = staff.referral?.commissionPeriod || null;
+
+  staff.referral = {
+    organizationName,
+    commissionPercent,
+    commissionPeriod: "", // first (joining) month only
+    remarks,
+    updatedBy: req.user?.id || req.user?._id,
+    updatedByName:
+      req.user?.name ||
+      [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ") ||
+      req.user?.email ||
+      "",
+    updatedAt: new Date(),
+  };
+  await staff.save();
+
+  const newPeriod = getReferral(staff)?.period || null;
+  await refreshReferralMonths(staff._id, [oldPeriod, oldCustomPeriod, newPeriod]);
+
+  res.json({
+    success: true,
+    message: `Referral saved — ${commissionPercent}% of the first month (${newPeriod || "joining month"}) salary goes to ${organizationName}`,
+    data: referralResponse(staff.toObject()),
+  });
+});
+
+/** DELETE /api/staff/:id/referral — super admin only */
+export const clearStaffReferral = asyncHandler(async (req, res) => {
+  assertValidId(req.params.id);
+  const staff = await Staff.findById(req.params.id);
+  if (!staff) throw new ApiError(404, "Staff member not found");
+  const oldPeriod = getReferral(staff)?.period || null;
+  // Older records may still carry a different month chosen earlier — that
+  // month's pending payroll must lose the commission too.
+  const oldCustomPeriod = staff.referral?.commissionPeriod || null;
+  staff.referral = {
+    organizationName: "",
+    commissionPercent: 0,
+    commissionPeriod: "",
+    remarks: "",
+    updatedBy: req.user?.id || req.user?._id,
+    updatedByName: req.user?.name || req.user?.email || "",
+    updatedAt: new Date(),
+  };
+  await staff.save();
+  await refreshReferralMonths(staff._id, [oldPeriod, oldCustomPeriod]);
+  res.json({ success: true, message: "Referral removed", data: referralResponse(staff.toObject()) });
 });

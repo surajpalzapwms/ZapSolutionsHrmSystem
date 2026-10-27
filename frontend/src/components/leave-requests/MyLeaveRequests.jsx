@@ -4,6 +4,8 @@ import {
   CalendarPlus,
   CalendarX2,
   Check,
+  Minus,
+  Plus,
   History,
   Info,
   Send,
@@ -20,7 +22,7 @@ import { leavePolicyService } from "../../services/leavePolicyService";
 import { showToast } from "../../utils/toast";
 import { getTodayDate } from "../../utils/dateUtils";
 import LeaveStatusBadge from "./LeaveStatusBadge";
-import LeaveHistoryModal from "./LeaveHistoryModal";
+import LeaveHistoryModal from "./Leavehistorymodal";
 import {
   groupRequests,
   sortGroupsNewestFirst,
@@ -69,12 +71,21 @@ const BALANCE_TILES = [
   { key: "paid", label: "Paid", icon: Wallet, iconClass: "bg-emerald-50 text-emerald-600" },
 ];
 
+const TRACKED_TYPES = ["sick", "casual", "paid"];
+// Order the days of a multi-type range are filled in: the earliest working
+// days use the first type, and so on. Sick/Casual first (they reset every
+// year), then Paid, then Swap, with Unpaid always last.
+const TYPE_ORDER = ["sick", "casual", "paid", "swapleave", "unpaid"];
+const sortByTypeOrder = (types) =>
+  TYPE_ORDER.filter((t) => types.includes(t));
+
 const emptyForm = {
   duration: "single",
   leaveDate: "",
   endDate: "",
   reason: "",
-  leaveType: "unpaid",
+  // Selected leave types. Single Day → exactly one; Date Range → one or more.
+  leaveTypes: ["unpaid"],
   isHalfDay: false,
 };
 
@@ -83,13 +94,80 @@ const DURATION_OPTIONS = [
   { value: "range", label: "Date Range" },
 ];
 
-// Balance-aware leave type picker. Renders each type as a checkbox pill —
-// only one can be checked at a time (a single day off is exactly one type),
-// but checkboxes are what was asked for instead of a plain dropdown, and
-// they let each option show its own remaining-balance count and grey out
-// once that balance hits zero. Unpaid/Swap never carry a balance so they're
-// always selectable.
-const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType }) => {
+// Working days between two YYYY-MM-DD dates, inclusive, skipping Sundays
+// (the backend also skips public holidays and already-requested days).
+const countWorkingDays = (from, to) => {
+  if (!from || !to || to < from) return 0;
+  let n = 0;
+  let cur = new Date(`${from}T00:00:00Z`);
+  const last = new Date(`${to}T00:00:00Z`);
+  for (let g = 0; cur <= last && g < 366; g++) {
+    if (cur.getUTCDay() !== 0) n++;
+    cur = new Date(cur.getTime() + 86400000);
+  }
+  return n;
+};
+
+const usableBalance = (type, remainingByType) =>
+  TRACKED_TYPES.includes(type)
+    ? Math.max(0, Math.floor(remainingByType?.[type] ?? 0))
+    : Infinity;
+
+// Split `total` working days across the selected types.
+//  - Tracked types (Sick/Casual/Paid) default to as many days as their
+//    balance allows, capped by what's left.
+//  - Unpaid (if selected) soaks up whatever is left over; Swap defaults to 0
+//    when Unpaid is also selected, otherwise it soaks up the rest.
+//  - `overrides` are the counts the person typed in themselves.
+// Any days still uncovered are returned as `fallbackUnpaid` (the server
+// books them as Unpaid).
+const buildAllocation = (types, total, remainingByType, overrides) => {
+  const ordered = sortByTypeOrder(types);
+  const absorber = ordered.includes("unpaid")
+    ? "unpaid"
+    : ordered.includes("swapleave")
+      ? "swapleave"
+      : null;
+  let left = total;
+  const days = {};
+  for (const t of ordered) {
+    if (t === absorber) continue;
+    const cap = Math.min(left, usableBalance(t, remainingByType));
+    const auto = TRACKED_TYPES.includes(t) ? cap : 0;
+    const want = overrides[t] ?? auto;
+    days[t] = Math.max(0, Math.min(want, cap));
+    left -= days[t];
+  }
+  if (absorber) {
+    days[absorber] = left;
+    left = 0;
+  }
+  return { ordered, days, absorber, fallbackUnpaid: left };
+};
+
+// Suggest which types to tick for a range: draw down Sick → Casual → Paid
+// until the days are covered, then Unpaid for anything left.
+const suggestRangeTypes = (total, remainingByType) => {
+  const out = [];
+  let left = total;
+  for (const t of TRACKED_TYPES) {
+    if (left <= 0) break;
+    const bal = usableBalance(t, remainingByType);
+    if (bal > 0) {
+      out.push(t);
+      left -= bal;
+    }
+  }
+  if (left > 0 || out.length === 0) out.push("unpaid");
+  return out;
+};
+
+// Balance-aware leave type picker rendered as checkbox pills.
+// Single Day: picking one replaces the previous (a day is one type).
+// Date Range (`multiple`): any number can be ticked at the same time and the
+// days are split between them. Tracked types grey out once their balance is
+// used up; Unpaid/Swap are always selectable.
+const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType, multiple }) => {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
       {LEAVE_TYPE_OPTIONS.map((opt) => {
@@ -98,11 +176,20 @@ const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType }) => {
           : null;
         // Only grey a tracked type out once its own balance is fully used up
         // (0 or less) — someone with exactly 0.5 remaining can still take
-        // that as a half day. Unpaid and Swap are never balance-tracked, so
-        // they're always selectable.
+        // that as a half day.
         const isDisabled =
           opt.trackedKey && remaining != null && remaining <= 0;
-        const isChecked = value === opt.value;
+        const isChecked = value.includes(opt.value);
+        const toggle = () => {
+          if (isDisabled) return;
+          if (!multiple) return onChange([opt.value]);
+          if (isChecked) {
+            // Keep at least one type selected.
+            if (value.length > 1) onChange(value.filter((v) => v !== opt.value));
+          } else {
+            onChange(sortByTypeOrder([...value, opt.value]));
+          }
+        };
         return (
           <label
             key={opt.value}
@@ -117,13 +204,12 @@ const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType }) => {
               className="sr-only"
               checked={isChecked}
               disabled={isDisabled}
-              onChange={() => {
-                if (isDisabled) return;
-                onChange(opt.value);
-              }}
+              onChange={toggle}
             />
             <span
-              className={`absolute top-2 right-2 flex items-center justify-center w-4 h-4 rounded-full border ${
+              className={`absolute top-2 right-2 flex items-center justify-center w-4 h-4 border ${
+                multiple ? "rounded" : "rounded-full"
+              } ${
                 isChecked
                   ? "bg-blue-600 border-blue-600"
                   : "bg-white border-gray-300"
@@ -152,6 +238,81 @@ const LeaveTypeCheckboxGroup = ({ value, onChange, remainingByType }) => {
   );
 };
 
+// Per-type day split for a Date Range with several types ticked.
+const AllocationEditor = ({ allocation, total, remainingByType, onChangeDays }) => {
+  const { ordered, days, absorber, fallbackUnpaid } = allocation;
+  return (
+    <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50/60 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-gray-600">
+          Split {total} working day{total === 1 ? "" : "s"}
+        </p>
+        <p className="text-[11px] text-gray-400">Sundays &amp; holidays are skipped</p>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {ordered.map((t) => {
+          const isAbsorber = t === absorber;
+          const cap = usableBalance(t, remainingByType);
+          const val = days[t] ?? 0;
+          return (
+            <li key={t} className="flex items-center gap-3">
+              <span
+                className={`w-20 px-1.5 py-px rounded text-[11px] font-medium text-center ${
+                  TYPE_CHIP[t] || TYPE_CHIP.unpaid
+                }`}
+              >
+                {LEAVE_TYPE_OPTIONS.find((o) => o.value === t)?.label.replace(" Leave", "")}
+              </span>
+              {isAbsorber ? (
+                <span className="text-sm font-semibold text-gray-800 w-[5.5rem] text-center">
+                  {val}
+                </span>
+              ) : (
+                <div className="flex items-center rounded-lg border border-gray-200 bg-white">
+                  <button
+                    type="button"
+                    className="p-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30"
+                    disabled={val <= 0}
+                    onClick={() => onChangeDays(t, val - 1)}
+                    aria-label={`Fewer ${t} days`}
+                  >
+                    <Minus size={13} />
+                  </button>
+                  <span className="w-7 text-center text-sm font-semibold text-gray-800">
+                    {val}
+                  </span>
+                  <button
+                    type="button"
+                    className="p-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30"
+                    disabled={val >= cap || val >= total}
+                    onClick={() => onChangeDays(t, val + 1)}
+                    aria-label={`More ${t} days`}
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+              )}
+              <span className="text-[11px] text-gray-400">
+                {isAbsorber
+                  ? "remaining days"
+                  : TRACKED_TYPES.includes(t)
+                    ? `max ${cap}`
+                    : ""}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      {fallbackUnpaid > 0 && (
+        <p className="text-[11px] text-amber-600 mt-2">
+          {fallbackUnpaid} day{fallbackUnpaid === 1 ? "" : "s"} not covered by the
+          selected types will be booked as Unpaid.
+        </p>
+      )}
+    </div>
+  );
+};
+
 const MyLeaveRequests = () => {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -163,6 +324,8 @@ const MyLeaveRequests = () => {
   // their choice with the auto-suggestion whenever the date changes.
   const [typeTouched, setTypeTouched] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Day counts the person set by hand in the range split, e.g. { casual: 2 }.
+  const [allocOverrides, setAllocOverrides] = useState({});
 
   const fetchRequests = useCallback(async () => {
     try {
@@ -238,7 +401,7 @@ const MyLeaveRequests = () => {
   // picked, handleChange's own re-suggestion takes over).
   useEffect(() => {
     if (typeTouched || form.leaveDate) return;
-    setForm((prev) => ({ ...prev, leaveType: suggestLeaveType(prev.leaveDate) }));
+    setForm((prev) => ({ ...prev, leaveTypes: [suggestLeaveType(prev.leaveDate)] }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [balance]);
 
@@ -248,35 +411,60 @@ const MyLeaveRequests = () => {
       const next = { ...prev, [name]: value };
       // Re-run the suggestion whenever the leave date changes, as long as
       // the person hasn't manually overridden the type themselves.
-      if (name === "leaveDate" && !typeTouched) {
-        next.leaveType = suggestLeaveType(value, prev.isHalfDay ? 0.5 : 1);
+      const range = next.duration === "range";
+      if (!typeTouched && (name === "leaveDate" || name === "endDate" || name === "duration")) {
+        if (range) {
+          const total = countWorkingDays(next.leaveDate, next.endDate);
+          if (total > 0) next.leaveTypes = suggestRangeTypes(total, remainingByType);
+        } else {
+          next.leaveTypes = [suggestLeaveType(next.leaveDate, prev.isHalfDay ? 0.5 : 1)];
+        }
       }
       // A half day only exists for a single-day request.
       if (name === "duration" && value === "range") {
         next.isHalfDay = false;
         next.endDate = prev.endDate || "";
       }
+      // Back to a single day → only one type can apply.
+      if (name === "duration" && value === "single" && next.leaveTypes.length > 1) {
+        next.leaveTypes = [next.leaveTypes[0]];
+      }
       return next;
     });
-    setErrors((prev) => ({ ...prev, [name]: undefined }));
+    if (name === "leaveDate" || name === "endDate" || name === "duration") {
+      setAllocOverrides({});
+    }
+    setErrors((prev) => ({ ...prev, [name]: undefined, leaveTypes: undefined }));
   };
 
   const handleHalfDayChange = (checked) => {
     setForm((prev) => ({
       ...prev,
       isHalfDay: checked,
-      leaveType: typeTouched
-        ? prev.leaveType
-        : suggestLeaveType(prev.leaveDate, checked ? 0.5 : 1),
+      leaveTypes: typeTouched
+        ? prev.leaveTypes
+        : [suggestLeaveType(prev.leaveDate, checked ? 0.5 : 1)],
     }));
   };
 
-  const handleTypeChange = (leaveType) => {
+  const handleTypeChange = (leaveTypes) => {
     setTypeTouched(true);
-    setForm((prev) => ({ ...prev, leaveType }));
+    setAllocOverrides({});
+    setForm((prev) => ({ ...prev, leaveTypes }));
+    setErrors((prev) => ({ ...prev, leaveTypes: undefined }));
   };
 
   const isRange = form.duration === "range";
+
+  const rangeWorkingDays = isRange
+    ? countWorkingDays(form.leaveDate, form.endDate)
+    : 0;
+  const allocation = useMemo(
+    () =>
+      buildAllocation(form.leaveTypes, rangeWorkingDays, remainingByType, allocOverrides),
+    [form.leaveTypes, rangeWorkingDays, remainingByType, allocOverrides],
+  );
+  const showSplit = isRange && rangeWorkingDays > 0 && form.leaveTypes.length > 1;
 
   // Group multi-day requests, newest first, and only list the latest few on
   // the page — the complete list lives in the history modal.
@@ -295,6 +483,9 @@ const MyLeaveRequests = () => {
       else if (form.endDate < form.leaveDate)
         next.endDate = "End date must be on or after start date";
     }
+    if (isRange && form.leaveDate && form.endDate && rangeWorkingDays === 0)
+      next.endDate = "The selected range has no working days";
+    if (!form.leaveTypes.length) next.leaveTypes = "Pick a leave type";
     if (!form.reason.trim()) next.reason = "Please provide a reason";
     setErrors(next);
     return Object.keys(next).length === 0;
@@ -307,9 +498,18 @@ const MyLeaveRequests = () => {
     try {
       // The backend reads fromDate/toDate for a range (the old payload
       // sent `endDate`, so every range collapsed into a single day).
+      // A range with several types sends an ordered day split, e.g.
+      // [{ sick: 1 }, { casual: 3 }, { paid: 5 }] — the backend fills the
+      // earliest working days with the first type, and so on.
+      const allocations = showSplit
+        ? allocation.ordered
+            .map((t) => ({ leaveType: t, days: allocation.days[t] || 0 }))
+            .filter((a) => a.days > 0)
+        : null;
       const payload = {
         reason: form.reason,
-        leaveType: form.leaveType,
+        leaveType: form.leaveTypes[0],
+        ...(allocations && allocations.length ? { allocations } : {}),
         ...(isRange
           ? { fromDate: form.leaveDate, toDate: form.endDate }
           : { leaveDate: form.leaveDate, isHalfDay: !!form.isHalfDay }),
@@ -323,6 +523,7 @@ const MyLeaveRequests = () => {
       );
       setForm(emptyForm);
       setTypeTouched(false);
+      setAllocOverrides({});
       await fetchRequests();
       await fetchBalance(); // reflect the newly-used day(s) right away
     } catch (err) {
@@ -335,7 +536,16 @@ const MyLeaveRequests = () => {
     }
   };
 
-  const selectedType = LEAVE_TYPE_OPTIONS.find((o) => o.value === form.leaveType);
+  const selectedLabel = sortByTypeOrder(form.leaveTypes)
+    .map((t) => {
+      const label = LEAVE_TYPE_OPTIONS.find((o) => o.value === t)?.label;
+      if (!label) return null;
+      return showSplit
+        ? `${allocation.days[t] ?? 0} ${label.replace(" Leave", "")}`
+        : label;
+    })
+    .filter(Boolean)
+    .join(" + ");
   const isPastDate = form.leaveDate && form.leaveDate <= getTodayDate();
   const maxDate = new Date(new Date().getFullYear() + 1, 11, 31);
 
@@ -461,12 +671,31 @@ const MyLeaveRequests = () => {
             <div>
               <label className="text-sm font-medium text-gray-700 mb-1.5 block">
                 Leave Type
+                {isRange && (
+                  <span className="ml-1.5 text-xs font-normal text-gray-400">
+                    (tick more than one to split the days)
+                  </span>
+                )}
               </label>
               <LeaveTypeCheckboxGroup
-                value={form.leaveType}
+                value={form.leaveTypes}
                 onChange={handleTypeChange}
                 remainingByType={remainingByType}
+                multiple={isRange}
               />
+              {errors.leaveTypes && (
+                <p className="text-xs text-red-500 mt-1">{errors.leaveTypes}</p>
+              )}
+              {showSplit && (
+                <AllocationEditor
+                  allocation={allocation}
+                  total={rangeWorkingDays}
+                  remainingByType={remainingByType}
+                  onChangeDays={(t, n) =>
+                    setAllocOverrides((prev) => ({ ...prev, [t]: n }))
+                  }
+                />
+              )}
               <p className="flex items-start gap-1.5 text-xs text-gray-400 mt-2">
                 <Info size={13} className="mt-px flex-shrink-0" />
                 {isPastDate
@@ -494,11 +723,11 @@ const MyLeaveRequests = () => {
           <div className="px-5 py-3 border-t border-gray-100 bg-gray-50/60 rounded-b-2xl flex items-center justify-between gap-3">
             <p className="text-xs text-gray-500 truncate">
               {isRange ? "Date range" : form.isHalfDay ? "Half day" : "Full day"}
-              {selectedType && (
+              {selectedLabel && (
                 <>
                   {" · "}
                   <span className="font-medium text-gray-700">
-                    {selectedType.label}
+                    {selectedLabel}
                   </span>
                 </>
               )}

@@ -3,8 +3,29 @@ import React from "react";
 import { Pencil, Trash2, Power, History, FileText } from "lucide-react";
 import Table from "../common/Table";
 import Pagination from "../common/Pagination";
+import StaffAvatar from "../common/StaffAvatar";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
-import { getDisplayStatus } from "../../utils/staffStatus";
+import { getDisplayStatus, hasLeftOrganization } from "../../utils/staffStatus";
+
+// Small on/off switch used next to "Left" in the Status column.
+const Switch = ({ checked, onChange, title }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    title={title}
+    onClick={onChange}
+    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-300 ${
+      checked ? "bg-emerald-500" : "bg-gray-300"
+    }`}
+  >
+    <span
+      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+        checked ? "translate-x-4" : "translate-x-0.5"
+      }`}
+    />
+  </button>
+);
 
 const StaffList = ({
   staff,
@@ -27,7 +48,10 @@ const StaffList = ({
       header: "Name",
       align: "text-left",
       render: (row) => (
-        <span className="font-medium text-gray-800">{row.staffName}</span>
+        <div className="flex items-center gap-2.5">
+          <StaffAvatar name={row.staffName} photoUrl={row.photoUrl} size={34} />
+          <span className="font-medium text-gray-800">{row.staffName}</span>
+        </div>
       ),
     },
     { key: "contactNo", header: "Contact" },
@@ -47,6 +71,31 @@ const StaffList = ({
           Confirmation: "bg-green-100 text-green-700",
           Relieved: "bg-orange-100 text-orange-700",
         };
+        // Staff who have left: "Left" + an Enable/Disable switch in the same
+        // cell. Enabled = still shown in every tab and dropdown; disabled =
+        // shown only here on the Staff tab.
+        if (hasLeftOrganization(row)) {
+          const on = row.enabled !== false;
+          return (
+            <div className="inline-flex items-center gap-2">
+              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
+                Left
+              </span>
+              <Switch
+                checked={on}
+                onChange={() => onToggleStatus(row._id, on)}
+                title={
+                  on
+                    ? "Enabled — shown in every tab and dropdown. Click to disable (Staff tab only)."
+                    : "Disabled — shown only in the Staff tab. Click to enable everywhere."
+                }
+              />
+              <span className={`text-[11px] font-medium ${on ? "text-emerald-600" : "text-gray-500"}`}>
+                {on ? "Enabled" : "Disabled"}
+              </span>
+            </div>
+          );
+        }
         const shownStatus = getDisplayStatus(row);
         return (
           <span
@@ -62,7 +111,10 @@ const StaffList = ({
     {
       key: "enabled",
       header: "Active",
-      render: (row) => (
+      // For staff who have left, the switch lives next to "Left" instead.
+      render: (row) => hasLeftOrganization(row) ? (
+        <span className="text-gray-300">—</span>
+      ) : (
         <button
           onClick={() => onToggleStatus(row._id, row.enabled)}
           className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${

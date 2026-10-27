@@ -1,3 +1,58 @@
+# Disabled staff, Enable/Disable from the app, staff photos (14 Oct 2026)
+
+## Disabled staff no longer show anywhere except the Staff tab
+- `/api/hrm/attendance` (`/`, `/today`, `/yesterday`) now drops disabled staff too. The mobile app's
+  "today" list used this path and it was the one list the filter did not cover.
+- `?includeHidden=true` (used only by the Staff tab) is honoured for admin / super admin only.
+  A plain staff login asking for it gets the normal filtered list.
+- A disabled account that still has the app open gets `403 STAFF_INACTIVE` on its next request
+  (already the case); the app now signs out on it (see Mobile/CHANGES.md).
+
+## Photos uploaded in the app now show on the website
+- `GET /api/staff`, `GET /api/staff/:id` and `GET /api/staff/me` return `photoUrl` for every staff
+  member using the same lookup as the birthday list: a photo that exists but whose record has no
+  `photoUpdatedAt` is repaired, a photo saved on another record with the same e-mail is found, and a
+  photo saved on the login account before the staff record existed is used.
+- `GET /api/hrm/leaves/staff-summary` rows (Attendance tab list) now include `photoUrl`.
+- Any write to `/api/documents` (upload / remove photo) clears the cached summaries so the new photo
+  appears straight away.
+
+# Letters, resignation date & birthday wishes (13 Oct 2026)
+
+## HR letters (backend + website + app)
+- All six letters (Offer, Joining, Confirmation, Termination, Leaving, Experience) now open the
+  "Generate letter" details form and are made by the server — the app shows/downloads exactly
+  the same PDF as the website.
+- Termination letter: an admin / super admin can pick ANY staff member and generate it. The
+  form asks for the last working day (any date: past, today or future) and an optional reason.
+  Once generated, it unlocks in that staff member's app.
+- Leaving / Experience letters: the last working day comes from the staff member's resignation
+  (approved, else pending). With no resignation, HR picks any date — today or a future date for
+  someone still working. Approving a resignation later moves an already generated letter to the
+  approved date. Wording switches to future tense ("will be relieved on …") for a future date.
+- Letter date for these three = the last working day once it has come; today while it is still
+  in the future.
+- Mobile app: letter tiles are never locked for admin / super admin — they open the Generate
+  Letters screen (pick staff, generate, view, download, withdraw). Staff tiles stay locked until
+  HR generates the letter.
+
+## Birthday wishes (app + website)
+- On the birthday itself, from 12:00 midnight India time, every colleague gets a "🎉 Wish"
+  button (Home "Birthday today" card + Upcoming Birthdays list in the app; dashboard card on the
+  website). It opens a party modal (balloons, cake, confetti, gifts) with ready-made wishes and
+  a box to write any message (300 chars).
+- The birthday person sees how many colleagues wished them and can read every message.
+- Card reloads itself at midnight. DOB is read in India time so the day is never off by one.
+
+## Speed
+- Letter status no longer queries resignations; admin app skips the "my letters" call.
+- App letters screen loads the staff member's letters and history once (switching type is instant).
+- Birthday photos: full staff list fetched at most every 5 min instead of on every Home focus.
+
+## Fix
+- frontend: `Leavehistorymodal.jsx` renamed to `LeaveHistoryModal.jsx` (the imports use that
+  name; the build failed on Linux/Vercel).
+
 # HRM – cleanup & performance changes
 
 ## Why it was slow

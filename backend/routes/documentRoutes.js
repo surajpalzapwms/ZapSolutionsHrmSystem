@@ -12,6 +12,7 @@ import {
   deleteStaffDocument,
   getDocumentSummary,
   getPhotoFile,
+  getUserPhotoFile,
   getDocumentFile,
 } from "../controllers/documentController.js";
 
@@ -19,6 +20,7 @@ const router = express.Router();
 
 // Signed links — checked by signature, not by login (used by <Image>/<img>).
 router.get("/photo/:staffId", getPhotoFile);
+router.get("/user-photo/:userId", getUserPhotoFile);
 router.get("/file/:docId", getDocumentFile);
 
 router.use(protect);

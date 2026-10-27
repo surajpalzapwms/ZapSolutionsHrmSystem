@@ -38,3 +38,28 @@ export const getDisplayStatus = (staff) => {
   }
   return staff.status || "Probation";
 };
+
+// "YYYY-MM-DD" of the India calendar day a date value falls on. A plain
+// "YYYY-MM-DD" string is returned as-is.
+const istDayKey = (value) => {
+  if (!value) return null;
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+};
+
+// Left the organization BEFORE the confirmation date (e.g. relieved during
+// probation / internship). Such a person was never confirmed, so the
+// confirmation date must not be shown anywhere — it is only the date that
+// WOULD have applied. Stored data is never changed; this only decides what
+// to display. Same rule the final-settlement statement uses on the backend
+// (confirmation date later than the relieving date = never confirmed).
+// Works with a staff record or the staff form's values.
+export const leftBeforeConfirmation = (staff) => {
+  if (!staff || staff.status !== "Relieved") return false;
+  const relieveKey = istDayKey(staff.relievingDate);
+  const confirmKey = istDayKey(staff.confirmationDate);
+  if (!relieveKey || !confirmKey) return false;
+  return confirmKey > relieveKey;
+};

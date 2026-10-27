@@ -2,6 +2,8 @@
 // times every query, and plugins only apply to models compiled after it.
 import { requestTiming } from "./utils/requestTiming.js";
 import dns from "dns";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // Some networks/ISPs' default DNS doesn't handle SRV records properly,
 // which breaks mongodb+srv:// lookups. But hardcoding public resolvers
@@ -64,6 +66,8 @@ import counselingRoutes from "./routes/counseling.js";
 import presenceRoutes from "./routes/presence.js";
 import letterRoutes from "./routes/letterRoutes.js";
 import documentRoutes from "./routes/documentRoutes.js";
+import lateDeductionRoutes from "./routes/lateDeduction.js";
+import settingsRoutes from "./routes/settingsRoutes.js";
 import { runPresenceSweep } from "./services/presence.js";
 import { checkSingleCompanyData } from "./services/singleCompanyCheck.js";
 import { reloadOfficeNetworks } from "./utils/officeNetwork.js";
@@ -72,8 +76,12 @@ import {
   invalidateCalendarHealOnWrite,
   markCalendarDataChanged,
 } from "./services/calendarHealCache.js";
-import { runCacheWarmers } from "./services/responseCache.js";
+import { runCacheWarmers, invalidateResponseCache } from "./services/responseCache.js";
 import { clearAuthUserCache } from "./middleware/auth.js";
+import {
+  clearStaffVisibilityCache,
+  hideDisabledStaffRows,
+} from "./services/staffVisibility.js";
 
 const app = express();
 
@@ -187,14 +195,68 @@ app.use(["/api/hrm", "/api/staff"], invalidateCalendarHealOnWrite);
 app.use(["/api/auth", "/api/hrm", "/api/staff"], (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
     clearAuthUserCache();
-    res.on("finish", clearAuthUserCache);
+    clearStaffVisibilityCache();
+    res.on("finish", () => {
+      clearAuthUserCache();
+      clearStaffVisibilityCache();
+    });
   }
   next();
 });
 
+// A new / changed / removed profile photo changes `photoUrl` in cached lists
+// (e.g. the leave staff summary), so drop those cached answers right away.
+app.use("/api/documents", (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.on("finish", () => invalidateResponseCache());
+  }
+  next();
+});
+
+// Disabled staff (Enable/Disable toggle on the Staff tab) appear ONLY on the
+// Staff tab: their rows are dropped from these lists and dropdown sources.
+// Attendance lists also drop days after a left staff member's last working
+// day. See services/staffVisibility.js.
+app.use(
+  "/api/staff",
+  hideDisabledStaffRows({ ownIdPaths: ["/"] }),
+);
+app.use(
+  "/api/hrm/leaves",
+  hideDisabledStaffRows({
+    paths: ["/", "/staff-summary", "/requests/pending", "/requests/all"],
+    attendancePaths: [
+      "/attendance",
+      "/attendance/today",
+      "/attendance/yesterday",
+      "/attendance/open-today",
+    ],
+  }),
+);
+app.use(
+  "/api/hrm/payroll",
+  hideDisabledStaffRows({ paths: ["/", "/pending-summary"] }),
+);
+app.use(
+  "/api/hrm/staff-basic-payrolls",
+  hideDisabledStaffRows({ paths: ["/", "/staff/available"] }),
+);
+app.use("/api/hrm/advances", hideDisabledStaffRows({ paths: ["/"] }));
+// Admin attendance lists (the mobile app's "today" list uses these).
+app.use(
+  "/api/hrm/attendance",
+  hideDisabledStaffRows({ attendancePaths: ["/", "/today", "/yesterday"] }),
+);
+app.use("/api/hrm/resignations", hideDisabledStaffRows({ paths: ["/all"] }));
+app.use("/api/hrm/leave-policy", hideDisabledStaffRows({ paths: ["/balances"] }));
+app.use("/api/hrm/letters", hideDisabledStaffRows({ paths: ["/issued"] }));
+app.use("/api/documents", hideDisabledStaffRows({ paths: ["/summary"] }));
+
 // Routes
 app.use("/api/auth", authRoutes);
+app.use("/api/settings", settingsRoutes);
 app.use("/api/hrm/payroll", payrollRoutes);
+app.use("/api/hrm/late-deduction", lateDeductionRoutes);
 app.use("/api/expenses", expenseRoutes);
 app.use("/api/hrm/attendance", attendanceRoutes);
 app.use("/api/hrm/holidays", holidayRoutes);
@@ -224,6 +286,14 @@ app.get("/", (req, res) => {
     message:
       "HRM backend API is running. See /health for a health check, and /api/... for endpoints.",
   });
+});
+
+// Public privacy policy page (linked from the Google Play store listing).
+// Open: https://<your-domain>/privacy-policy
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const privacyPolicyFile = path.join(__dirname, "public", "privacy-policy.html");
+app.get(["/privacy-policy", "/privacy-policy.html", "/privacy"], (req, res) => {
+  res.sendFile(privacyPolicyFile);
 });
 
 // Health check

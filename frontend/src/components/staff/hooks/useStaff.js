@@ -7,7 +7,7 @@ import { useSearch } from "../../../hooks/useSearch";
 import { showToast } from "../../../utils/toast";
 import { ITEMS_PER_PAGE } from "../../../utils/constants";
 import { useCurrentStaffOnly } from "../../../hooks/useCurrentStaffFilter";
-import { isCurrentStaff } from "../../../utils/staffStatus";
+import { hasLeftOrganization, isCurrentStaff } from "../../../utils/staffStatus";
 
 export const useStaff = () => {
   const [staff, setStaff] = useState([]);
@@ -23,8 +23,9 @@ export const useStaff = () => {
   const fetchStaff = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await staffService.getAll();
-      console.log("Fetched staff:", res.data?.data || res.data || []);
+      // The Staff tab is the one place that lists EVERYONE, including staff
+      // who were disabled (those are hidden from every other screen).
+      const res = await staffService.getAllIncludingHidden();
       setStaff(res.data?.data || res.data || []);
     } catch (err) {
       showToast("error", err.response?.data?.message || "Failed to load staff");
@@ -112,17 +113,30 @@ export const useStaff = () => {
     }
   }, [selected, fetchStaff]);
 
+  // Enable / disable. Updated in place right away (no full reload of the
+  // list), and put back if the server refuses.
   const toggleStatus = useCallback(
     async (id, isActive) => {
+      const next = !isActive;
+      const member = staff.find((s) => s._id === id);
+      const left = member ? hasLeftOrganization(member) : false;
+      setStaff((prev) => prev.map((s) => (s._id === id ? { ...s, enabled: next } : s)));
       try {
-        await staffService.toggleStatus(id, !isActive);
-        showToast("success", `Staff ${!isActive ? "activated" : "deactivated"}`);
-        await fetchStaff();
+        await staffService.toggleStatus(id, next);
+        showToast(
+          "success",
+          left
+            ? next
+              ? `${member?.staffName || "Staff"} enabled — shown in every tab and dropdown again`
+              : `${member?.staffName || "Staff"} disabled — now shown only in the Staff tab`
+            : `Staff ${next ? "activated" : "deactivated"}`,
+        );
       } catch (err) {
+        setStaff((prev) => prev.map((s) => (s._id === id ? { ...s, enabled: isActive } : s)));
         showToast("error", err.response?.data?.message || "Failed to update status");
       }
     },
-    [fetchStaff]
+    [staff]
   );
 
   return {

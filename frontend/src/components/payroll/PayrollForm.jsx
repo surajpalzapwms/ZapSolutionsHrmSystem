@@ -12,17 +12,15 @@ import TextArea from "../common/TextArea";
 import Dropdown from "../common/Dropdown";
 import Button from "../common/Button";
 
+import { formatMoney as formatMoneyBrand } from "../../utils/brand";
 const paymentMethodOptions = [
   { value: "bank", label: "Bank Transfer" },
   { value: "cash", label: "Cash" },
   { value: "cheque", label: "Cheque" },
 ];
 
-const formatMoney = (value) =>
-  (Number(value) || 0).toLocaleString(undefined, {
-    style: "currency",
-    currency: "INR",
-  });
+// Uses the currency chosen in Settings.
+const formatMoney = (value) => formatMoneyBrand(value);
 
 // Every part already paid for the selected month.
 const PaymentHistory = ({ payments }) => {
@@ -369,11 +367,61 @@ const PayrollForm = ({
             </div>
           </div>
           <div>
+            <span className="text-gray-500">Per Day Salary</span>
+            <div className="font-semibold text-gray-800">
+              {formatMoney(summary.perDaySalary)}
+              <span className="text-xs font-normal text-gray-400">
+                {" "}(÷ {summary.totalDaysInMonth} days)
+              </span>
+            </div>
+          </div>
+          <div>
             <span className="text-gray-500">Leave Deduction</span>
             <div className="font-semibold text-gray-800">
               {formatMoney(summary.leaveDeduction)}
+              {Number(summary.unpaidLeaveDays) > 0 && (
+                <span className="text-xs font-normal text-gray-400">
+                  {" "}({summary.unpaidLeaveDays} day{summary.unpaidLeaveDays === 1 ? "" : "s"})
+                </span>
+              )}
             </div>
           </div>
+          {Number(summary.referralCommission) > 0 && (
+            <div className="col-span-2 rounded-md bg-purple-50 border border-purple-200 px-3 py-2">
+              <span className="text-purple-700">
+                Referral Commission — {summary.referralOrganization} ({Number(summary.referralPercent).toFixed(2)}% of first month)
+              </span>
+              <div className="font-semibold text-purple-900">
+                {formatMoney(summary.referralCommission)}
+                {summary.referralCommissionCapped && (
+                  <span className="ml-1 text-xs font-normal text-orange-600">
+                    (limited to salary earned; full {formatMoney(summary.referralCommissionFull)})
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="col-span-2 rounded-md bg-blue-50 border border-blue-200 px-3 py-2">
+            <span className="text-blue-700">Salary for this month</span>
+            <div className="font-semibold text-blue-900">
+              {formatMoney(summary.basicSalary)}
+              {Number(summary.referralCommission) > 0 && ` − ${formatMoney(summary.referralCommission)}`}
+              {Number(summary.leaveDeduction) > 0 && ` − ${formatMoney(summary.leaveDeduction)}`}
+              {Number(summary.lateDeduction) > 0 && ` − ${formatMoney(summary.lateDeduction)}`}
+              {" = "}
+              {formatMoney(summary.netSalary)}
+            </div>
+          </div>
+          {Number(summary.lateDeduction) > 0 || summary.lateDeductionEnabled === false ? (
+            <div>
+              <span className="text-gray-500">Late Coming Deduction</span>
+              <div className={`font-semibold ${Number(summary.lateDeduction) > 0 ? "text-red-600" : "text-gray-500"}`}>
+                {summary.lateDeductionEnabled === false
+                  ? "Not deducted this month"
+                  : `${formatMoney(summary.lateDeduction)} (${summary.lateMinutes || 0} min)`}
+              </div>
+            </div>
+          ) : null}
           <div>
             <span className="text-gray-500">Outstanding Advance</span>
             <div className="font-semibold text-gray-800">

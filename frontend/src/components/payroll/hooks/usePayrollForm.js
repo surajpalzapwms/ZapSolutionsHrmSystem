@@ -11,6 +11,7 @@ import {
 } from "../../../utils/validation";
 import { getCurrentMonth } from "../../../utils/dateUtils";
 
+import { formatMoney } from "../../../utils/brand";
 // ── Month helpers ("YYYY-MM") ─────────────────────────────────────────
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export const formatPeriod = (period) => {
@@ -28,8 +29,7 @@ const periodOfDate = (value) => {
   if (isNaN(d.getTime())) return null;
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
-const money = (n) =>
-  `₹${(Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+const money = (n) => formatMoney(n);
 const recordEmployeeId = (r) => String(r?.employeeId?._id ?? r?.employeeId ?? "");
 
 // Today as "YYYY-MM-DD" in the user's LOCAL time (toISOString() is UTC, so

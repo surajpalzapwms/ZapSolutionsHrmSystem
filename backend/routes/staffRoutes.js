@@ -25,11 +25,14 @@ import {
   importStaff,
   getMyStaffProfile,
   getFinalSettlement,
+  getLeftStaff,
   getStaffPassword,
   setStaffPassword,
   getUpcomingBirthdays,
   wishBirthday,
   getMyBirthdayWishes,
+  setStaffReferral,
+  clearStaffReferral,
 } from "../controllers/staffController.js";
 
 const router = express.Router();
@@ -113,6 +116,9 @@ const staffBodyRules = [
 
 router.get("/", getAllStaff);
 router.get("/teams", getTeams);
+// Lean list of staff who have left — Final Settlement page dropdown.
+// Must stay above "/:id".
+router.get("/left", allowAdminOnly, requireTabAccess("finalsettlement"), getLeftStaff);
 // Must come before "/:id" (which requires a Mongo ObjectId) or "me" would
 // get swallowed by that route and rejected as an invalid id.
 router.get("/me", getMyStaffProfile);
@@ -203,6 +209,31 @@ router.put(
   ],
   validateRequest,
   toggleStaffStatus,
+);
+
+// Referral organisation + first-month commission — SUPER ADMIN only.
+router.put(
+  "/:id/referral",
+  allowSuperAdminOnly,
+  writeOperationLimiter,
+  [
+    param("id").isMongoId().withMessage("Invalid staff ID"),
+    body("organizationName").trim().notEmpty().withMessage("Organisation name is required").isLength({ max: 120 }),
+    body("commissionPercent")
+      .isFloat({ gt: 0, max: 100 })
+      .withMessage("Commission % must be more than 0 and at most 100"),
+    body("remarks").optional().trim().isLength({ max: 300 }),
+  ],
+  validateRequest,
+  setStaffReferral,
+);
+router.delete(
+  "/:id/referral",
+  allowSuperAdminOnly,
+  writeOperationLimiter,
+  [param("id").isMongoId().withMessage("Invalid staff ID")],
+  validateRequest,
+  clearStaffReferral,
 );
 
 router.put(

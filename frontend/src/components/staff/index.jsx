@@ -13,7 +13,7 @@ import Modal from "../common/Modal";
 import CurrentStaffToggle from "../common/CurrentStaffToggle";
 import { showToast } from "../../utils/toast";
 import { confirmStaffDelete } from "../../utils/confirmationDialog";
-import { staffService } from "../../services/staffService";
+import { staffService, clearStaffListCache } from "../../services/staffService";
 import { getCurrentUser, isSuperAdminUser, hasTabAccess } from "../../utils/authUser";
 
 const Staff = () => {
@@ -209,6 +209,12 @@ const Staff = () => {
         isOpen={!!viewingStaff}
         onClose={() => setViewingStaff(null)}
         staff={viewingStaff}
+        onPhotoChanged={(photoUrl) => {
+          // Show the new photo in the header and in the table straight away.
+          setViewingStaff((cur) => (cur ? { ...cur, photoUrl } : cur));
+          clearStaffListCache();
+          fetchStaff();
+        }}
       />
 
       <StaffLettersModal

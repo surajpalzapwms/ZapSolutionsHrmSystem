@@ -8,9 +8,17 @@ import { showToast } from "../../utils/toast";
 import { confirmDialog } from "../../utils/confirmationDialog";
 import LetterDetailsModal from "./LetterDetailsModal";
 
-// These open the details form (name, Mr./Ms., designation, salary…) before
-// generating; the others are generated straight away.
-const FORM_LETTERS = ["offer", "joining", "confirmation"];
+// Every letter opens the details form before generating:
+//   Offer / Joining / Confirmation — name, Mr./Ms., designation, salary…
+//   Termination — works for ANY staff member: pick the last working day
+//                 (past, today or a future date).
+//   Leaving / Experience — the last working day comes from the staff
+//                 member's resignation; otherwise pick any date.
+const FORM_LETTERS = ["offer", "joining", "confirmation", "termination", "leaving", "experience"];
+// These need a last working day chosen in the form, so they can only be
+// previewed / downloaded once generated.
+const RELIEVING_LETTERS = ["termination", "leaving", "experience"];
+const canOpen = (l) => l.eligible && (l.issued || !RELIEVING_LETTERS.includes(l.type));
 
 const fmt = (d) =>
   d
@@ -179,14 +187,17 @@ const StaffLettersModal = ({ isOpen, onClose, staff }) => {
                       )}
                     </span>
                   ) : l.eligible ? (
-                    <span className="text-gray-500">Not generated — disabled for staff</span>
+                    <span className="text-gray-500">
+                      Not generated — disabled for staff
+                      {RELIEVING_LETTERS.includes(l.type) ? " · you'll choose the last working day" : ""}
+                    </span>
                   ) : (
                     <span className="text-amber-600">{l.reason}</span>
                   )}
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {l.eligible && (
+                {canOpen(l) && (
                   <button
                     type="button"
                     onClick={() => download(l)}
@@ -228,7 +239,7 @@ const StaffLettersModal = ({ isOpen, onClose, staff }) => {
                     <FilePlus2 size={14} /> Generate
                   </button>
                 )}
-                {l.eligible && (
+                {canOpen(l) && (
                   <button
                     type="button"
                     onClick={() => openPreview(l)}

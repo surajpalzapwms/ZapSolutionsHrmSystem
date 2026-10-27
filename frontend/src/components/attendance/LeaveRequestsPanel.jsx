@@ -13,7 +13,7 @@ import Button from "../common/Button";
 import Spinner from "../common/Spinner";
 import { attendanceService } from "../../services/attendanceService";
 import { showToast } from "../../utils/toast";
-import LeaveHistoryModal from "../leave-requests/LeaveHistoryModal";
+import LeaveHistoryModal from "../leave-requests/Leavehistorymodal";
 import {
   groupRequests,
   groupTypeLabel,

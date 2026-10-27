@@ -1,13 +1,10 @@
 // src/utils/numberUtils.js
+import { formatMoney } from "./brand";
+
+// Amount in the company's payroll currency (Settings → Payroll currency).
 export const formatCurrency = (amount) => {
   const num = typeof amount === "string" ? parseFloat(amount) : amount;
-  if (isNaN(num) || num === null || num === undefined) return "$0.00";
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "INR",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(num);
+  return formatMoney(Number.isNaN(num) || num == null ? 0 : num);
 };
 
 export const parseCurrency = (value) => {

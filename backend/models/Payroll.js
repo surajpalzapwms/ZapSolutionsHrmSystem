@@ -98,6 +98,19 @@ const payrollSchema = new mongoose.Schema(
       min: 0,
     },
 
+    // Referral organisation commission taken from this month's salary
+    // (first month only — see utils/referral.js). 0 when none.
+    referralCommission: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    referral: {
+      organizationName: String,
+      percent: Number,
+      period: String,
+    },
+
     // Unpaid balance carried over from the previous period (partial payment)
     previousPendingAmount: {
       type: Number,
@@ -206,6 +219,15 @@ const payrollSchema = new mongoose.Schema(
       effectiveDays: Number,
       leaveDeduction: Number,
       leaveDeductionExact: Number,
+      payableDays: Number,
+      // Late coming (services/lateDeduction.js): ₹ deducted, chargeable
+      // minutes after the 15-min buffer and make-up time, days charged, and
+      // whether the super admin left the month switch on.
+      lateDeduction: Number,
+      lateMinutes: Number,
+      lateDays: Number,
+      lateDeductionEnabled: Boolean,
+      referralCommission: Number,
       isFull: Boolean,
     },
   },

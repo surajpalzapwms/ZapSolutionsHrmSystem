@@ -392,6 +392,28 @@ const StaffSalaryModal = ({ isOpen, onClose, staffId, staffName, onChanged }) =>
                                     Advance / Attendance
                                   </p>
                                   <ul className="space-y-1">
+                                    {Number(row.attendanceInfo?.leaveDeduction) > 0 && (
+                                      <li className="flex justify-between">
+                                        <span className="text-gray-600">
+                                          Leave deduction ({row.attendanceInfo?.unpaidLeaves || 0} day
+                                          {Number(row.attendanceInfo?.unpaidLeaves) === 1 ? "" : "s"})
+                                        </span>
+                                        <span className="text-red-500">
+                                          {formatCurrency(row.attendanceInfo.leaveDeduction)}
+                                        </span>
+                                      </li>
+                                    )}
+                                    {Number(row.referralCommission) > 0 && (
+                                      <li className="flex justify-between">
+                                        <span className="text-purple-700">
+                                          {row.referral?.organizationName || "Referral"} commission
+                                          {row.referral?.percent ? ` (${Number(row.referral.percent).toFixed(2)}%)` : ""}
+                                        </span>
+                                        <span className="text-purple-700">
+                                          {formatCurrency(row.referralCommission)}
+                                        </span>
+                                      </li>
+                                    )}
                                     <li className="flex justify-between">
                                       <span className="text-gray-600">
                                         Advance deducted

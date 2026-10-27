@@ -1,10 +1,13 @@
 // src/utils/validation.js
+import { isValidPhone } from "./phone";
 export const validateEmail = (email) => {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 };
 
+// Phone numbers are stored as "+<country code> <number>" (see utils/phone.js);
+// valid = correct length for the selected country.
 export const validatePhone = (phone) => {
-  return /^[0-9]{10,15}$/.test(phone);
+  return isValidPhone(phone);
 };
 
 export const validatePassword = (password) => {

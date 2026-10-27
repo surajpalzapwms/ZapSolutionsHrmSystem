@@ -2,6 +2,8 @@
 import React, { useState } from "react";
 import Modal from "../common/Modal";
 import Select from "../common/Select";
+import { useBrand } from "../../contexts/BrandContext";
+import { currencySymbol } from "../../utils/brand";
 
 const AddStaffBasicPayrollModal = ({
   isOpen,
@@ -9,6 +11,8 @@ const AddStaffBasicPayrollModal = ({
   onAdd,
   availableStaff,
 }) => {
+  useBrand(); // re-render when the currency changes in Settings
+  const symbol = currencySymbol();
   const [formData, setFormData] = useState({
     staffId: "",
     basicSalary: "",
@@ -135,13 +139,14 @@ const AddStaffBasicPayrollModal = ({
               Basic Salary *
             </label>
             <div className="relative">
-              <span className="absolute left-3 top-2 text-gray-600">₹</span>
+              <span className="absolute left-3 top-2 text-gray-600">{symbol}</span>
               <input
                 type="number"
                 name="basicSalary"
                 value={formData.basicSalary}
                 onChange={handleChange}
-                className={`w-full pl-8 pr-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                style={{ paddingLeft: `${16 + symbol.length * 9}px` }}
+                className={`w-full pr-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                   errors.basicSalary ? "border-red-500" : "border-gray-300"
                 }`}
                 placeholder="Enter basic salary"

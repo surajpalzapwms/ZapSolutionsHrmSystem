@@ -22,7 +22,8 @@
 // instead of all doing the same heavy work in parallel (the dashboard and
 // the Payroll tab often ask for the pending summary at the same moment).
 
-import { getCompanyId } from "../utils/tenant.js";
+import { getCompanyId, runWithCompany } from "../utils/tenant.js";
+import { listRegisteredCompanies } from "../utils/companyContext.js";
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_ENTRIES = 500;
@@ -43,32 +44,62 @@ export const registerCacheWarmer = (fn) => {
   warmers.push(fn);
 };
 
-export const runCacheWarmers = () => {
+// Warmers run inside each company (all active companies at start-up, only
+// the company that changed after a write).
+const warmCompany = (companyId) =>
   warmers.forEach((fn) => {
-    Promise.resolve()
-      .then(fn)
-      .catch((err) =>
-        console.error("[responseCache] Warm-up failed:", err?.message || err),
-      );
+    runWithCompany(companyId, () =>
+      Promise.resolve()
+        .then(fn)
+        .catch((err) => console.error("[responseCache] Warm-up failed:", err?.message || err)),
+    );
   });
+
+export const runCacheWarmers = (companyIds = null) => {
+  const ids =
+    companyIds ||
+    listRegisteredCompanies()
+      .filter((c) => c.isActive !== false)
+      .map((c) => String(c._id));
+  ids.forEach(warmCompany);
 };
 
-const scheduleWarmers = () => {
-  if (!warmers.length) return;
+const pendingWarm = new Set();
+const scheduleWarmers = (companyId) => {
+  if (!warmers.length || !companyId) return;
+  pendingWarm.add(String(companyId));
   if (warmTimer) clearTimeout(warmTimer);
   warmTimer = setTimeout(() => {
     warmTimer = null;
-    runCacheWarmers();
+    const ids = [...pendingWarm];
+    pendingWarm.clear();
+    runCacheWarmers(ids);
   }, WARM_DELAY_MS);
   // Don't keep the process alive just for this timer.
   warmTimer.unref?.();
 };
 
-export const invalidateResponseCache = () => {
+/** A write is starting: results computed before it must not be cached. */
+export const noteWriteStarting = () => {
   generation++;
-  store.clear();
-  inFlight.clear();
-  scheduleWarmers();
+};
+
+/**
+ * Drops cached answers. With a company id only THAT company's entries go
+ * (a save in one company never slows down the others); without one,
+ * everything is cleared.
+ */
+export const invalidateResponseCache = (companyId = getCompanyId()) => {
+  generation++;
+  if (!companyId) {
+    store.clear();
+    inFlight.clear();
+    return;
+  }
+  const prefix = `${companyId}::`;
+  for (const k of store.keys()) if (k.startsWith(prefix)) store.delete(k);
+  for (const k of inFlight.keys()) if (k.startsWith(prefix)) inFlight.delete(k);
+  scheduleWarmers(companyId);
 };
 
 /**

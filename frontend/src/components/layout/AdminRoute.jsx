@@ -6,6 +6,7 @@ import {
   isAdminUser,
   isSuperAdminUser,
   hasTabAccess,
+  isCompanyLevelUser,
 } from "../../utils/authUser";
 
 /**
@@ -20,7 +21,9 @@ import {
  * Omit it for routes any admin can reach
  * (e.g. the Permissions screen itself is superAdminOnly instead).
  */
-const AdminRoute = ({ children, requiredTab, superAdminOnly = false }) => {
+// `companyLevelOnly`: the super admin or THE company admin — a branch admin is
+// bounced (they cannot manage branches or invite admins).
+const AdminRoute = ({ children, requiredTab, superAdminOnly = false, companyLevelOnly = false }) => {
   const user = getCurrentUser();
   const admin = isAdminUser(user);
   const superAdmin = isSuperAdminUser(user);
@@ -29,6 +32,9 @@ const AdminRoute = ({ children, requiredTab, superAdminOnly = false }) => {
     return <Navigate to="/hrmlayout" replace />;
   }
   if (superAdminOnly && !superAdmin) {
+    return <Navigate to="/hrmlayout" replace />;
+  }
+  if (companyLevelOnly && !isCompanyLevelUser(user)) {
     return <Navigate to="/hrmlayout" replace />;
   }
   if (requiredTab && !hasTabAccess(requiredTab, user)) {

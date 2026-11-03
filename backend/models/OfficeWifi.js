@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 // An office Wi-Fi saved by NAME (SSID), set by an admin from the website's
 // "Office Wi-Fi settings" modal or the mobile app's office card.

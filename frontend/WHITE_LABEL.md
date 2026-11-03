@@ -1,18 +1,42 @@
-# Multi-company (website)
+# White label (multi-company) — website
 
-- Super admin logs in → **Companies** page (`/companies`): every company as a card.
-  Add / edit / deactivate / delete, or **click one to open it**.
-- Once a company is open, the whole website shows only that company
-  (`X-Company-Id` is sent with every request, see `src/utils/api.js`).
-  Sidebar shows the open company with **Switch company**.
-- Admins and staff never see this: they log in straight into their own company.
-- Branding (logo / colours) is per company: Companies page for the basics,
-  *Company Branding* in the sidebar for everything else.
-- Login page for a company: `https://your-site/login?company=<link name>`.
-- Admins now also send attendance heartbeats (the super admin never does).
-- Office Wi-Fi box has a manual "add IP / range" field (for IPv6 networks).
-- Office Wi-Fi is set per company in the Add / Edit company form (with a
-  "Use this computer's network" button), and each card shows whether one is set.
-- Tabs per company: tick them in the Add / Edit company form. Sidebar, dashboard cards, quick links, routes and
-  the staff self-service screens (My Payslips, My Attendance, My Leave, My Resignation) follow the company's tabs.
-  The saved login is refreshed from `/api/auth/me` on every page load, so changes apply without logging in again.
+## Super admin
+- Logs in at `/login` → **Companies** page (`/companies`) when there is more
+  than one company (with exactly one, it opens straight away).
+- **Add company**: name + country (India 🇮🇳, Saudi Arabia 🇸🇦, Qatar 🇶🇦, Other)
+  and, optionally, the company's first admin login. The country sets the
+  currency, time zone, weekly off days and which registration numbers are
+  asked for.
+- Each company card: logo, country, currency, login link (copy), staff /
+  admin counts, staff limit, **profile completeness**; buttons to **Open**,
+  open the **Company Profile**, manage **admin logins**, **edit** (link name,
+  tabs, staff limit, own domain, office Wi-Fi), **activate / deactivate**,
+  delete (empty companies only).
+- Once a company is open, the whole website works on that company only
+  (`X-Company-Id` header, `src/utils/api.js`). The sidebar shows the open
+  company with a **switch** button.
+
+## Company admin
+- Logs in at their company's link: `https://your-site/login?company=<link name>`
+  (their logo, colours and Arabic name are shown). Staff can log in with
+  their Staff ID there too.
+- **Company Profile** (sidebar, needs the *Settings* tab): Branding · Address &
+  contact · Registration & tax (fields depend on the country) · Country &
+  payroll (currency, number format, time zone, weekly off days) · Letters &
+  payslips (signatory, signature, stamp). Live preview on the right.
+
+## What follows the company automatically
+- Logo, colours, browser-tab icon and title, currency everywhere.
+- Weekly off days and time zone in calendars, leave and attendance screens
+  (`isWeeklyOffDow`, `companyTimeZone`, `tzOffsetMs` in `src/utils/brand.js`).
+- Payroll allowance / deduction lists (PF / ESI / TDS in India; GOSI / SANED
+  in Saudi Arabia; GRSIA in Qatar) — `payrollTypesFor()` in `src/utils/constants.js`.
+- Tabs the company doesn't have are hidden (sidebar + routes) for everyone.
+- A deactivated company is logged out with a message on the login page.
+
+## Files
+- `src/components/companies/Companies.jsx` — super admin company list.
+- `src/components/settings/Settings.jsx` — Company Profile.
+- `src/utils/company.js` — open company (super admin), login links.
+- `src/utils/brand.js` — brand store + company time zone / weekly off helpers.
+- `src/services/companyService.js` — `/api/company` calls.

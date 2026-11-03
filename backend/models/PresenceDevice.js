@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 // One row per device that reports office presence for a user: the mobile
 // app, a browser with the website open, or a Windows PC running the HRM

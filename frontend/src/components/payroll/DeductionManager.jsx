@@ -4,14 +4,17 @@ import { Trash2 } from "lucide-react";
 import Dropdown from "../common/Dropdown";
 import InputField from "../common/InputField";
 import Button from "../common/Button";
-import { DEDUCTION_TYPES } from "../../utils/constants";
+import { payrollTypesFor } from "../../utils/constants";
+import { getBrand } from "../../utils/brand";
 import { formatCurrency } from "../../utils/numberUtils";
 
-const typeOptions = DEDUCTION_TYPES.map((t) => ({ value: t, label: t }));
+// The company's country decides the usual lines (PF / ESI in India, GOSI in
+// Saudi Arabia, …). A type saved earlier that is not in the list still shows.
+const typesNow = () => payrollTypesFor(getBrand().country).deductions;
 
 const DeductionManager = ({ deductions = [], onChange, total = 0 }) => {
   const addRow = () => {
-    onChange([...deductions, { type: DEDUCTION_TYPES[0], amount: 0 }]);
+    onChange([...deductions, { type: typesNow()[0], amount: 0 }]);
   };
 
   const updateRow = (index, field, value) => {
@@ -46,7 +49,7 @@ const DeductionManager = ({ deductions = [], onChange, total = 0 }) => {
               <Dropdown
                 value={d.type}
                 onChange={(val) => updateRow(idx, "type", val)}
-                options={typeOptions}
+                options={[...new Set([...typesNow(), d.type].filter(Boolean))].map((t) => ({ value: t, label: t }))}
               />
               <InputField
                 type="number"

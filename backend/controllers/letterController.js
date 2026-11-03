@@ -12,15 +12,13 @@ import mongoose from "mongoose";
 import PDFDocument from "pdfkit";
 import Staff from "../models/Staff.js";
 import Resignation from "../models/Resignation.js";
-import { getCompanyProfile } from "../services/companyProfile.js";
+import { getCompanyProfile, getCompanyAssets } from "../services/companyProfile.js";
+import { companyTimeZone, currentCompany } from "../utils/companyContext.js";
 import { isAdminRole } from "../config/permissions.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import { photoUrlFor } from "../utils/fileSigning.js";
-import Company from "../models/Company.js";
-import CompanyProfile from "../models/CompanyProfile.js";
 import StaffBasicPayroll from "../models/StaffBasicPayroll.js";
 import StaffDocument from "../models/StaffDocument.js";
-import { getCompanyId } from "../utils/tenant.js";
 import {
   renderOfferLetter,
   renderJoiningLetter,
@@ -38,12 +36,10 @@ import {
   staffForLetter,
 } from "../utils/letterFields.js";
 
-const TZ = "Asia/Kolkata";
-
 const fmtDate = (d) =>
   d
-    ? new Date(d).toLocaleDateString("en-IN", {
-        timeZone: TZ,
+    ? new Date(d).toLocaleDateString("en-GB", {
+        timeZone: companyTimeZone(),
         day: "numeric",
         month: "long",
         year: "numeric",
@@ -252,55 +248,40 @@ const letterBody = (type, staff, company) => {
 };
 
 // ── Data for the company-layout letters (offer / joining / confirmation) ──
-// Company: the logged-in company's own record (name, logo), then .env.
-// The letter artwork (bands, logo, watermark, partner logos, signature) is
-// ZAP Solutionz's own, so that is the name used when nothing else is set —
-// never the generic "HRM Portal" placeholder.
-const DEFAULT_LETTER_COMPANY = "ZAP Solutionz";
-const GENERIC_NAMES = /^\s*(hrm\s*portal|company)?\s*$/i;
+// Everything comes from the CURRENT company's white-label profile (name,
+// logo, address, e-mail, signatory, signature, stamp, registration numbers).
+// The ZAP Solutionz artwork and contact defaults are only used for a
+// company whose name starts with "ZAP" (the original templates).
+const ZAP_DEFAULT_ADDRESS = "[Kandivali] | [Mumbai, Maharashtra State, 400101]";
 
-const letterCompany = async (staff = null) => {
+/** "Street, City, State 400101" */
+export const fullAddress = (p) =>
+  [p.address, [p.city, p.state].filter(Boolean).join(", "), p.postalCode]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .join(", ");
+
+const letterCompany = async () => {
   const base = await getCompanyProfile();
-  let rec = null;
-  // 1) the staff member's own company, 2) the request's company,
-  // 3) the only / first company in the database.
-  const ids = [staff?.company, getCompanyId()].filter(Boolean).map(String);
-  for (const id of ids) {
-    if (rec) break;
-    if (!mongoose.Types.ObjectId.isValid(id)) continue;
-    rec = await Company.findById(id).select("name logoUrl").lean().catch(() => null);
-  }
-  if (!rec) {
-    rec = await Company.findOne({ isActive: { $ne: false } })
-      .sort({ createdAt: 1 })
-      .select("name logoUrl")
-      .lean()
-      .catch(() => null);
-  }
-  // 4) branding saved from the website (single-company CompanyProfile row).
-  let profileRow = null;
-  if (!rec?.name) {
-    profileRow = await CompanyProfile.findOne({ key: "main" }).select("name logoUrl").lean().catch(() => null);
-  }
-  const candidates = [
-    process.env.LETTER_COMPANY_NAME,
-    rec?.name,
-    profileRow?.name,
-    process.env.COMPANY_NAME,
-  ].filter((n) => n && !GENERIC_NAMES.test(n));
-  const name = candidates[0] || DEFAULT_LETTER_COMPANY;
-  const zap = /^\s*zap\b/i.test(name || "");
+  const assets = await getCompanyAssets();
+  const zap = /^\s*zap\b/i.test(base.name || "");
+  const signatory = [base.signatoryName, base.signatoryTitle].filter(Boolean).join(", ");
   return {
     ...base,
-    name,
-    logoUrl: rec?.logoUrl || profileRow?.logoUrl || base.logoUrl || "",
-    // Printed in the letter headers. Set COMPANY_EMAIL / COMPANY_ADDRESS /
-    // COMPANY_SIGNATORY in .env (ZAP Solutionz values are the default).
-    email: process.env.COMPANY_EMAIL || (zap ? "admin@zapwms.com" : ""),
-    address:
-      process.env.COMPANY_ADDRESS ||
-      (zap ? "[Kandivali] | [Mumbai, Maharashtra State, 400101]" : ""),
-    signatory: process.env.COMPANY_SIGNATORY || "",
+    // Only the company's own tagline on official letters (not the default).
+    tagline: currentCompany()?.tagline || "",
+    // PDFs need the image bytes: an uploaded logo is passed as a data URL.
+    logoUrl: assets.logoDataUrl || "",
+    signatureImage: assets.signature,
+    stampImage: assets.stamp,
+    email: base.email || (zap ? process.env.COMPANY_EMAIL || "admin@zapwms.com" : ""),
+    address: fullAddress(base) || (zap ? process.env.COMPANY_ADDRESS || ZAP_DEFAULT_ADDRESS : ""),
+    signatory: signatory || (zap ? process.env.COMPANY_SIGNATORY || "" : ""),
+    // "CR No.: 1010… · VAT No.: 3…" printed in the letter footer.
+    legalLine: (base.legalIdList || [])
+      .filter((x) => x.print)
+      .map((x) => `${x.label}: ${x.value}`)
+      .join("   ·   "),
   };
 };
 
@@ -355,7 +336,7 @@ const latestResignation = async (staffId) => {
 const letterValues = async (type, staff, answers = null) => {
   const relieving = RELIEVING_LETTERS.includes(type);
   const [co, salaryAt, ids, resignation] = await Promise.all([
-    letterCompany(staff),
+    letterCompany(),
     relieving ? () => null : salaryLookup(staff._id),
     relieving ? {} : idNumbers(staff._id),
     relieving ? latestResignation(staff._id) : null,
@@ -468,28 +449,42 @@ export const downloadLetter = asyncHandler(async (req, res) => {
   });
   doc.pipe(res);
 
-  // Same navy / gold look as the payslip PDF.
-  const NAVY = "#1B3A5C";
-  const GOLD = "#C9A24B";
+  // Company colours (navy / gold when the company has not chosen any).
+  const NAVY = company.sidebarColor || "#1B3A5C";
+  const GOLD = company.primaryColor || "#C9A24B";
   const TEXT = "#1B1B1B";
   const W = doc.page.width;
   const H = doc.page.height;
   const mx = 60;
   const cw = W - mx * 2;
+  const logoImg = (() => {
+    const m = /^data:image\/(png|jpe?g);base64,(.+)$/i.exec(company.logoUrl || "");
+    return m ? Buffer.from(m[2], "base64") : null;
+  })();
 
-  // Header band + company name
+  // Header band: logo on a white tile + company name
   doc.rect(0, 0, W, 80).fill(NAVY);
+  let nameX = mx;
+  if (logoImg) {
+    try {
+      doc.roundedRect(mx - 6, 12, 62, 56, 6).fill("#FFFFFF");
+      doc.image(logoImg, mx - 2, 16, { fit: [54, 48], align: "center", valign: "center" });
+      nameX = mx + 66;
+    } catch {
+      nameX = mx; // unreadable image: name only
+    }
+  }
   doc
     .font("Helvetica-Bold")
     .fontSize(18)
     .fillColor("#FFFFFF")
-    .text(company.name, mx, 28, { width: cw });
+    .text(company.name, nameX, 28, { width: cw - (nameX - mx) });
   if (company.tagline) {
     doc
       .font("Helvetica")
       .fontSize(9)
       .fillColor("#DDE6F0")
-      .text(company.tagline, mx, 52, { width: cw });
+      .text(company.tagline, nameX, 52, { width: cw - (nameX - mx) });
   }
 
   // Title
@@ -563,7 +558,23 @@ export const downloadLetter = asyncHandler(async (req, res) => {
   doc.font("Helvetica").fontSize(11).text("Sincerely,", mx, y);
   y += 16;
   doc.font("Helvetica-Bold").text(`For ${company.name}`, mx, y);
-  y += 50;
+  y += 18;
+  // Signature and company stamp (uploaded on the company profile).
+  if (company.signatureImage) {
+    try {
+      doc.image(company.signatureImage, mx, y, { fit: [150, 40] });
+    } catch {
+      /* unreadable image */
+    }
+  }
+  if (company.stampImage) {
+    try {
+      doc.image(company.stampImage, mx + 190, y - 18, { fit: [80, 80] });
+    } catch {
+      /* unreadable image */
+    }
+  }
+  y += 42;
   doc
     .moveTo(mx, y)
     .lineTo(mx + 160, y)
@@ -571,22 +582,26 @@ export const downloadLetter = asyncHandler(async (req, res) => {
     .lineWidth(0.8)
     .stroke();
   y += 6;
-  doc.font("Helvetica").fontSize(10).text("Authorized Signatory", mx, y);
+  doc.font("Helvetica-Bold").fontSize(10).fillColor(TEXT).text(company.signatoryName || "Authorized Signatory", mx, y);
   y += 13;
-  doc.text("Human Resources", mx, y);
+  doc.font("Helvetica").text(company.signatoryTitle || "Human Resources", mx, y);
 
-  // Footer
-  doc.rect(0, H - 40, W, 40).fill(NAVY);
+  // Footer: address, registration numbers, contact
+  const footerLines = [
+    company.address,
+    company.legalLine,
+    [company.phone, company.email, company.website].filter(Boolean).join("   ·   "),
+  ].filter(Boolean);
+  const footerH = 22 + footerLines.length * 11;
+  doc.rect(0, H - footerH, W, footerH).fill(NAVY);
+  doc.font("Helvetica").fontSize(8).fillColor("#FFFFFF");
+  footerLines.forEach((line, i) => {
+    doc.text(line, mx, H - footerH + 8 + i * 11, { width: cw, align: "center", lineBreak: false, ellipsis: true });
+  });
   doc
-    .font("Helvetica")
-    .fontSize(8)
-    .fillColor("#FFFFFF")
-    .text(
-      "This is a system-generated letter.",
-      mx,
-      H - 25,
-      { width: cw, align: "center" },
-    );
+    .fontSize(7)
+    .fillColor("#DDE6F0")
+    .text("This is a system-generated letter.", mx, H - 14, { width: cw, align: "center", lineBreak: false });
 
   doc.end();
 });

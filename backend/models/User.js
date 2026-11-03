@@ -1,4 +1,6 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
+import { encryptPassword } from "../utils/passwordVault.js";
 import bcrypt from "bcryptjs";
 import { hasTabAccess } from "../config/permissions.js";
 
@@ -39,6 +41,10 @@ const userSchema = new mongoose.Schema(
       minlength: [6, "Password must be at least 6 characters"],
       select: false,
     },
+    // Company ADMIN logins only: an encrypted (AES-GCM, utils/passwordVault)
+    // copy of the password, so the super admin's "copy login link" can fill
+    // it in on the login page. Never sent in normal API responses.
+    passwordEncrypted: { type: String, select: false },
     // "superadmin" — the very first account ever registered; always has
     // full access to every tab, can create staff/admins and manage admin
     // permissions. "admin" — a staff member promoted by a super admin;
@@ -56,6 +62,24 @@ const userSchema = new mongoose.Schema(
     permissions: {
       allTabs: { type: Boolean, default: false },
       tabs: { type: [String], default: [] },
+    },
+    // Branch of the company this login belongs to (null = whole company).
+    // An admin WITH a branch is a BRANCH ADMIN: they only see that branch's
+    // staff (see utils/tenant.js) and cannot create branches or other admins.
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Branch",
+      default: null,
+    },
+    // Set only on admins created through an invite link:
+    //   "company" -> THE admin of the company (one per company)
+    //   "branch"  -> THE admin of one branch  (one per branch)
+    // The partial unique indexes below make "one admin" a database rule, so
+    // two people opening links at the same moment still cannot both win.
+    adminScope: {
+      type: String,
+      enum: ["company", "branch"],
+      default: undefined,
     },
     isActive: {
       type: Boolean,
@@ -86,8 +110,14 @@ const userSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    // Users belong to one company, except the super admin (no company) who
+    // must stay visible inside every company (see utils/tenant.js).
+    tenantMode: "user",
   },
 );
+
+userSchema.index({ company: 1 }, { unique: true, partialFilterExpression: { adminScope: "company" } });
+userSchema.index({ branch: 1 }, { unique: true, partialFilterExpression: { adminScope: "branch" } });
 
 // Keep `name` in sync with firstName + lastName for any code that still reads it
 userSchema.pre("validate", function (next) {
@@ -100,6 +130,7 @@ userSchema.pre("validate", function (next) {
 // Hash password before saving
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
+  if (this.role === "admin") this.passwordEncrypted = encryptPassword(this.password);
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });

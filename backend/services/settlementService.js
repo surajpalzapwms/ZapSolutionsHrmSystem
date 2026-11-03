@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tzOffsetMs } from "../utils/companyContext.js";
 import Staff from "../models/Staff.js";
 import StaffBasicPayroll from "../models/StaffBasicPayroll.js";
 import Payroll from "../models/Payroll.js";
@@ -38,12 +39,11 @@ const round2 = (n) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 10
 
 // "YYYY-MM-DD" of a stored date in India time (dates picked on the website
 // are often saved as IST midnight = previous day 18:30 UTC).
-const IST_OFFSET_MS = 330 * 60 * 1000;
 const istKey = (d) => {
   if (!d) return null;
   const t = new Date(d);
   if (Number.isNaN(t.getTime())) return null;
-  return new Date(t.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  return new Date(t.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
 };
 
 // How one month's salary was worked out — shown behind the "View details"

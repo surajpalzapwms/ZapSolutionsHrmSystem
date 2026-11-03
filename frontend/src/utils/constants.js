@@ -74,3 +74,33 @@ export const SHORT_MONTHS = [
 
 export const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 export const SHORT_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// ── Country-specific payroll lines (white label) ──────────────────────────
+// India keeps the lists above. Gulf companies get their usual components.
+const GCC_ALLOWANCES = [
+  "Housing Allowance",
+  "Transportation Allowance",
+  "Food Allowance",
+  "Mobile Allowance",
+  "Overtime",
+  "Bonus",
+  "Incentive",
+  "Other",
+];
+const PAYROLL_TYPES_BY_COUNTRY = {
+  IN: { allowances: ALLOWANCE_TYPES, deductions: DEDUCTION_TYPES },
+  SA: {
+    allowances: GCC_ALLOWANCES,
+    deductions: ["GOSI (Social Insurance)", "SANED (Unemployment Insurance)", "Loan Deduction", "Absence", "Late Penalty", "Other"],
+  },
+  QA: {
+    allowances: GCC_ALLOWANCES,
+    deductions: ["Social Insurance (GRSIA)", "Loan Deduction", "Absence", "Late Penalty", "Other"],
+  },
+};
+
+/** { allowances, deductions } for a country code (India by default). */
+export const payrollTypesFor = (country) =>
+  PAYROLL_TYPES_BY_COUNTRY[String(country || "").toUpperCase()] || {
+    allowances: ALLOWANCE_TYPES,
+    deductions: DEDUCTION_TYPES.filter((t) => !["Provident Fund", "Professional Tax", "Income Tax (TDS)", "ESI"].includes(t)),
+  };

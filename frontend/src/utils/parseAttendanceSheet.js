@@ -1,3 +1,4 @@
+import { companyShiftForDate } from "./brand";
 const HEADER_MATCHERS = {
   date: /^date/i,
   timeIn: /time\s*in/i,
@@ -233,7 +234,9 @@ export const parseAttendanceSheet = (rows) => {
     const inTime = resolveTimeIn(readTime(timeInCell));
     let outTime = isBlank(outCell) ? null : resolveTimeOut(readTime(outCell), inTime);
     if (inTime && isBlank(outCell)) {
-      outTime = DEFAULT_TIME_OUT;
+      // Company working hours end (Settings → Work week & hours) for that day.
+      const [h, m] = companyShiftForDate(dateStr).end.split(":").map(Number);
+      outTime = Number.isFinite(h) ? { h, m } : DEFAULT_TIME_OUT;
     }
 
     if (!inTime || !outTime) {

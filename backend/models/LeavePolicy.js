@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 // A single, org-wide leave policy the admin configures from the Leave tab.
 // Stores how many days of each balance-tracked leave type every staff member

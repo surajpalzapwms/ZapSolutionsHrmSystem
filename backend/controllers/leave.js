@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { isWeeklyOffDow, weeklyOffName, tzOffsetMs } from "../utils/companyContext.js";
 import {
   getOrCompute,
   registerCacheWarmer,
@@ -52,9 +53,8 @@ import {
   resolveStaffIdByUserId,
   LUNCH_START,
   LUNCH_END,
-  REQUIRED_WORK_MINUTES,
-  DEFAULT_SHIFT_START,
-  DEFAULT_SHIFT_END,
+  requiredWorkMinutes,
+  companyShiftForDate,
 } from "../services/leave.js";
 import {
   getRemainingForType,
@@ -122,9 +122,8 @@ const logActivity = async (_req, _entry) => {};
 // timezone the server process happens to run in, so we instead read off the
 // literal digits and treat them as IST, converting to a true UTC instant —
 // the same instant self sign-in produces via `new Date()`. Without the
-// IST_OFFSET_MS subtraction below, every imported/manually-recorded time
+// tzOffsetMs() subtraction below, every imported/manually-recorded time
 // displays 5:30 later than what was typed (e.g. 9:56 AM shows as 3:26 PM).
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const parseDT = (str) => {
   const dt = new Date(str);
   const istWallClockAsUTC = Date.UTC(
@@ -135,7 +134,7 @@ const parseDT = (str) => {
     dt.getMinutes(),
     dt.getSeconds(),
   );
-  return new Date(istWallClockAsUTC - IST_OFFSET_MS);
+  return new Date(istWallClockAsUTC - tzOffsetMs());
 };
 
 // GET /attendance
@@ -817,8 +816,8 @@ export const applyLeave = async (req, res) => {
         // holiday that ISN'T actually bracketed by leave on both sides
         // (e.g. it falls right at the edge of the requested range) a free
         // holiday instead of being force-marked as leave.
-        if (parsedDate.getUTCDay() === 0) {
-          skipped.push({ date: dayStr, reason: "Sunday" });
+        if (isWeeklyOffDow(parsedDate.getUTCDay())) {
+          skipped.push({ date: dayStr, reason: weeklyOffName(parsedDate.getUTCDay()) });
           continue;
         }
         const holidayCheck = await isHolidayOrSunday(parsedDate);
@@ -925,14 +924,15 @@ export const applyLeave = async (req, res) => {
     // IST) — "2026-07-17" would get stored as 2026-07-16T18:30Z and every screen
     // that reads it back with getUTCDate() would show it as 16 Jul.
     const { start: parsedLeaveDate } = getDayRange(leaveDate);
-    if (parsedLeaveDate.getUTCDay() === 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Cannot apply for leave on Sunday" });
+    if (isWeeklyOffDow(parsedLeaveDate.getUTCDay())) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot apply for leave on ${weeklyOffName(parsedLeaveDate.getUTCDay())} (weekly off)`,
+      });
     }
 
     const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
-    if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+    if (holidayCheck.isHoliday && !holidayCheck.weeklyOff) {
       return res.status(400).json({
         success: false,
         message: `Cannot apply for leave on holiday: ${holidayCheck.reason}`,
@@ -1261,12 +1261,12 @@ export const applyMyLeave = async (req, res) => {
 
       const { start: parsedLeaveDate, end } = getDayRange(dayStr);
 
-      // Skip Sundays.
-      if (parsedLeaveDate.getUTCDay() === 0) {
-        skipped.push({ date: dayStr, reason: "Sunday" });
+      // Skip weekly off days (Sunday in India, Friday / Saturday in the Gulf).
+      if (isWeeklyOffDow(parsedLeaveDate.getUTCDay())) {
+        skipped.push({ date: dayStr, reason: weeklyOffName(parsedLeaveDate.getUTCDay()) });
       } else {
         const holidayCheck = await isHolidayOrSunday(parsedLeaveDate);
-        if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+        if (holidayCheck.isHoliday && !holidayCheck.weeklyOff) {
           skipped.push({ date: dayStr, reason: holidayCheck.reason || "Holiday" });
         } else {
           const existing = await Leave.findOne({
@@ -1797,8 +1797,8 @@ export const recordAttendance = async (req, res) => {
     const isMarker = status === "absent" || status === "half-day";
 
     // A time is no longer mandatory — if the admin leaves login/logout
-    // blank, it falls back to the office's default shift (10:00 AM–6:30
-    // PM) below. A date is still required so we know which day to record.
+    // blank, it falls back to the COMPANY's working hours (Settings → Work
+    // week & hours; Saturday hours on a short Saturday) below. A date is still required so we know which day to record.
     if (!userId || (!loginTime && !date))
       return res.status(400).json({
         success: false,
@@ -1811,15 +1811,16 @@ export const recordAttendance = async (req, res) => {
       // Shift start (10:00 IST), not 00:00 IST — midnight IST is 18:30 UTC
       // on the PREVIOUS day, so anything reading the UTC day put the mark
       // one day early (6 Aug half day showed on 5 Aug).
-      loginDT = parseDT(`${date}T${DEFAULT_SHIFT_START}:00`);
+      loginDT = parseDT(`${date}T${companyShiftForDate(date).start}:00`);
     } else {
       dateString = loginTime ? getDateStringIST(parseDT(loginTime)) : date;
+      const hours = companyShiftForDate(dateString);
       loginDT = loginTime
         ? parseDT(loginTime)
-        : parseDT(`${dateString}T${DEFAULT_SHIFT_START}:00`);
+        : parseDT(`${dateString}T${hours.start}:00`);
       logoutDT = logoutTime
         ? parseDT(logoutTime)
-        : parseDT(`${dateString}T${DEFAULT_SHIFT_END}:00`);
+        : parseDT(`${dateString}T${hours.end}:00`);
       if (logoutDT <= loginDT)
         return res.status(400).json({
           success: false,
@@ -2042,18 +2043,20 @@ const buildAttendanceMeta = (user, record) => {
   }
 
   const earlySignOutApproved = !!record?.earlySignOutApproved;
-  const remainingMinutes = Math.max(0, REQUIRED_WORK_MINUTES - workedMinutes);
+  // Net time of the shift (company working hours or the user's own shift).
+  const required = requiredWorkMinutes(shiftStartTime, shiftEndTime);
+  const remainingMinutes = Math.max(0, required - workedMinutes);
   const canSignOut =
     !!record &&
     !record.logoutTime &&
-    (workedMinutes >= REQUIRED_WORK_MINUTES || earlySignOutApproved);
+    (workedMinutes >= required || earlySignOutApproved);
 
   return {
     shiftStartTime,
     shiftEndTime,
     lunchStart: LUNCH_START,
     lunchEnd: LUNCH_END,
-    requiredMinutes: REQUIRED_WORK_MINUTES,
+    requiredMinutes: required,
     workedMinutes,
     remainingMinutes,
     earlySignOutApproved,
@@ -2197,14 +2200,15 @@ export const checkOut = async (req, res) => {
 
     // Block the sign-out until the required net working time is complete,
     // unless an admin has approved an early sign-out for this record.
+    const required = requiredWorkMinutes(shiftStartTime, shiftEndTime);
     if (
-      totalMinutesWorked < REQUIRED_WORK_MINUTES &&
+      totalMinutesWorked < required &&
       !open.earlySignOutApproved
     ) {
-      const remaining = REQUIRED_WORK_MINUTES - totalMinutesWorked;
+      const remaining = required - totalMinutesWorked;
       return res.status(400).json({
         success: false,
-        message: `You can't sign out yet — ${formatMinutesToTimeString(remaining)} of working time remaining (7h 45m required, lunch break already excluded). Ask an admin to approve an early sign-out if needed.`,
+        message: `You can't sign out yet — ${formatMinutesToTimeString(remaining)} of working time remaining (${formatMinutesToTimeString(required)} required, lunch break already excluded). Ask an admin to approve an early sign-out if needed.`,
         attendance: open,
         meta: buildAttendanceMeta(req.user, open),
       });
@@ -2212,7 +2216,7 @@ export const checkOut = async (req, res) => {
 
     const { totalTime } = await finalizeSignOut(open, req.user, now, {
       wasEarly:
-        totalMinutesWorked < REQUIRED_WORK_MINUTES && open.earlySignOutApproved,
+        totalMinutesWorked < required && open.earlySignOutApproved,
     });
 
     res.json({
@@ -2278,14 +2282,14 @@ export const getMyMonthAttendance = async (req, res) => {
     for (let d = 1; d <= daysInMonth; d++) {
       const dateObj = new Date(Date.UTC(year, month - 1, d));
       const dateStr = `${year}-${mm}-${String(d).padStart(2, "0")}`;
-      const isSunday = dateObj.getUTCDay() === 0;
+      const isSunday = isWeeklyOffDow(dateObj.getUTCDay()); // weekly off day
 
       byDate[dateStr] = {
         date: dateStr,
         loginTime: null,
         logoutTime: null,
         status: isSunday ? "holiday" : undefined,
-        holidayName: isSunday ? "Sunday" : undefined,
+        holidayName: isSunday ? weeklyOffName(dateObj.getUTCDay()) : undefined,
       };
 
       for (const h of allHolidays) {
@@ -2448,8 +2452,8 @@ export const getOpenAttendanceToday = async (req, res) => {
         shiftStartTime,
         shiftEndTime,
         workedMinutes,
-        requiredMinutes: REQUIRED_WORK_MINUTES,
-        remainingMinutes: Math.max(0, REQUIRED_WORK_MINUTES - workedMinutes),
+        requiredMinutes: requiredWorkMinutes(shiftStartTime, shiftEndTime),
+        remainingMinutes: Math.max(0, requiredWorkMinutes(shiftStartTime, shiftEndTime) - workedMinutes),
         earlySignOutApproved: !!r.earlySignOutApproved,
       };
     });
@@ -2519,7 +2523,7 @@ export const importAttendance = async (req, res) => {
         if (isMarker) {
           dateString = date;
           // Shift start, not 00:00 IST (= previous day in UTC) — see recordAttendance.
-          loginDT = parseDT(`${date}T${DEFAULT_SHIFT_START}:00`);
+          loginDT = parseDT(`${date}T${companyShiftForDate(date).start}:00`);
           if (isNaN(loginDT.getTime())) {
             results.failed++;
             results.errors.push(`Row ${index + 1}: Invalid date format`);
@@ -2527,12 +2531,13 @@ export const importAttendance = async (req, res) => {
           }
         } else {
           dateString = loginTime ? getDateStringIST(parseDT(loginTime)) : date;
+          const hours = companyShiftForDate(dateString);
           loginDT = loginTime
             ? parseDT(loginTime)
-            : parseDT(`${dateString}T${DEFAULT_SHIFT_START}:00`);
+            : parseDT(`${dateString}T${hours.start}:00`);
           logoutDT = logoutTime
             ? parseDT(logoutTime)
-            : parseDT(`${dateString}T${DEFAULT_SHIFT_END}:00`);
+            : parseDT(`${dateString}T${hours.end}:00`);
           if (isNaN(loginDT.getTime()) || isNaN(logoutDT.getTime())) {
             results.failed++;
             results.errors.push(`Row ${index + 1}: Invalid date format`);
@@ -2783,7 +2788,7 @@ export const importLeaves = async (req, res) => {
         }
         // Same timezone-safe parse as applyLeave — see comment there.
         const { start: parsedDate } = getDayRange(leaveDate);
-        const isSunday = parsedDate.getUTCDay() === 0;
+        const isSunday = isWeeklyOffDow(parsedDate.getUTCDay()); // weekly off day
         const holidayCheck = await isHolidayOrSunday(parsedDate);
         if (isSunday || holidayCheck.isHoliday) {
           const untracked = await isMonthUntracked(
@@ -2799,11 +2804,11 @@ export const importLeaves = async (req, res) => {
             if (isSunday) {
               results.failed++;
               results.errors.push(
-                `Row ${index + 1}: Cannot import leave on Sunday`,
+                `Row ${index + 1}: Cannot import leave on ${weeklyOffName(parsedDate.getUTCDay())} (weekly off)`,
               );
               continue;
             }
-            if (holidayCheck.isHoliday && holidayCheck.reason !== "Sunday") {
+            if (holidayCheck.isHoliday && !holidayCheck.weeklyOff) {
               results.failed++;
               results.errors.push(
                 `Row ${index + 1}: Cannot import leave on holiday: ${holidayCheck.reason}`,
@@ -3689,8 +3694,8 @@ const buildMonthDays = (
     const dow = new Date(Date.UTC(year, month, d)).getUTCDay();
     days[d] = {
       date: new Date(Date.UTC(year, month, d)).toISOString().slice(0, 10),
-      status: dow === 0 ? "holiday" : null,
-      holidayName: dow === 0 ? "Sunday" : undefined,
+      status: isWeeklyOffDow(dow) ? "holiday" : null,
+      holidayName: isWeeklyOffDow(dow) ? weeklyOffName(dow) : undefined,
     };
   }
 
@@ -4902,10 +4907,11 @@ export const changeDayStatus = async (req, res) => {
       if (status === "half") {
         // Shift start, not 00:00 IST (= 18:30 UTC the day before, which
         // made a Half Day on 6 Aug show on 5 Aug).
-        loginDT = loginTime ? parseDT(loginTime) : parseDT(`${date}T${DEFAULT_SHIFT_START}:00`);
+        loginDT = loginTime ? parseDT(loginTime) : parseDT(`${date}T${companyShiftForDate(date).start}:00`);
       } else {
-        loginDT = loginTime ? parseDT(loginTime) : parseDT(`${date}T${DEFAULT_SHIFT_START}:00`);
-        logoutDT = logoutTime ? parseDT(logoutTime) : parseDT(`${date}T${DEFAULT_SHIFT_END}:00`);
+        const hours = companyShiftForDate(date);
+        loginDT = loginTime ? parseDT(loginTime) : parseDT(`${date}T${hours.start}:00`);
+        logoutDT = logoutTime ? parseDT(logoutTime) : parseDT(`${date}T${hours.end}:00`);
         if (logoutDT <= loginDT) {
           return res.status(400).json({
             success: false,

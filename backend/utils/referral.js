@@ -15,8 +15,8 @@
 // from the staff member's FIRST month salary (the joining month) — never
 // from any other month. It can never take the month below zero.
 
-const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 
+import { tzOffsetMs } from "./companyContext.js";
 export const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // Date -> "YYYY-MM" for the INDIA calendar day (joining dates are often
@@ -25,7 +25,7 @@ export const istPeriodOf = (value) => {
   if (!value) return null;
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return null;
-  const t = new Date(d.getTime() + IST_OFFSET_MS);
+  const t = new Date(d.getTime() + tzOffsetMs());
   return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}`;
 };
 

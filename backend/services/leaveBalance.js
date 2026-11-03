@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tzOffsetMs } from "../utils/companyContext.js";
 import Leave from "../models/Leave.js";
 import LeavePolicy from "../models/LeavePolicy.js";
 import Staff from "../models/Staff.js";
@@ -71,13 +72,12 @@ const countTaken = async (userId, leaveType, year, upperBound = null) => {
 // All date math is done on the India (IST) calendar day so dates saved as
 // "2025-09-29T18:30:00Z" (= 30 Sep IST) and "2025-09-30T00:00:00Z" both
 // read as 30 Sep.
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const toParts = (date) => {
   if (!date) return null;
   const t = new Date(date).getTime();
   if (!Number.isFinite(t)) return null;
-  const x = new Date(t + IST_OFFSET_MS);
+  const x = new Date(t + tzOffsetMs());
   return { y: x.getUTCFullYear(), m: x.getUTCMonth(), d: x.getUTCDate() };
 };
 const cmpParts = (a, b) => a.y - b.y || a.m - b.m || a.d - b.d;

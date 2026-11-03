@@ -27,6 +27,9 @@
 // ask: "required" → must have a value before the letter can be generated
 //      "ifEmpty"  → asked when empty, but may be left blank
 //      false      → never asked (has a default) — shown under "all details"
+import { currentCompany, tzOffsetMs } from "./companyContext.js";
+import { staffDocDef } from "../config/countries.js";
+
 const FIELD_DEFS = {
   staffName: { label: "Full name (as on the letter)", kind: "text", profile: true, placeholder: "e.g. Mohammed Akram Idrisi" },
   gender: {
@@ -170,7 +173,7 @@ export const ymd = (v) => {
   if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
   const d = new Date(v);
   if (isNaN(d.getTime())) return "";
-  return new Date(d.getTime() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  return new Date(d.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
 };
 
 const isEmpty = (v) =>
@@ -205,7 +208,9 @@ export const normaliseValue = (key, value) => {
   }
   if (key === "aadhaar") {
     const digits = String(value || "").replace(/\s+/g, "");
-    return /^\d{12}$/.test(digits) ? digits.replace(/(\d{4})(?=\d)/g, "$1 ") : String(value || "").trim();
+    // Aadhaar is printed in groups of 4 (India only).
+    const india = (currentCompany()?.country || "IN") === "IN";
+    return india && /^\d{12}$/.test(digits) ? digits.replace(/(\d{4})(?=\d)/g, "$1 ") : String(value || "").trim();
   }
   if (key === "pan") return String(value || "").trim().toUpperCase();
   return String(value ?? "").trim();
@@ -278,6 +283,21 @@ export const currentValues = (type, ctx) => {
 };
 
 /** Form description: [{ key, label, kind, required, missing, value, … }] */
+// Labels that depend on the company's country (Aadhaar / Iqama / QID ...,
+// salary currency).
+const countryLabel = (key, def) => {
+  const company = currentCompany();
+  if (key === "aadhaar" || key === "pan") {
+    return staffDocDef(company?.country, key)?.numberLabel || def.label;
+  }
+  if (key === "salary") return `Monthly salary (${company?.currencyCode || "INR"})`;
+  return def.label;
+};
+const countryPlaceholder = (key, def) =>
+  key === "aadhaar" || key === "pan"
+    ? staffDocDef(currentCompany()?.country, key)?.placeholder ?? def.placeholder
+    : def.placeholder;
+
 export const describeFields = (type, values, hints = {}) =>
   (LETTER_FIELDS[type] || []).map(([key, ask]) => {
     const def = FIELD_DEFS[key];
@@ -285,10 +305,10 @@ export const describeFields = (type, values, hints = {}) =>
     return {
       hint: hints[key] || "",
       key,
-      label: def.label,
+      label: countryLabel(key, def),
       kind: def.kind,
       options: def.options,
-      placeholder: def.placeholder,
+      placeholder: countryPlaceholder(key, def),
       min: def.min,
       max: def.max,
       profile: !!def.profile,

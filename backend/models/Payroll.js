@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 const payrollSchema = new mongoose.Schema(
   {

@@ -14,3 +14,18 @@
 # OS files
 Thumbs.db
 .DS_Store*.zip
+
+node_modules/
+.env
+.env.*
+dist/
+build/
+.expo/
+*.log
+*.zip
+*.xlsx
+*.jks
+*.keystore
+*.apk
+*.aab
+backend/routers/

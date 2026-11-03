@@ -38,8 +38,38 @@ export const CURRENCIES = [
 
 export const DEFAULT_CURRENCY = "INR";
 
-export const findCurrency = (code) =>
-  CURRENCIES.find((c) => c.code === String(code || "").toUpperCase()) || null;
+// Every real ISO 4217 currency is accepted (Yemeni rial, Iranian rial,
+// Jordanian dinar ...), not only the ones in the list above — the list is
+// just the order of the dropdown. Unknown / made-up codes still give null.
+const KNOWN_ISO = (() => {
+  try {
+    return new Set(Intl.supportedValuesOf("currency"));
+  } catch {
+    return null; // very old runtime: only the list above
+  }
+})();
+const currencyNames = (() => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "currency" });
+  } catch {
+    return null;
+  }
+})();
+
+export const findCurrency = (code) => {
+  const c = String(code || "").trim().toUpperCase();
+  if (!c) return null;
+  const listed = CURRENCIES.find((x) => x.code === c);
+  if (listed) return listed;
+  if (!/^[A-Z]{3}$/.test(c) || !KNOWN_ISO?.has(c)) return null;
+  let name = c;
+  try {
+    name = currencyNames?.of(c) || c;
+  } catch {
+    /* keep the code */
+  }
+  return { code: c, name, locale: "en-US", pdf: c };
+};
 
 export const NUMBER_FORMATS = [
   { locale: "en-IN", label: "Indian — 1,00,000.00" },

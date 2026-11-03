@@ -43,14 +43,16 @@
 //      Sundays / holidays. Today's still-open record is "pending" — the
 //      staff member can still make the time up — and is not deducted yet.
 import mongoose from "mongoose";
+import { tzOffsetMs } from "../utils/companyContext.js";
 import Attendance from "../models/Attendance.js";
 import User from "../models/User.js";
 import LateDeductionSetting from "../models/LateDeductionSetting.js";
 import {
   attendanceDayKey,
   resolveEffectiveShift,
-  DEFAULT_SHIFT_START,
-  DEFAULT_SHIFT_END,
+  defaultShiftStart,
+  defaultShiftEnd,
+  getUserShift,
   LUNCH_START,
   LUNCH_END,
 } from "./leave.js";
@@ -62,7 +64,6 @@ export const LUNCH_ALLOWED_MINUTES =
   Number(LUNCH_END.split(":")[0]) * 60 + Number(LUNCH_END.split(":")[1]) -
   (Number(LUNCH_START.split(":")[0]) * 60 + Number(LUNCH_START.split(":")[1]));
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -75,7 +76,7 @@ const hmToMinutes = (hm, fallback) => {
 
 /** Minutes since IST midnight for a timestamp. */
 const istMinutesOfDay = (date) => {
-  const t = new Date(new Date(date).getTime() + IST_OFFSET_MS);
+  const t = new Date(new Date(date).getTime() + tzOffsetMs());
   return t.getUTCHours() * 60 + t.getUTCMinutes();
 };
 
@@ -84,15 +85,15 @@ const overlap = (aStart, aEnd, bStart, bEnd) =>
 
 /** Today's IST "YYYY-MM-DD". */
 export const todayKeyIST = () =>
-  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  new Date(Date.now() + tzOffsetMs()).toISOString().slice(0, 10);
 
 /**
  * Net working minutes in a shift (shift length minus the lunch overlap).
  * 10:00–18:30 → 465, Saturday 10:00–16:00 → 315.
  */
 export const netShiftMinutes = (shiftStartTime, shiftEndTime) => {
-  const start = hmToMinutes(shiftStartTime, DEFAULT_SHIFT_START);
-  const end = hmToMinutes(shiftEndTime, DEFAULT_SHIFT_END);
+  const start = hmToMinutes(shiftStartTime, defaultShiftStart());
+  const end = hmToMinutes(shiftEndTime, defaultShiftEnd());
   const lunchS = hmToMinutes(LUNCH_START, LUNCH_START);
   const lunchE = hmToMinutes(LUNCH_END, LUNCH_END);
   return Math.max(0, end - start - overlap(start, end, lunchS, lunchE));
@@ -119,8 +120,8 @@ const isCountableRecord = (rec) =>
 export const computeLateForRecord = (
   rec,
   {
-    shiftStartTime = DEFAULT_SHIFT_START,
-    shiftEndTime = DEFAULT_SHIFT_END,
+    shiftStartTime = defaultShiftStart(),
+    shiftEndTime = defaultShiftEnd(),
     perDaySalary = 0,
     bufferMinutes = LATE_BUFFER_MINUTES,
     todayKey = todayKeyIST(),
@@ -130,8 +131,8 @@ export const computeLateForRecord = (
 
   const dateKey = attendanceDayKey(rec);
   const shift = resolveEffectiveShift(rec.loginTime, shiftStartTime, shiftEndTime);
-  const start = hmToMinutes(shift.shiftStartTime, DEFAULT_SHIFT_START);
-  const end = hmToMinutes(shift.shiftEndTime, DEFAULT_SHIFT_END);
+  const start = hmToMinutes(shift.shiftStartTime, defaultShiftStart());
+  const end = hmToMinutes(shift.shiftEndTime, defaultShiftEnd());
   const lunchS = hmToMinutes(LUNCH_START, LUNCH_START);
   const lunchE = hmToMinutes(LUNCH_END, LUNCH_END);
 
@@ -147,7 +148,7 @@ export const computeLateForRecord = (
   let pending = false;
   if (rec.logoutTime) {
     const [y, m, d] = dateKey.split("-").map(Number);
-    const shiftEndInstant = Date.UTC(y, m - 1, d, 0, end) - IST_OFFSET_MS;
+    const shiftEndInstant = Date.UTC(y, m - 1, d, 0, end) - tzOffsetMs();
     stayedLateMinutes = Math.max(
       0,
       Math.floor((new Date(rec.logoutTime).getTime() - shiftEndInstant) / 60000),
@@ -229,8 +230,8 @@ export const computeLateForRecord = (
  */
 export const buildLateSummary = ({
   records = [],
-  shiftStartTime = DEFAULT_SHIFT_START,
-  shiftEndTime = DEFAULT_SHIFT_END,
+  shiftStartTime = defaultShiftStart(),
+  shiftEndTime = defaultShiftEnd(),
   perDaySalary = 0,
   enabled = true,
   fromKey = null,
@@ -344,14 +345,12 @@ export const isLateDeductionEnabled = async (employeeId, period, session = null)
 
 /** Shift window of a login account (falls back to office default). */
 export const getShiftForUser = async (userId, session = null) => {
-  if (!userId) return { shiftStartTime: DEFAULT_SHIFT_START, shiftEndTime: DEFAULT_SHIFT_END };
+  // Own shift when the admin set one, otherwise the company's working hours.
+  if (!userId) return getUserShift(null);
   const q = User.findById(userId).select("shiftStartTime shiftEndTime");
   if (session) q.session(session);
   const u = await q.lean();
-  return {
-    shiftStartTime: u?.shiftStartTime || DEFAULT_SHIFT_START,
-    shiftEndTime: u?.shiftEndTime || DEFAULT_SHIFT_END,
-  };
+  return getUserShift(u);
 };
 
 /**

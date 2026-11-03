@@ -21,7 +21,7 @@ import {
 import { lateExplainLines } from "./lateHelpers";
 import { breakdownLines, referralLabel } from "./salaryBreakdown";
 
-import { formatMoney } from "../../utils/brand";
+import { formatMoney, companyTimeZone } from "../../utils/brand";
 export const DayEditButton = ({ onClick }) => (
   <button
     type="button"
@@ -564,7 +564,7 @@ export const LeaveBalanceLine = ({ balance, leftBeforeConfirmation = false }) =>
           day: "2-digit",
           month: "short",
           year: "numeric",
-          timeZone: "Asia/Kolkata",
+          timeZone: companyTimeZone(),
         })}
         ; earlier leave is Unpaid
       </span>

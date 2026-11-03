@@ -14,7 +14,8 @@ import {
   CalendarPlus,
   CalendarCheck,
   ShieldCheck,
-  Settings as SettingsIcon,
+  Building2,
+  ArrowLeftRight,
   LogOut,
 } from "lucide-react";
 import BrandLogo from "./BrandLogo";
@@ -25,7 +26,10 @@ import {
   isAdminUser,
   isSuperAdminUser,
   hasTabAccess,
+  companyHasTab,
+  isCompanyLevelUser,
 } from "../../utils/authUser";
+import { getSelectedCompany, isOwnerCompany } from "../../utils/company";
 
 // `tabKey` links a nav item to a permissions tab (see utils/permissionTabs.js).
 // Items with no tabKey (Dashboard, Holidays, the self-service screens) are
@@ -39,7 +43,7 @@ import {
 // linked" errors for that role. `hideForSuperAdmin` keeps them off the
 // super admin's sidebar specifically.
 const NAV_ITEMS = [
-  { label: "Dashboard", icon: LayoutDashboard, path: "/hrmlayout", adminOnly: false },
+  { label: "Dashboard", icon: LayoutDashboard, path: "/hrmlayout", adminOnly: false, companyTab: "dashboard" },
   { label: "Staff", icon: Users, path: "/staffmemberLayout/staffmember", adminOnly: true, tabKey: "staff" },
   { label: "Staff Basic Payroll", icon: Wallet, path: "/hrmlayout/staffbasicpayroll", adminOnly: true, tabKey: "staffbasicpayroll" },
    { label: "Payroll", icon: DollarSign, path: "/hrmlayout/payroll", adminOnly: true, tabKey: "payroll" },
@@ -48,7 +52,7 @@ const NAV_ITEMS = [
     { label: "Attendance", icon: Clock, path: "/hrmlayout/leaveattendance", adminOnly: true, tabKey: "attendance", countKey: "presentToday" },
       { label: "Leave", icon: CalendarCheck, path: "/hrmlayout/leave", adminOnly: true, tabKey: "leave" },
         { label: "Resignations", icon: LogOut, path: "/hrmlayout/resignations", adminOnly: true, tabKey: "resignations", countKey: "pendingResignations" },
-  { label: "Holidays", icon: Calendar, path: "/hrmlayout/holidays", adminOnly: false, countKey: "holidays" },
+  { label: "Holidays", icon: Calendar, path: "/hrmlayout/holidays", adminOnly: false, countKey: "holidays", companyTab: "holidays" },
 
 
  
@@ -59,9 +63,14 @@ const NAV_ITEMS = [
 
   // Logo, company details, payroll currency. Super admin always; an admin
   // only when the "Settings" tab was granted on the Permissions screen.
-  { label: "Settings", icon: SettingsIcon, path: "/hrmlayout/settings", adminOnly: true, tabKey: "settings" },
+  // White label: the company's own profile (logo, address, CR / VAT /
+  // GSTIN, currency, time zone, weekly off, signatory, stamp).
+  { label: "Company Profile", icon: Building2, path: "/hrmlayout/settings", adminOnly: true, tabKey: "settings" },
+  // Company admin (or super admin with a company open): the company's branches
+  // and the one-time links for each branch's admin. Hidden from branch admins.
+  { label: "Branches", icon: Building2, path: "/hrmlayout/branches", adminOnly: true, companyLevelOnly: true, companyTab: "branches" },
   // Super-admin only — manage which tabs each admin account can see.
-  { label: "Admin Permissions", icon: ShieldCheck, path: "/hrmlayout/permissions", adminOnly: true, superAdminOnly: true },
+  { label: "Admin Permissions", icon: ShieldCheck, path: "/hrmlayout/permissions", adminOnly: true, superAdminOnly: true, companyTab: "permissions" },
   // Staff self-service — each screen only ever shows the logged-in
   // account's own records. My Leave Requests is `staffOnly`: it's the
   // Sick/Casual/Paid/Unpaid checkbox self-apply flow meant for plain staff
@@ -69,7 +78,7 @@ const NAV_ITEMS = [
   // "Apply Leave" flow for any staff member (including themselves, if
   // they're also on the staff list) from Attendance → Leave, so this entry
   // is hidden for both instead of just the super admin.
-  { label: "My Leave Requests", icon: CalendarPlus, path: "/hrmlayout/my-leave-requests", adminOnly: false, staffOnly: true },
+  { label: "My Leave Requests", icon: CalendarPlus, path: "/hrmlayout/my-leave-requests", adminOnly: false, staffOnly: true, companyTab: "leave" },
   // Plain staff's own "Attendance" tab — separate from the admin-only
   // "Attendance" entry above (which lists every staff member and lets an
   // admin open any of their calendars). `staffOnly` keeps this off the
@@ -77,9 +86,9 @@ const NAV_ITEMS = [
   // covers this and more.
   // No "present today" count here: only the super admin / admins see how
   // many people are logged in (on the admin Attendance entry above).
-  { label: "Attendance", icon: Clock, path: "/hrmlayout/my-attendance", adminOnly: false, staffOnly: true },
-  { label: "My Payslips", icon: FileText, path: "/hrmlayout/my-payslips", adminOnly: false, hideForSuperAdmin: true },
-  { label: "My Resignation", icon: LogOut, path: "/hrmlayout/my-resignation", adminOnly: false, hideForSuperAdmin: true },
+  { label: "Attendance", icon: Clock, path: "/hrmlayout/my-attendance", adminOnly: false, staffOnly: true, companyTab: "attendance" },
+  { label: "My Payslips", icon: FileText, path: "/hrmlayout/my-payslips", adminOnly: false, hideForSuperAdmin: true, companyTab: "payroll" },
+  { label: "My Resignation", icon: LogOut, path: "/hrmlayout/my-resignation", adminOnly: false, hideForSuperAdmin: true, companyTab: "resignations" },
 ];
 
 // Small notification-style pills on the sidebar. Numbers come from
@@ -128,14 +137,21 @@ const Sidebar = ({ isOpen, toggleSidebar, isMobile = false }) => {
   const superAdmin = isSuperAdminUser(currentUser);
 
   const visibleNavItems = NAV_ITEMS.filter((item) => {
+    // A tab the super admin switched off for this company is gone for
+    // everyone (admins, branch admins, staff and the super admin).
+    const companyTab = item.companyTab || item.tabKey;
+    if (companyTab && !companyHasTab(companyTab, currentUser)) return false;
     if (item.staffOnly && admin) return false;
     if (item.superAdminOnly && !superAdmin) return false;
+    if (item.companyLevelOnly && !isCompanyLevelUser(currentUser)) return false;
     if (item.hideForSuperAdmin && superAdmin) return false;
     if (!admin) return !item.adminOnly;
     // Superadmin (or an item with no tab gate, e.g. the default tabs and
     // the Permissions link itself) always shows; a plain admin needs the
     // specific tab granted.
-    if (!item.tabKey || superAdmin) return true;
+    if (!item.tabKey) return true;
+    // Tabs the company does not have are hidden for everyone.
+    if (superAdmin) return companyHasTab(item.tabKey, currentUser);
     return hasTabAccess(item.tabKey, currentUser);
   });
 
@@ -163,6 +179,26 @@ const Sidebar = ({ isOpen, toggleSidebar, isMobile = false }) => {
           />
         </div>
 
+        {superAdmin && (
+          <NavLink
+            to="/companies"
+            className="mx-2 mt-3 flex items-center gap-2 rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300 hover:bg-white/10"
+            title="Switch company"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block text-[10px] uppercase tracking-wide text-slate-500">Company</span>
+              <span className="block truncate font-semibold text-white">
+                {getSelectedCompany()?.name || currentUser?.company?.name || "Choose…"}
+              </span>
+            </span>
+            <ArrowLeftRight size={14} className="shrink-0" />
+          </NavLink>
+        )}
+        {superAdmin && getSelectedCompany() && !isOwnerCompany(getSelectedCompany()) && (
+          <div className="mx-2 mt-2 rounded-lg bg-amber-500/15 px-3 py-1.5 text-[11px] font-semibold text-amber-300">
+            View only — this company&apos;s admin manages it
+          </div>
+        )}
         <nav className="flex-1 overflow-y-auto py-3 px-2">
           {visibleNavItems.map((item) => (
             <NavLink

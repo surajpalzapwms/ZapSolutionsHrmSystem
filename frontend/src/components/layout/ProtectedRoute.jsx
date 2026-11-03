@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { getCurrentUser, isSuperAdminUser } from "../../utils/authUser";
 import api from "../../utils/api";
+import { getSelectedCompany, setSelectedCompany } from "../../utils/company";
 
 // An admin's role / permissions can change after
 // someone logged in. Once per page load, ask the server what is true now and
@@ -23,9 +24,15 @@ const refreshSession = async () => {
       role: superAdmin ? before.role : (me.role ?? before.role),
       permissions: superAdmin ? before.permissions : (me.permissions ?? before.permissions),
       photoUrl: me.photoUrl || null,
+      // White label: the company this login works on (name, country, tabs).
+      company: me.company || null,
     };
-    // Left over from the old multi-company version.
-    delete next.company;
+    // Super admin: keep the opened company's tabs / logo up to date.
+    if (superAdmin && me.company && getSelectedCompany()?._id === me.company._id) {
+      const before = JSON.stringify(getSelectedCompany());
+      setSelectedCompany(me.company);
+      if (JSON.stringify(getSelectedCompany()) !== before) return true;
+    }
     if (JSON.stringify(next) === JSON.stringify(before)) return false;
     localStorage.setItem("user", JSON.stringify(next));
     return true;
@@ -59,6 +66,17 @@ const ProtectedRoute = ({ children }) => {
 
   if (!token) {
     return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
+  // Super admin with several companies: open one first.
+  const user = getCurrentUser();
+  if (
+    isSuperAdminUser(user) &&
+    !getSelectedCompany() &&
+    !user?.company &&
+    !location.pathname.startsWith("/companies")
+  ) {
+    return <Navigate to="/companies" replace />;
   }
 
   return children;

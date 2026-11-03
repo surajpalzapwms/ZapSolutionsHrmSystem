@@ -1,6 +1,7 @@
 // models/BirthdayWish.js — one "Happy Birthday" wish from one colleague to
 // a staff member on their birthday. A person can wish someone once a year.
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 const birthdayWishSchema = new mongoose.Schema(
   {

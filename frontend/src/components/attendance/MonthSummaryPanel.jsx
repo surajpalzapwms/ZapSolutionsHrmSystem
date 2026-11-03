@@ -14,13 +14,13 @@ import { Wallet, CalendarCheck, HandCoins, Calculator, Building2 } from "lucide-
 import { formatCurrency } from "../../utils/numberUtils";
 import { formatDateToDDMMMYYYY } from "../../utils/dateUtils";
 import { referralLabel } from "./salaryBreakdown";
+import { tzOffsetMs } from "../../utils/brand";
 
-const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 const istPeriodOf = (value) => {
   if (!value) return "";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-  const t = new Date(d.getTime() + IST_OFFSET_MS);
+  const t = new Date(d.getTime() + tzOffsetMs());
   return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}`;
 };
 const periodLabel = (p) => {

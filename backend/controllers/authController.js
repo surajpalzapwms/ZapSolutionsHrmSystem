@@ -2,6 +2,8 @@ import User from "../models/User.js";
 import Staff from "../models/Staff.js";
 import { performSelfCheckIn } from "./leave.js";
 import jwt from "jsonwebtoken";
+import { effectiveEnabledTabs } from "../config/permissions.js";
+import { isOwnerCompany } from "../utils/ownerCompany.js";
 import {
   ALL_TAB_KEYS,
   isAdminRole,
@@ -11,6 +13,42 @@ import { isFromOfficeNetwork } from "../utils/officeNetwork.js";
 import { autoAttendanceApplies } from "../services/presence.js";
 import { encryptPassword, decryptPassword } from "../utils/passwordVault.js";
 import { photoUrlFor, userPhotoUrlFor } from "../utils/fileSigning.js";
+import { enterCompany, runUnscoped } from "../utils/tenant.js";
+import { findCompanyCached } from "../services/companyRegistry.js";
+import { listRegisteredCompanies } from "../utils/companyContext.js";
+import { buildProfile } from "../services/companyProfile.js";
+import { branchSummary, findCompanyAdmin, ONE_COMPANY_ADMIN_MESSAGE } from "../services/adminRules.js";
+
+// What the website / app need to know about the login's company.
+const companyForClient = (company, req) => {
+  if (!company) return null;
+  const p = buildProfile(company, { baseUrl: `${req.protocol}://${req.get("host")}` });
+  return {
+    _id: String(company._id),
+    name: company.name,
+    slug: company.slug,
+    country: p.country,
+    currencyCode: p.currencyCode,
+    timeZone: p.timeZone,
+    weeklyOffDays: p.weeklyOffDays,
+    workStartTime: p.workStartTime,
+    workEndTime: p.workEndTime,
+    shortSaturday: p.shortSaturday,
+    shortSaturdayActive: p.shortSaturdayActive,
+    saturdayStartTime: p.saturdayStartTime,
+    saturdayEndTime: p.saturdayEndTime,
+    logoUrl: p.logoUrl,
+    primaryColor: p.primaryColor,
+    sidebarColor: p.sidebarColor,
+    rtl: p.rtl,
+    // The owner company (ZAP Solutionz): the super admin has full access there.
+    isOwner: isOwnerCompany(company),
+    // null = every tab
+    enabledTabs: effectiveEnabledTabs(company),
+    tabsVersion: company.tabsVersion || 1,
+    probationEnabled: company.probationEnabled !== false,
+  };
+};
 
 // The photo shown in the website header / app profile for this login:
 // the linked staff member's photo, else the account's own photo (super
@@ -47,6 +85,72 @@ const syncStaffViewablePassword = async (email, plainPassword) => {
     );
   } catch (err) {
     console.error("Could not sync staff viewable password:", err.message);
+  }
+};
+
+// Company admins created before the login link existed only have a bcrypt
+// hash. The password just typed is correct, so keep an encrypted copy now —
+// from then on the super admin's login link can fill it in. Never throws.
+const syncAdminLinkPassword = async (user, plainPassword) => {
+  try {
+    if (!user || user.role !== "admin" || !plainPassword) return;
+    const withEnc = await runUnscoped(() =>
+      User.findById(user._id).select("+passwordEncrypted").lean(),
+    );
+    if (decryptPassword(withEnc?.passwordEncrypted) === plainPassword) return;
+    await runUnscoped(() =>
+      User.updateOne({ _id: user._id }, { $set: { passwordEncrypted: encryptPassword(plainPassword) } }),
+    );
+  } catch (err) {
+    console.error("Could not store admin login-link password:", err.message);
+  }
+};
+
+// ── Company login link (made by the super admin) ─────────────────────────
+// GET /api/auth/login-link/:token  (public, rate limited)
+// The token is a signed, short-lived JWT made by POST /api/company/:id/login-link.
+// Answers the company admin's e-mail and password so the login page can fill
+// them in. Nothing is returned once the link expires, the admin is removed /
+// deactivated, or the company is inactive.
+export const LOGIN_LINK_PURPOSE = "company-admin-login-link";
+
+export const getLoginLink = async (req, res) => {
+  const gone = (message = "This login link has expired. Ask for a new one.") =>
+    res.status(410).json({ success: false, message, code: "LOGIN_LINK_INVALID" });
+  try {
+    let payload;
+    try {
+      payload = jwt.verify(String(req.params.token || ""), process.env.JWT_SECRET);
+    } catch {
+      return gone();
+    }
+    if (payload?.purpose !== LOGIN_LINK_PURPOSE || !payload.uid || !payload.cid) return gone();
+
+    const company = await findCompanyCached(payload.cid);
+    if (!company || company.isActive === false) return gone("This company is not active.");
+
+    const user = await runUnscoped(() =>
+      User.findOne({ _id: payload.uid, company: payload.cid, role: "admin" })
+        .select("+passwordEncrypted email isActive")
+        .lean(),
+    );
+    if (!user || user.isActive === false) return gone("This admin login is no longer active.");
+
+    const password = decryptPassword(user.passwordEncrypted) || "";
+    res.json({
+      success: true,
+      data: {
+        identifier: user.email,
+        password,
+        // false = admin has not logged in since this feature was added; the
+        // e-mail is filled in, the password must be typed once.
+        hasPassword: Boolean(password),
+        companySlug: company.slug,
+      },
+    });
+  } catch (err) {
+    console.error("getLoginLink failed:", err.message);
+    res.status(500).json({ success: false, message: "Could not open this login link" });
   }
 };
 
@@ -245,14 +349,23 @@ export const register = async (req, res) => {
 // member's e-mail — the login account (User) is linked to Staff by e-mail,
 // so the password is the same whichever one is used.
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const resolveLoginEmail = async (identifier) => {
+// Staff IDs are unique per COMPANY only, so a Staff ID login is looked up
+// in the company of the login page (?company=slug -> body.company). Without
+// it, it only works when that Staff ID exists in exactly one company.
+const resolveLoginEmail = async (identifier, companySlug) => {
   const raw = String(identifier || "").trim();
-  if (!raw) return null;
-  if (raw.includes("@")) return raw.toLowerCase();
-  const staff = await Staff.findOne({ staffId: new RegExp(`^${escapeRegex(raw)}$`, "i") })
-    .select("email")
-    .lean();
-  return staff?.email ? String(staff.email).trim().toLowerCase() : null;
+  if (!raw) return { email: null };
+  if (raw.includes("@")) return { email: raw.toLowerCase() };
+  const filter = { staffId: new RegExp(`^${escapeRegex(raw)}$`, "i") };
+  const slug = String(companySlug || "").trim().toLowerCase();
+  if (slug) {
+    const company = listRegisteredCompanies().find((c) => c.slug === slug);
+    if (company) filter.company = company._id;
+  }
+  const matches = await runUnscoped(() => Staff.find(filter).select("email").limit(2).lean());
+  if (matches.length > 1) return { ambiguous: true };
+  const staff = matches[0];
+  return { email: staff?.email ? String(staff.email).trim().toLowerCase() : null };
 };
 
 // @desc    Login user (e-mail OR Staff ID + password)
@@ -272,18 +385,54 @@ export const login = async (req, res) => {
       });
     }
 
-    const normalizedEmail = await resolveLoginEmail(identifier);
+    const resolved = await resolveLoginEmail(identifier, body.company);
+    if (resolved.ambiguous) {
+      return res.status(400).json({
+        success: false,
+        message: "This Staff ID is used in more than one company. Please log in with your e-mail.",
+        code: "STAFF_ID_AMBIGUOUS",
+      });
+    }
+    const normalizedEmail = resolved.email;
+    // Login e-mails are unique across all companies.
     const user = normalizedEmail
-      ? await User.findOne({ email: normalizedEmail }).select("+password")
+      ? await runUnscoped(() => User.findOne({ email: normalizedEmail }).select("+password"))
       : null;
     if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({ success: false, message: "Invalid credentials" });
+    }
+
+    // From here on every lookup is limited to the user's company.
+    let company = null;
+    if (user.role !== "super-admin") {
+      company = user.company ? await findCompanyCached(user.company) : null;
+      if (!company && !user.company && listRegisteredCompanies().length === 1) {
+        company = listRegisteredCompanies()[0];
+      }
+      if (!company) {
+        return res.status(403).json({
+          success: false,
+          message: "Your account is not linked to a company. Contact your administrator.",
+          code: "COMPANY_MISSING",
+        });
+      }
+      if (company.isActive === false) {
+        return res.status(403).json({
+          success: false,
+          message: "Your company's account is inactive. Please contact the service provider.",
+          code: "COMPANY_INACTIVE",
+        });
+      }
+      enterCompany(company._id);
+    } else if (listRegisteredCompanies().length === 1) {
+      company = listRegisteredCompanies()[0];
     }
 
     // Accounts created before passwords were kept viewable only have a
     // bcrypt hash, which can't be reversed. The password just typed is the
     // correct one, so store it now — from then on it shows in History.
     await syncStaffViewablePassword(user.email, password);
+    await syncAdminLinkPassword(user, password);
 
     // Block login for staff who have already left (Relieved + date passed).
     const relievedBlockReason = await getRelievedLoginBlockReason(user.email);
@@ -332,6 +481,11 @@ export const login = async (req, res) => {
         role: user.role,
         permissions: user.permissions,
         photoUrl: await accountPhotoUrl(user),
+        // The super admin has no company of their own (null) unless the
+        // installation has only one.
+        company: companyForClient(company, req),
+        // null = the whole company; a branch admin (and their staff) has one.
+        branch: await branchSummary(user.branch),
         token,
       },
     });
@@ -346,12 +500,17 @@ export const login = async (req, res) => {
 // @access  Private
 export const getMe = async (req, res) => {
   try {
-    // `company` is a leftover field from the old multi-company version.
-    const { company: _legacyCompany, ...user } =
+    const { company: _companyId, ...user } =
       (await User.findById(req.user.id).select("-password").lean()) || {};
     res.status(200).json({
       success: true,
-      data: { ...user, photoUrl: await accountPhotoUrl(user) },
+      data: {
+        ...user,
+        photoUrl: await accountPhotoUrl(user),
+        // The company this request works on (the super admin's open one).
+        company: companyForClient(req.company, req),
+        branch: await branchSummary(user.branch),
+      },
     });
   } catch (error) {
     res.status(500).json({
@@ -408,6 +567,7 @@ export const changePassword = async (req, res) => {
 
     // Without this, the Staff History view keeps showing the old password.
     await syncStaffViewablePassword(user.email, newPassword);
+    // (admin's encrypted copy is updated by the User model's save hook)
 
     res.status(200).json({
       success: true,
@@ -485,6 +645,7 @@ export const updateAdminPermissions = async (req, res) => {
 
     if (revoke) {
       target.role = "user";
+      target.adminScope = undefined; // frees the company's / branch's single admin seat
       target.permissions = { allTabs: false, tabs: [] };
       await target.save();
       return res.status(200).json({
@@ -504,7 +665,15 @@ export const updateAdminPermissions = async (req, res) => {
           message: "This account is not an admin",
         });
       }
-      target.role = "admin";
+      // Promoting staff to admin would create a second admin for the company.
+      // Admins now come only from invite links (one per company / per branch).
+      const existing = target.company ? await findCompanyAdmin(target.company) : null;
+      return res.status(409).json({
+        success: false,
+        message: existing
+          ? ONE_COMPANY_ADMIN_MESSAGE
+          : "Admin logins are created with an invite link now. Open Companies → Admins and generate the company admin link.",
+      });
     }
 
     // Filter out anything that isn't a real tab/sub-tab key so a stale or

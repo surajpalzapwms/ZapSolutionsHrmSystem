@@ -49,6 +49,7 @@
 // in what the user forgot.
 
 import crypto from "crypto";
+import { tzOffsetMs, companyTimeZone } from "../utils/companyContext.js";
 import Attendance from "../models/Attendance.js";
 import PresenceDevice from "../models/PresenceDevice.js";
 import User from "../models/User.js";
@@ -57,7 +58,7 @@ import {
   getUserShift,
   getClampedWorkingMinutes,
   findAttendanceByUserAndDate,
-  REQUIRED_WORK_MINUTES,
+  requiredWorkMinutes,
 } from "./leave.js";
 import { performSelfCheckIn, finalizeSignOut } from "../controllers/leave.js";
 import { formatMinutesToTimeString } from "./leave.js";
@@ -104,7 +105,6 @@ export const ALL_EVENTS = [
 ];
 const SHUTDOWN_EVENTS = ["shutdown", "logoff"];
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MAX_EVENTS = 60;
 
 export const hashDeviceToken = (token) =>
@@ -114,7 +114,7 @@ export const newDeviceToken = () => crypto.randomBytes(32).toString("hex");
 
 /** Minutes since IST midnight for a timestamp. */
 const istMinuteOfDay = (date) => {
-  const ist = new Date(new Date(date).getTime() + IST_OFFSET_MS);
+  const ist = new Date(new Date(date).getTime() + tzOffsetMs());
   return ist.getUTCHours() * 60 + ist.getUTCMinutes();
 };
 
@@ -154,8 +154,9 @@ const workedMinutesUntil = (rec, user, until) => {
 export const isDayDoneFor = (rec, user, disconnectAt, now = new Date()) => {
   const { shiftEndTime } = getUserShift(user);
   const shiftOver = istMinuteOfDay(now) >= hmToMinutes(shiftEndTime);
+  const { shiftStartTime } = getUserShift(user);
   const workedEnough =
-    workedMinutesUntil(rec, user, disconnectAt) >= REQUIRED_WORK_MINUTES;
+    workedMinutesUntil(rec, user, disconnectAt) >= requiredWorkMinutes(shiftStartTime, shiftEndTime);
   return shiftOver || workedEnough;
 };
 
@@ -226,7 +227,7 @@ const reopenAfterAutoSignOut = async (rec, device, now) => {
 
 const fmtIST = (d) =>
   new Date(d).toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: companyTimeZone(),
     hour: "2-digit",
     minute: "2-digit",
   });

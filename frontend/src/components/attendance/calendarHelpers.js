@@ -3,6 +3,7 @@
 // Kept separate from calendarGridPieces.jsx (components only) so Vite's
 // fast refresh works for those components during development.
 
+import { companyTimeZone } from "../../utils/brand";
 export const STATUS_STYLES = {
   present: "bg-green-500 text-white border-green-500",
   half: "bg-orange-400 text-white border-orange-400",
@@ -145,7 +146,7 @@ export const toISTDateKey = (value) => {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return null;
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
+    timeZone: companyTimeZone(),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

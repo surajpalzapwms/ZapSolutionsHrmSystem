@@ -14,6 +14,7 @@
 //
 // A value of `null` means "this role doesn't get that badge".
 import Holiday from "../models/holiday.js";
+import { tzOffsetMs } from "../utils/companyContext.js";
 import Resignation from "../models/Resignation.js";
 import Attendance from "../models/Attendance.js";
 import Staff from "../models/Staff.js";
@@ -21,7 +22,6 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { hasTabAccess, isAdminRole } from "../config/permissions.js";
 import { getStaffVisibility, hasUserLeftBy } from "../services/staffVisibility.js";
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const pad = (n) => String(n).padStart(2, "0");
 
 // An auto-generated "Saturday" / "Sunday" style entry (e.g. one imported
@@ -31,17 +31,17 @@ const WEEKEND_NAME_RE = /^\s*(?:\d+(?:st|nd|rd|th)\s+)?(?:saturday|sunday)(?:\s+
 
 /** Current IST calendar parts + the IST-day / IST-month boundaries as real instants. */
 const istNow = () => {
-  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  const ist = new Date(Date.now() + tzOffsetMs());
   const y = ist.getUTCFullYear();
   const m = ist.getUTCMonth(); // 0-11
   const d = ist.getUTCDate();
   return {
     todayStr: `${y}-${pad(m + 1)}-${pad(d)}`,
     monthStr: `${y}-${pad(m + 1)}`,
-    monthStart: new Date(Date.UTC(y, m, 1) - IST_OFFSET_MS),
-    monthEnd: new Date(Date.UTC(y, m + 1, 1) - IST_OFFSET_MS - 1),
-    dayStart: new Date(Date.UTC(y, m, d) - IST_OFFSET_MS),
-    dayEnd: new Date(Date.UTC(y, m, d + 1) - IST_OFFSET_MS - 1),
+    monthStart: new Date(Date.UTC(y, m, 1) - tzOffsetMs()),
+    monthEnd: new Date(Date.UTC(y, m + 1, 1) - tzOffsetMs() - 1),
+    dayStart: new Date(Date.UTC(y, m, d) - tzOffsetMs()),
+    dayEnd: new Date(Date.UTC(y, m, d + 1) - tzOffsetMs() - 1),
   };
 };
 
@@ -106,12 +106,12 @@ export const getSidebarCounts = asyncHandler(async (req, res) => {
 
   const [holidays, pendingResignations, presentToday] = await Promise.all([
     countHolidaysThisMonth(user, range),
-    admin && hasTabAccess(user, "resignations")
+    admin && hasTabAccess(user, "resignations", req.company)
       ? Resignation.countDocuments({ status: "pending" })
       : null,
     // Only admins / the super admin with the Attendance tab see how many
     // people are present today — plain staff never get this number.
-    admin && hasTabAccess(user, "attendance") ? countPresentToday(range) : null,
+    admin && hasTabAccess(user, "attendance", req.company) ? countPresentToday(range) : null,
   ]);
 
   // Always fresh - this is a live "notification" number.

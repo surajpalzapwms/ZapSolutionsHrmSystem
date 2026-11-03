@@ -10,6 +10,7 @@
 // months that have one) are holidays. An empty array means "no recurring
 // Saturday holiday that month" (all Saturdays are working days).
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 const saturdayHolidayRuleSchema = new mongoose.Schema(
   {

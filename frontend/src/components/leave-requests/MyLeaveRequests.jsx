@@ -21,6 +21,7 @@ import { attendanceService } from "../../services/attendanceService";
 import { leavePolicyService } from "../../services/leavePolicyService";
 import { showToast } from "../../utils/toast";
 import { getTodayDate } from "../../utils/dateUtils";
+import { isWeeklyOffDow, weeklyOffLabel } from "../../utils/brand";
 import LeaveStatusBadge from "./LeaveStatusBadge";
 import LeaveHistoryModal from "./Leavehistorymodal";
 import {
@@ -94,7 +95,8 @@ const DURATION_OPTIONS = [
   { value: "range", label: "Date Range" },
 ];
 
-// Working days between two YYYY-MM-DD dates, inclusive, skipping Sundays
+// Working days between two YYYY-MM-DD dates, inclusive, skipping the company's
+// weekly off days (Sunday, or Friday + Saturday ... — Settings → Work week & hours)
 // (the backend also skips public holidays and already-requested days).
 const countWorkingDays = (from, to) => {
   if (!from || !to || to < from) return 0;
@@ -102,7 +104,7 @@ const countWorkingDays = (from, to) => {
   let cur = new Date(`${from}T00:00:00Z`);
   const last = new Date(`${to}T00:00:00Z`);
   for (let g = 0; cur <= last && g < 366; g++) {
-    if (cur.getUTCDay() !== 0) n++;
+    if (!isWeeklyOffDow(cur.getUTCDay())) n++;
     cur = new Date(cur.getTime() + 86400000);
   }
   return n;
@@ -247,7 +249,7 @@ const AllocationEditor = ({ allocation, total, remainingByType, onChangeDays }) 
         <p className="text-xs font-semibold text-gray-600">
           Split {total} working day{total === 1 ? "" : "s"}
         </p>
-        <p className="text-[11px] text-gray-400">Sundays &amp; holidays are skipped</p>
+        <p className="text-[11px] text-gray-400">Weekly off days ({weeklyOffLabel()}) &amp; holidays are skipped</p>
       </div>
       <ul className="flex flex-col gap-1.5">
         {ordered.map((t) => {

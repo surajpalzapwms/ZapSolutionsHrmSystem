@@ -1,5 +1,7 @@
 // controllers/presenceController.js — see services/presence.js for the rules.
 import fs from "fs";
+import { runUnscoped, runWithCompany } from "../utils/tenant.js";
+import { resolveRequestCompany } from "../middleware/auth.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import Attendance from "../models/Attendance.js";
@@ -52,24 +54,30 @@ export const protectUserOrDevice = async (req, res, next) => {
   if (!deviceToken) return protect(req, res, next);
 
   try {
-    const device = await PresenceDevice.findOne({
-      tokenHash: hashDeviceToken(deviceToken),
-      revoked: { $ne: true },
-    });
+    // The device token says which user (and so which company) this is.
+    const device = await runUnscoped(() =>
+      PresenceDevice.findOne({
+        tokenHash: hashDeviceToken(deviceToken),
+        revoked: { $ne: true },
+      }),
+    );
     if (!device) {
       return res
         .status(401)
         .json({ success: false, message: "Unknown or revoked device", code: "DEVICE_INVALID" });
     }
-    const user = await User.findById(device.userId).select("-password");
+    const user = await runUnscoped(() => User.findById(device.userId).select("-password"));
     if (!user || user.isActive === false) {
       return res
         .status(403)
         .json({ success: false, message: "User inactive", code: "STAFF_INACTIVE" });
     }
+    const ctx = await resolveRequestCompany(req, user);
+    if (ctx.error) return res.status(ctx.error.status).json(ctx.error.body);
     req.user = user;
+    req.company = ctx.company;
     req.device = device;
-    return next();
+    return runWithCompany(ctx.company?._id || null, () => next());
   } catch (err) {
     res.status(500).json({ success: false, message: "Server error" });
   }

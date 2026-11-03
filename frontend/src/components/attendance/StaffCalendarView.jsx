@@ -41,7 +41,7 @@ import {
   ReferralLine,
 } from "./calendarGridPieces";
 
-import { formatMoney } from "../../utils/brand";
+import { formatMoney, isWeeklyOffDow, companyShiftForDate, weeklyOffLabel } from "../../utils/brand";
 // Annual view badge: the total PAID LEAVE amount the company has given this
 // staff member this year (Jan up to the current month, or the whole year for
 // a past year). Only the paid-leave value is counted — NOT the salary and
@@ -718,21 +718,23 @@ const MRCalendarView = ({
           const dayNum = Number(dateStr.slice(-2));
           const info = daysMap[dayNum];
           const dow = new Date(`${dateStr}T00:00:00`).getDay();
-          if (dow === 0 || info?.status) {
+          if (isWeeklyOffDow(dow) || info?.status) {
             skippedLocal++;
             return;
           }
+          // A time left blank = that day's company working hours.
+          const hours = companyShiftForDate(dateStr);
           rows.push({
             userId: calendar.attendanceUserId,
             date: dateStr,
             status: status === "half" ? "half-day" : undefined,
-            loginTime: `${dateStr}T${loginTime}:00`,
-            logoutTime: status === "half" ? undefined : `${dateStr}T${logoutTime}:00`,
+            loginTime: `${dateStr}T${loginTime || hours.start}:00`,
+            logoutTime: status === "half" ? undefined : `${dateStr}T${logoutTime || hours.end}:00`,
           });
         });
 
         if (rows.length === 0) {
-          showToast("error", "Every day in that range is a Sunday, a holiday, or already marked — nothing to add.");
+          showToast("error", `Every day in that range is a weekly off (${weeklyOffLabel()}), a holiday, or already marked — nothing to add.`);
           return false;
         }
 
@@ -743,7 +745,7 @@ const MRCalendarView = ({
           showToast(
             importedCount > 0 ? "success" : "error",
             `${importedCount} day(s) marked as ${status === "half" ? "Half Day" : "Present"}` +
-              (skippedTotal > 0 ? `, ${skippedTotal} day(s) skipped (already marked / Sunday / holiday).` : "."),
+              (skippedTotal > 0 ? `, ${skippedTotal} day(s) skipped (already marked / weekly off / holiday).` : "."),
           );
           if (importedCount === 0) return false;
         } catch (err) {

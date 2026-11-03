@@ -19,7 +19,7 @@ import Modal from "../common/Modal";
 import { showToast } from "../../utils/toast";
 import { confirmDialog } from "../../utils/confirmationDialog";
 import { getMonthName } from "../../utils/dateUtils";
-import { getCurrentUser, isAdminUser } from "../../utils/authUser";
+import { getCurrentUser, isAdminUser, isCompanyViewOnly } from "../../utils/authUser";
 import { refreshSidebarCounts } from "../../hooks/useSidebarCounts";
 
 const formatFullDate = (dateString) => {
@@ -43,7 +43,9 @@ const Holidays = () => {
   // toggle rendered on its own row under the actions row; it now lives in
   // the actions row itself, right-aligned next to Show Table.
   const [calendarViewMode, setCalendarViewMode] = useState("annual");
-  const admin = isAdminUser(getCurrentUser());
+  // Add / import / settings buttons: admins only, and not for the super
+  // admin viewing a client company (view only).
+  const admin = isAdminUser(getCurrentUser()) && !isCompanyViewOnly();
 
   const {
     currentData,

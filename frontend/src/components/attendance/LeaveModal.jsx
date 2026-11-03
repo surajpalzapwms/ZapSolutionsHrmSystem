@@ -277,7 +277,7 @@ const LeaveModal = ({
             <CalendarOff size={16} className="mt-0.5 flex-shrink-0" />
             <span>
               This date is <strong>{blockedReason}</strong>. Leave cannot be
-              applied on a holiday or Sunday.
+              applied on a holiday or weekly off day.
             </span>
           </div>
         )}

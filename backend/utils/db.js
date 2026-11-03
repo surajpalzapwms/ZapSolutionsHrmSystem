@@ -1,8 +1,8 @@
 import mongoose from "mongoose";
 
 // `beforeIndexes` runs after connecting and BEFORE indexes are synced: it
-// checks that a database from the old multi-company version holds only one
-// company (see services/singleCompanyCheck.js).
+// gives records saved by the single-company version to a
+// company (see services/companyMigration.js).
 const connectDB = async (uri, beforeIndexes) => {
   try {
     await mongoose.connect(uri, {
@@ -17,10 +17,11 @@ const connectDB = async (uri, beforeIndexes) => {
     // Mongoose never drops an index just because the field was removed
     // or renamed in the schema — the old index stays in MongoDB forever
     // until something explicitly drops it. syncIndexes() reconciles each
-    // collection's real indexes with what the current schema declares,
-    // which also removes the old per-company unique indexes (e.g.
-    // { company, staffId }) left by the multi-company version and builds
-    // the plain ones (e.g. a unique staffId).
+    // collection's real indexes with what the current schema declares:
+    // the old single-company unique indexes (e.g. a unique staffId) are
+    // replaced by per-company ones (e.g. { company, staffId }, see the
+    // index rewrite in utils/tenant.js), so two companies can both have
+    // staff "EMP001".
     for (const model of Object.values(mongoose.models)) {
       try {
         await model.syncIndexes();

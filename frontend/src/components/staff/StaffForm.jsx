@@ -3,6 +3,10 @@ import React, { useEffect, useState } from "react";
 import { Eye, EyeOff, RefreshCw, Copy, Check, RotateCcw } from "lucide-react";
 import { useForm } from "../../hooks/useForm";
 import { staffService } from "../../services/staffService";
+import { branchService } from "../../services/branchService";
+import { isCompanyLevelUser, companyUsesProbation } from "../../utils/authUser";
+import { useBrand } from "../../contexts/BrandContext";
+import { staffIdPrefixFor } from "../../utils/brand";
 import InputField from "../common/InputField";
 import PhoneInput from "../common/PhoneInput";
 import DatePicker from "../common/DatePicker";
@@ -56,9 +60,9 @@ const validate = (form, isEdit) => {
   return errors;
 };
 
-// New staff IDs start at ZS010 and count up from there.
-const STAFF_ID_PREFIX = "ZS";
-const STAFF_ID_START = 10;
+// New staff IDs = company prefix (ZS for "Zap Solutionz", AC for "Acme") and
+// count up with 4 digits (HC0001, HC0002 ...).
+const STAFF_ID_START = 1;
 const STATUS_OPTIONS = ["Internship", "Probation", "Confirmation", "Relieved"];
 
 const EMPLOYMENT_TYPE_OPTIONS = ["Project Basic", "Outsource Base"];
@@ -149,6 +153,10 @@ const StaffForm = ({
   isEdit = false,
   onStaffIdChange,
 }) => {
+  // Company without Internship / Probation (set by the super admin): staff
+  // are confirmed on the joining date — Confirmation Date = Joining Date.
+  const brand = useBrand();
+  const probationOn = brand.probationEnabled !== false && companyUsesProbation();
   const {
     form,
     errors,
@@ -172,10 +180,11 @@ const StaffForm = ({
       gender: "", // Male -> "Mr.", Female -> "Ms."
       designation: "",
       department: "",
+      branch: "", // company admin only: which branch this staff member works in
       address: "",
       currentAddress: "",
       workSchedule: "",
-      status: "Probation",
+      status: probationOn ? "Probation" : "Confirmation",
       hasInternship: false, // checkbox: does this staff member have an internship?
       internshipMonths: 3,
       internshipEndDate: "",
@@ -190,6 +199,23 @@ const StaffForm = ({
     },
     (f) => validate(f, isEdit),
   );
+
+  // Company admin: pick the branch of this staff member (only shown when the
+  // company has branches). A branch admin never sees this — the server always
+  // puts their staff in their own branch.
+  const [branches, setBranches] = useState([]);
+  const canPickBranch = isCompanyLevelUser();
+  useEffect(() => {
+    if (!canPickBranch) return undefined;
+    let alive = true;
+    branchService
+      .list()
+      .then((r) => alive && setBranches((r.data?.data || []).filter((b) => b.isActive)))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [canPickBranch]);
 
   const [showPassword, setShowPassword] = useState(!isEdit);
   const [justGenerated, setJustGenerated] = useState(false);
@@ -284,11 +310,15 @@ const StaffForm = ({
       gender: initialData.gender || "",
       designation: initialData.designation || "",
       department: initialData.department || "",
+      branch: initialData.branch ? String(initialData.branch._id || initialData.branch) : "",
       address: initialData.address || "",
       currentAddress: initialData.currentAddress || "",
       workSchedule: initialData.workSchedule || "",
-      status: initialData.status || "Probation",
-      hasInternship,
+      status:
+        !probationOn && ["Internship", "Probation", ""].includes(initialData.status || "")
+          ? "Confirmation"
+          : initialData.status || "Probation",
+      hasInternship: probationOn && hasInternship,
       internshipMonths,
       internshipEndDate: savedInternshipEnd,
       probationMonths,
@@ -331,9 +361,14 @@ const StaffForm = ({
       .then((res) => {
         if (!mounted) return;
         const list = res.data?.data ?? res.data ?? [];
-        const count = Array.isArray(list) ? list.length : 0;
+        const prefix = staffIdPrefixFor();
+        const re = new RegExp(`^${prefix}(\\d+)$`);
+        const max = (Array.isArray(list) ? list : []).reduce((m, st) => {
+          const hit = re.exec(String(st?.staffId || ""));
+          return hit ? Math.max(m, parseInt(hit[1], 10) || 0) : m;
+        }, 0);
         setPreviewId(
-          `${STAFF_ID_PREFIX}${String(STAFF_ID_START + count).padStart(3, "0")}`,
+          `${prefix}${String(Math.max(max + 1, STAFF_ID_START)).padStart(4, "0")}`,
         );
       })
       .catch(() => {
@@ -601,6 +636,14 @@ const StaffForm = ({
       }
       delete payload.hasInternship; // UI-only flag
 
+      // No probation in this company: confirmed on the joining date.
+      if (!probationOn && payload.status !== "Relieved") {
+        payload.status = "Confirmation";
+        payload.confirmationDate = payload.date || "";
+        payload.internshipEndDate = "";
+        payload.probationEndDate = "";
+      }
+
       if (activeSection === "status") {
         payload.employmentType = "";
         payload.projectStartDate = "";
@@ -804,6 +847,19 @@ const StaffForm = ({
         />
       </div>
 
+      {canPickBranch && branches.length > 0 && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+          <Select
+            name="branch"
+            value={form.branch}
+            onChange={handleChange}
+            placeholder="No branch (head office)"
+            options={branches.map((b) => ({ value: b._id, label: b.name }))}
+          />
+        </div>
+      )}
+
       {/* Permanent / current address */}
       <div className="grid grid-cols-2 gap-4">
         <InputField
@@ -953,24 +1009,32 @@ const StaffForm = ({
 
         {activeSection === "status" ? (
           <>
-            <label className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                name="hasInternship"
-                checked={hasInternship}
-                onChange={handleInternshipToggle}
-                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              This staff member has an internship period
-            </label>
+            {probationOn ? (
+              <label className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  name="hasInternship"
+                  checked={hasInternship}
+                  onChange={handleInternshipToggle}
+                  className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                This staff member has an internship period
+              </label>
+            ) : (
+              <p className="mb-3 text-xs text-gray-500">
+                This company has no internship or probation — staff are confirmed on their joining date.
+              </p>
+            )}
 
             <div
               className={`grid grid-cols-2 gap-3 mb-4 ${
-                hasInternship ? "sm:grid-cols-4" : "sm:grid-cols-3"
+                !probationOn ? "" : hasInternship ? "sm:grid-cols-4" : "sm:grid-cols-3"
               }`}
             >
-              {STATUS_OPTIONS.filter(
-                (status) => hasInternship || status !== "Internship",
+              {STATUS_OPTIONS.filter((status) =>
+                probationOn
+                  ? hasInternship || status !== "Internship"
+                  : status === "Confirmation" || status === "Relieved",
               ).map((status) => (
                 <div
                   key={status}
@@ -1088,7 +1152,29 @@ const StaffForm = ({
                 </div>
               )}
 
-              {form.status === "Confirmation" && (
+              {form.status === "Confirmation" && !probationOn && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Confirmation Date
+                      </label>
+                      <div className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700">
+                        {form.date ? formatDisplayDate(form.date) : "Same as Joining Date"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-500 bg-green-50 p-2 rounded border border-green-100">
+                    <p className="font-medium text-green-700">How it&apos;s set:</p>
+                    <p>
+                      This company has no internship or probation, so the Confirmation
+                      Date is always the Joining Date. Leave balance starts from that day.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {form.status === "Confirmation" && probationOn && (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-4">
                     <div>

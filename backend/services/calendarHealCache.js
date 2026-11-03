@@ -20,7 +20,8 @@
 // Concurrent requests for the same staff+year share one in-flight heal
 // instead of running the same passes in parallel and racing each other.
 
-import { invalidateResponseCache } from "./responseCache.js";
+import { invalidateResponseCache, noteWriteStarting } from "./responseCache.js";
+import { getCompanyId } from "../utils/tenant.js";
 
 const HEAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -29,12 +30,17 @@ const inFlight = new Map(); // "staffId:year" -> Promise
 let generation = 0; // bumped on every write so an in-flight heal that
 // started BEFORE a write never marks the post-write data as "healed"
 
-export const markCalendarDataChanged = () => {
+export const markCalendarDataChanged = (companyId = getCompanyId()) => {
   generation++;
-  lastHealAt.clear();
+  if (companyId) {
+    const prefix = `${companyId}|`;
+    for (const k of lastHealAt.keys()) if (k.startsWith(prefix)) lastHealAt.delete(k);
+  } else {
+    lastHealAt.clear();
+  }
   // Any data change also invalidates the cached payroll pending summary,
   // settlements and staff summary (see services/responseCache.js).
-  invalidateResponseCache();
+  invalidateResponseCache(companyId);
 };
 
 /**
@@ -42,7 +48,8 @@ export const markCalendarDataChanged = () => {
  * since. `healFn` should resolve to `true` when every pass succeeded; a
  * `false` result (some pass failed) is not cached, so it retries next time.
  */
-export const runCalendarSelfHealOnce = async (key, healFn) => {
+export const runCalendarSelfHealOnce = async (rawKey, healFn) => {
+  const key = `${getCompanyId() || "_"}|${rawKey}`;
   const last = lastHealAt.get(key);
   if (last && Date.now() - last < HEAL_TTL_MS) return;
 
@@ -75,8 +82,11 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  */
 export const invalidateCalendarHealOnWrite = (req, res, next) => {
   if (WRITE_METHODS.has(req.method)) {
-    markCalendarDataChanged();
-    res.on("finish", markCalendarDataChanged);
+    // Before: stop in-flight heals from marking pre-write data as healed.
+    // After: protect() has run, so only the writing company's caches go.
+    generation++;
+    noteWriteStarting();
+    res.on("finish", () => markCalendarDataChanged(req.company?._id ? String(req.company._id) : null));
   }
   next();
 };

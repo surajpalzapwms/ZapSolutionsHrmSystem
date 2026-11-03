@@ -15,11 +15,12 @@ import { ChevronDown, Search } from "lucide-react";
 import "flag-icons/css/flag-icons.min.css";
 import {
   COUNTRIES,
-  DEFAULT_COUNTRY,
+  companyPhoneCountry,
   formatPhone,
   getCountry,
   parsePhone,
 } from "../../utils/phone";
+import { useBrand } from "../../contexts/BrandContext";
 
 const Flag = ({ iso, className = "" }) => (
   <span
@@ -49,6 +50,7 @@ const PhoneInput = ({
   const wrapRef = useRef(null);
   const searchRef = useRef(null);
   const lastValue = useRef(value);
+  const brand = useBrand();
 
   // Follow the value when the parent loads / switches records (edit another
   // staff member, reset the form...). An empty value only resets the country
@@ -60,10 +62,26 @@ const PhoneInput = ({
         getCountry(prev).dial === getCountry(parsed.country).dial ? prev : parsed.country,
       );
     } else if (lastValue.current) {
-      setCountry(DEFAULT_COUNTRY);
+      setCountry(companyPhoneCountry());
     }
     lastValue.current = value;
   }, [value, parsed.country]);
+
+  // Empty field: start with the company's country code (+971 for a Dubai
+  // company, +966 for Saudi ...). Also follows the company once its details
+  // finish loading. A country the user already picked is kept.
+  const pickedByUser = useRef(false);
+  useEffect(() => {
+    if (!value && !pickedByUser.current) setCountry(companyPhoneCountry());
+  }, [brand.country]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The company's country first in the list, then A–Z.
+  const orderedCountries = useMemo(() => {
+    const home = companyPhoneCountry();
+    const i = COUNTRIES.findIndex((c) => c.iso === home);
+    if (i <= 0) return COUNTRIES;
+    return [COUNTRIES[i], ...COUNTRIES.slice(0, i), ...COUNTRIES.slice(i + 1)];
+  }, [brand.country]);
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -101,6 +119,7 @@ const PhoneInput = ({
   };
 
   const pick = (iso) => {
+    pickedByUser.current = true;
     setCountry(iso);
     setOpen(false);
     setQuery("");
@@ -109,14 +128,14 @@ const PhoneInput = ({
 
   const q = query.trim().toLowerCase().replace(/^\+/, "");
   const filtered = useMemo(() => {
-    if (!q) return COUNTRIES;
-    return COUNTRIES.filter(
+    if (!q) return orderedCountries;
+    return orderedCountries.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         c.iso.toLowerCase() === q ||
         c.dial.startsWith(q),
     );
-  }, [q]);
+  }, [q, orderedCountries]);
 
   const current = getCountry(country);
   const locked = disabled || readOnly;

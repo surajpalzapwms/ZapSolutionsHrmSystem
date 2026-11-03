@@ -1,3 +1,53 @@
+# Company work week & working hours (3 Nov 2026)
+
+The company admin now decides the weekly off days AND the working time (website: Settings → Work week & hours).
+
+- **New company fields** (`models/Company.js`): `workStartTime`, `workEndTime` ("HH:mm", unset = 10:00 – 18:30),
+  `shortSaturday` (unset = on), `saturdayStartTime`, `saturdayEndTime` (unset = 10:00 – 16:00).
+  `weeklyOffDays` was already there (India Sunday, or Saturday + Sunday; Saudi / Qatar Friday + Saturday, Sunday working).
+  No migration needed: a company that saves nothing keeps exactly today's behaviour.
+- **Validation** (`controllers/companyController.js`, PUT /api/company/profile and PUT /api/company/:id):
+  times must be 24-hour "HH:mm" and the end at least 1 hour after the start.
+  Returned by GET /api/company/profile, login / `GET /api/auth/me` (`company.*`) and the company list.
+- **Company hours are the default shift** (`utils/companyContext.js` `companyWorkHours()`, `services/leave.js`):
+  - every staff member's shift = company hours, unless the admin gave them their OWN shift. Users created
+    earlier have the old 10:00 – 18:30 stored; that pair counts as "no own shift" (`hasOwnShift`).
+  - worked-time clamping, late-coming deduction, auto sign-out and the work needed before Sign Out
+    (`requiredWorkMinutes()`: shift length minus the 1:30 – 2:15 lunch; 10:00 – 18:30 = 7h 45m as before).
+  - Marking / editing / bulk-importing attendance with a blank Login or Logout time now uses the company
+    hours for that day (`companyShiftForDate()`), not the fixed 10:00 – 18:30.
+- **Short Saturday is a company switch** (`companySaturdayRule()`): Saturday hours + "any attendance = full day"
+  apply only while it is on AND Saturday is not a weekly off. A company that works a normal Saturday
+  (e.g. India with Sunday-only off) switches it off; a Saturday + Sunday company never gets it.
+- Lunch break (1:30 – 2:15 PM) and the full / half day thresholds (5h / 4h) are unchanged.
+
+# White label: multi-company for India, Saudi Arabia and Qatar (27 Oct 2026)
+
+See WHITE_LABEL.md for the full picture. In short:
+- Multi-company is back ON and complete: every request runs inside its company
+  (`protect()` → `utils/tenant.js`), per-company unique indexes, per-company
+  caches, background jobs per company. The single-company start-up check and
+  `scripts/keepOneCompany.js` are gone; old data is migrated onto a company.
+- Super admin creates a company with a name + country (+ optional first admin
+  login); super admin OR the company admin completes the company profile
+  (logo, Arabic name, address, CR / VAT / GSTIN …, currency, time zone, weekly
+  off days, signatory, signature, stamp). New `/api/company/*` endpoints;
+  `/api/settings` now answers for the caller's company.
+- Country presets (`config/countries.js`): India / Saudi Arabia / Qatar / Other.
+- Time zone and weekly off days per company everywhere (the hard-coded India
+  time and Sunday checks were replaced).
+- Staff ID documents labelled per country (Aadhaar / PAN, Iqama / Passport, QID
+  / Passport) with matching number checks.
+- Payslip PDF and HR letters use the company's logo, colours, signatory,
+  signature, stamp and registration numbers. ZAP artwork only for ZAP.
+- Logo served from `/api/company/logo/:id` with a year of browser caching
+  (no more 400 KB logo inside every settings response).
+- Plan limit (`maxStaff`), tabs per company, own login domain, activate /
+  deactivate (blocks login + every request with `COMPANY_INACTIVE`).
+- Staff ID login is per company (`company` slug in the login body).
+- Removed `models/auth.js`: it held a plaintext server address, username and
+  password, not code. Rotate that password.
+
 # Disabled staff, Enable/Disable from the app, staff photos (14 Oct 2026)
 
 ## Disabled staff no longer show anywhere except the Staff tab

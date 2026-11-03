@@ -34,7 +34,31 @@ import { attendanceService } from "../../services/attendanceService";
 import { advanceService } from "../../services/advanceService";
 import { officeExpenseService } from "../../services/officeExpenseService";
 import { getTodayDate, formatDateToDDMMMYYYY } from "../../utils/dateUtils";
-import { getCurrentUser, isAdminUser } from "../../utils/authUser";
+import { getCurrentUser, isAdminUser, companyHasTab } from "../../utils/authUser";
+
+// Dashboard cards follow the company's tabs: a tab the super admin switched
+// off for this company takes its card off the dashboard too.
+const CARD_TAB = {
+  present: "attendance",
+  onLeave: "leave",
+  totalPayroll: "payroll",
+  pendingPayroll: "payroll",
+  totalAdvances: "advance",
+  totalExpense: "expenses",
+  upcomingHolidays: "holidays",
+  // staff dashboard
+  leave: "leave",
+  payroll: "payroll",
+  advance: "advance",
+  holidays: "holidays",
+};
+const QUICK_LINK_TAB = {
+  "/hrmlayout/my-leave-requests": "leave",
+  "/hrmlayout/my-attendance": "attendance",
+  "/hrmlayout/my-payslips": "payroll",
+  "/hrmlayout/holidays": "holidays",
+};
+const cardAllowed = (c) => !CARD_TAB[c.key] || companyHasTab(CARD_TAB[c.key]);
 import { filterHolidaysFromJoiningDate } from "../../utils/holidayHelpers";
 import {
   groupRequests,
@@ -900,7 +924,7 @@ const HrmDashboard = () => {
       color: "text-teal-600 bg-teal-50",
       valueColor: "text-teal-600",
     },
-  ];
+  ].filter(cardAllowed);
 
   // Recent Joins: the last 7 staff to join (most recent first).
   const recentJoins = useMemo(
@@ -1169,14 +1193,14 @@ const HrmDashboard = () => {
         iconClass: "text-teal-600 bg-teal-50",
         path: "/hrmlayout/holidays",
       },
-    ];
+    ].filter(cardAllowed);
 
     const quickLinks = [
       { label: "Apply Leave", icon: CalendarPlus, path: "/hrmlayout/my-leave-requests", className: "text-blue-600 bg-blue-50" },
       { label: "Attendance", icon: CalendarCheck, path: "/hrmlayout/my-attendance", className: "text-emerald-600 bg-emerald-50" },
       { label: "Payslips", icon: FileText, path: "/hrmlayout/my-payslips", className: "text-violet-600 bg-violet-50" },
       { label: "Holidays", icon: Calendar, path: "/hrmlayout/holidays", className: "text-amber-600 bg-amber-50" },
-    ];
+    ].filter((l) => !QUICK_LINK_TAB[l.path] || companyHasTab(QUICK_LINK_TAB[l.path]));
 
     const hour = new Date().getHours();
     const greeting =

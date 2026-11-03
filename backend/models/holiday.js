@@ -1,5 +1,6 @@
 // models/Hrm/Holiday.js
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 // "Emergency" covers ad-hoc, same-day closures an admin declares manually
 // (heavy rain, flooding, strikes, etc.) as opposed to holidays planned

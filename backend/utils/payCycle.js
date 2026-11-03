@@ -28,8 +28,8 @@
 // All dates are returned as UTC-midnight Date objects for the IST calendar
 // day, which is what the payroll leave/attendance maths already uses.
 
+import { tzOffsetMs } from "./companyContext.js";
 const DAY_MS = 86400000;
-const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 
 // Any stored date (saved at UTC midnight OR IST midnight) -> UTC midnight
 // of its IST calendar day. Returns null for missing/invalid values.
@@ -37,7 +37,7 @@ export const toIstDay = (value) => {
   if (!value) return null;
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;
-  const key = new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  const key = new Date(d.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
   return new Date(`${key}T00:00:00Z`);
 };
 
@@ -46,7 +46,7 @@ export const toIstDay = (value) => {
 // IST midnight for the NEXT day (e.g. 20 Apr = 19 Apr 18:30 UTC) is not
 // pulled back into the cycle that ends on 19 Apr.
 export const endOfIstDay = (day) =>
-  new Date(day.getTime() + DAY_MS - IST_OFFSET_MS - 1);
+  new Date(day.getTime() + DAY_MS - tzOffsetMs() - 1);
 
 const daysInMonth = (year, monthIndex) =>
   new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();

@@ -18,6 +18,7 @@
 // last 12 months.
 import { payrollService } from "./payrollService";
 import { advanceService } from "./advanceService";
+import { tzOffsetMs } from "../utils/brand";
 
 const num = (v) => Number(v) || 0;
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -53,12 +54,11 @@ export const unwrapList = (payload) => {
 
 // "YYYY-MM-DD" of a stored date, read in India time (IST, UTC+5:30) — same
 // as the app's utils/staffStatus dateKeyFrom.
-const IST_OFFSET_MS = 330 * 60 * 1000;
 const dateKeyFrom = (value) => {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
   if (isNaN(d.getTime())) return null;
-  return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  return new Date(d.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
 };
 
 /** Figures of one SAVED payroll record: { payable, paid, pending, kind, status }. */

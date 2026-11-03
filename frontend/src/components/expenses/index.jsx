@@ -1,5 +1,6 @@
 // src/components/expenses/index.jsx
 import React, { useState } from "react";
+import { isCompanyViewOnly } from "../../utils/authUser";
 import { Receipt, Settings } from "lucide-react";
 import { useOfficeExpense } from "./hooks/useOfficeExpense";
 import OfficeExpenseList from "./OfficeExpenseList";
@@ -105,9 +106,11 @@ const Expenses = () => {
         {!isMobileView && (
           <div className="flex items-center gap-3">
             {/* Add Button moved here */}
-            <Button variant="primary" size="sm" onClick={addModal.open}>
-              Add Expense
-            </Button>
+            {!isCompanyViewOnly() && (
+              <Button variant="primary" size="sm" onClick={addModal.open}>
+                Add Expense
+              </Button>
+            )}
             
             <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
               Total: {currentData.length}

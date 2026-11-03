@@ -1,4 +1,5 @@
 import Staff from "../models/Staff.js";
+import { companyTimeZone, tzOffsetMs } from "../utils/companyContext.js";
 import Resignation from "../models/Resignation.js";
 import mongoose from "mongoose";
 import { relievingLetterDate } from "../utils/letterFields.js";
@@ -15,7 +16,7 @@ const isRealYMD = (v) => {
 // window is blocked: nothing older than this many days.
 const MAX_BACKDATE_DAYS = 365;
 const ymdDaysAgo = (days) =>
-  new Date(Date.now() - days * 86400000).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  new Date(Date.now() - days * 86400000).toLocaleDateString("en-CA", { timeZone: companyTimeZone() });
 
 async function staffForRequest(req) {
   const email = req.user?.email?.toLowerCase().trim();
@@ -160,7 +161,7 @@ export const approveResignation = async (req, res) => {
     // A Leaving / Experience letter generated earlier carries the last
     // working day HR picked then — move it to the date just approved so the
     // letter always shows the resignation's last working day.
-    const lwd = new Date(resignation.lastWorkingDay.getTime() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    const lwd = new Date(resignation.lastWorkingDay.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
     const staffDoc = await Staff.findById(resignation.userId).select("issuedLetters");
     if (staffDoc?.issuedLetters?.length) {
       let changed = false;

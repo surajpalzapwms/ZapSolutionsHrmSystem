@@ -1,6 +1,8 @@
 // Must be the very first import: it registers a global mongoose plugin that
 // times every query, and plugins only apply to models compiled after it.
 import { requestTiming } from "./utils/requestTiming.js";
+// Second: the per-company (white label) plugin — also before any model.
+import "./utils/tenant.js";
 import dns from "dns";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -68,8 +70,16 @@ import letterRoutes from "./routes/letterRoutes.js";
 import documentRoutes from "./routes/documentRoutes.js";
 import lateDeductionRoutes from "./routes/lateDeduction.js";
 import settingsRoutes from "./routes/settingsRoutes.js";
+import companyRoutes from "./routes/companyRoutes.js";
+import inviteRoutes from "./routes/inviteRoutes.js";
+import branchRoutes from "./routes/branchRoutes.js";
 import { runPresenceSweep } from "./services/presence.js";
-import { checkSingleCompanyData } from "./services/singleCompanyCheck.js";
+import { migrateToMultiCompany } from "./services/companyMigration.js";
+import {
+  reloadCompanyRegistry,
+  startCompanyRegistryRefresh,
+  forEachCompany,
+} from "./services/companyRegistry.js";
 import { reloadOfficeNetworks } from "./utils/officeNetwork.js";
 import { reconcileAllStaffAbsences } from "./services/leaveAutomation.js";
 import {
@@ -208,7 +218,7 @@ app.use(["/api/auth", "/api/hrm", "/api/staff"], (req, res, next) => {
 // (e.g. the leave staff summary), so drop those cached answers right away.
 app.use("/api/documents", (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
-    res.on("finish", () => invalidateResponseCache());
+    res.on("finish", () => invalidateResponseCache(req.company?._id ? String(req.company._id) : null));
   }
   next();
 });
@@ -255,6 +265,10 @@ app.use("/api/documents", hideDisabledStaffRows({ paths: ["/summary"] }));
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/settings", settingsRoutes);
+// White label: companies, company profile, public branding / logos.
+app.use("/api/company", companyRoutes);
+app.use("/api/invites", inviteRoutes); // public: open an admin invite link
+app.use("/api/branches", branchRoutes);
 app.use("/api/hrm/payroll", payrollRoutes);
 app.use("/api/hrm/late-deduction", lateDeductionRoutes);
 app.use("/api/expenses", expenseRoutes);
@@ -357,8 +371,12 @@ function scheduleDailyAbsenceReconciliation() {
 
   const runOnce = async () => {
     try {
-      const summary = await reconcileAllStaffAbsences();
-      markCalendarDataChanged();
+      // Each company separately: its own staff, holidays, time zone and
+      // weekly off days.
+      await forEachCompany(async () => {
+        await reconcileAllStaffAbsences();
+        markCalendarDataChanged();
+      });
     } catch (err) {
       console.error("❌ Daily absence reconciliation failed:", err.message);
     }
@@ -384,10 +402,12 @@ function schedulePresenceSweep() {
     if (running) return;
     running = true;
     try {
-      const summary = await runPresenceSweep();
-      if (summary.timedOut || summary.signedOut) {
-        console.log("🛰️  Presence sweep:", summary);
-      }
+      await forEachCompany(async (company) => {
+        const summary = await runPresenceSweep();
+        if (summary.timedOut || summary.signedOut) {
+          console.log(`🛰️  Presence sweep [${company.name}]:`, summary);
+        }
+      });
     } catch (err) {
       console.error("❌ Presence sweep failed:", err.message);
     } finally {
@@ -403,10 +423,16 @@ async function startServer(retries = 3, delayMs = 3000) {
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await connectDB(MONGO_URI, checkSingleCompanyData);
+      // Older single-company data is given to a company BEFORE the
+      // per-company unique indexes are built.
+      await connectDB(MONGO_URI, migrateToMultiCompany);
+      // Every company's settings in memory (time zone, weekly off, tabs ...).
+      await reloadCompanyRegistry();
+      startCompanyRegistryRefresh();
       // Office Wi-Fi networks saved from the admin screen (utils/officeNetwork.js).
       await reloadOfficeNetworks();
       app.listen(PORT, () => {
+        console.log(`🚀 HRM backend listening on port ${PORT}`);
       });
       scheduleDailyAbsenceReconciliation();
       schedulePresenceSweep();

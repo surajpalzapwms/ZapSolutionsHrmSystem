@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { isWeeklyOffDow, weeklyOffName } from "../utils/companyContext.js";
 import Attendance from "../models/Attendance.js";
 import Holiday from "../models/holiday.js";
 import SaturdayHolidayRule from "../models/saturdayHolidayRule.js";
@@ -124,9 +125,9 @@ export const getMyMonthCalendar = asyncHandler(async (req, res) => {
     if (holidayByDate[dateKey]) {
       status = "holiday";
       holidayName = holidayByDate[dateKey];
-    } else if (dow === 0) {
+    } else if (isWeeklyOffDow(dow)) {
       status = "holiday";
-      holidayName = "Sunday";
+      holidayName = weeklyOffName(dow);
     } else if (saturdayHolidayByDate[dateKey]) {
       status = "holiday";
       holidayName = saturdayHolidayByDate[dateKey];
@@ -150,8 +151,8 @@ export const getMyMonthCalendar = asyncHandler(async (req, res) => {
 
 const guardAgainstHolidayOrSunday = async (date) => {
   const d = new Date(date);
-  if (d.getUTCDay() === 0) {
-    throw new ApiError(400, "Cannot record attendance on Sunday");
+  if (isWeeklyOffDow(d.getUTCDay())) {
+    throw new ApiError(400, `Cannot record attendance on ${weeklyOffName(d.getUTCDay())} (weekly off)`);
   }
 
   const { isHoliday, holiday } = await Holiday.isHoliday(d);

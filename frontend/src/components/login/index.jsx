@@ -2,7 +2,7 @@
 import BrandLogo from "../common/BrandLogo";
 import { useBrand } from "../../contexts/BrandContext";
 import React, { useState, useEffect } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { Lock, Mail, User, Eye, EyeOff, Phone } from "lucide-react";
 import api from "../../utils/api";
 import InputField from "../common/InputField";
@@ -10,10 +10,31 @@ import PhoneInput from "../common/PhoneInput";
 import { isValidPhone } from "../../utils/phone";
 import Button from "../common/Button";
 import { showToast } from "../../utils/toast";
+import { loadBrandFromServer } from "../../utils/brand";
+import { setSelectedCompany, clearSelectedCompany } from "../../utils/company";
+
+// Why the user was sent back to the login page (see utils/api.js).
+const REASONS = {
+  "company-inactive": "Your company's account is inactive. Please contact the service provider.",
+  "no-company": "Your account is not linked to a company. Contact your administrator.",
+};
 
 const Login = () => {
   const brand = useBrand();
   const navigate = useNavigate();
+  // White label: /login?company=<link name> shows that company's logo and
+  // colours, and lets its staff log in with their Staff ID.
+  const [searchParams] = useSearchParams();
+  const companySlug = (searchParams.get("company") || "").trim().toLowerCase();
+  const loginKey = (searchParams.get("key") || "").trim();
+  const reason = REASONS[searchParams.get("reason") || ""];
+
+  useEffect(() => {
+    // Nobody is logged in on this page: drop any old company selection and
+    // show the branding of the company in the link (or of this domain).
+    clearSelectedCompany();
+    loadBrandFromServer({ company: companySlug || undefined });
+  }, [companySlug]);
   const [isSignUp, setIsSignUp] = useState(false);
   const [adminExists, setAdminExists] = useState(true);
   const [checkingAdmin, setCheckingAdmin] = useState(true);
@@ -54,6 +75,38 @@ const Login = () => {
   useEffect(() => {
     if (adminExists && isSignUp) setIsSignUp(false);
   }, [adminExists, isSignUp]);
+
+  // Super admin's company login link (/login?company=<slug>&key=<signed key>):
+  // fill in that company admin's e-mail and password. The key is removed from
+  // the address bar right away so it isn't left in the browser history.
+  useEffect(() => {
+    if (!loginKey) return undefined;
+    let mounted = true;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("key");
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch {
+      /* ignore */
+    }
+    api
+      .get(`/api/auth/login-link/${encodeURIComponent(loginKey)}`)
+      .then(({ data }) => {
+        if (!mounted || !data?.data) return;
+        const { identifier, password, hasPassword } = data.data;
+        setIsSignUp(false);
+        setForm((f) => ({ ...f, email: identifier || f.email, password: password || "" }));
+        if (!hasPassword) {
+          showToast("info", "E-mail filled in. Enter the password once — next time it fills in too.");
+        }
+      })
+      .catch((err) => {
+        if (mounted) showToast("error", err.response?.data?.message || "This login link has expired.");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [loginKey]);
 
   const validate = () => {
     const next = {};
@@ -133,6 +186,8 @@ const handleSubmit = async (e) => {
         const { data } = await api.post("/api/auth/login", {
           email: form.email.trim(),
           password: form.password,
+          // Staff IDs are unique per company: tell the server which one.
+          company: companySlug || undefined,
         });
       
 
@@ -155,10 +210,17 @@ const handleSubmit = async (e) => {
           })
         );
 
-        // Left over from the old multi-company version.
-        localStorage.removeItem("selectedCompany");
         showToast("success", "Logged in successfully");
-        navigate("/", { replace: true });
+        const superAdmin = (userInfo.role || "").toLowerCase() === "super-admin";
+        if (superAdmin && !userInfo.company) {
+          // Several companies: the super admin picks one first.
+          navigate("/companies", { replace: true });
+        } else {
+          if (superAdmin) setSelectedCompany(userInfo.company);
+          // The company's own logo / colours / currency for the whole site.
+          await loadBrandFromServer();
+          navigate("/", { replace: true });
+        }
       }
     } catch (error) {
       console.error("Auth request failed. Full error object:", error);
@@ -236,13 +298,23 @@ const handleSubmit = async (e) => {
             </div>
 
             <h2 className="text-xl sm:text-2xl font-bold text-gray-800 mb-1 text-center mt-4">
-              {isSignUp ? "Create Account" : "Admin Login"}
+              {isSignUp ? "Create Account" : companySlug ? `Sign in to ${brand.shortName || brand.name}` : "Admin Login"}
             </h2>
             <p className="text-gray-500 text-xs sm:text-sm mb-6 text-center">
               {isSignUp
                 ? "Fill in your details to get started"
                 : "Enter your credentials to continue"}
             </p>
+            {!isSignUp && brand.nameAr && (
+              <p dir="rtl" lang="ar" className="-mt-4 mb-5 text-center text-sm text-gray-600">
+                {brand.nameAr}
+              </p>
+            )}
+            {reason && (
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                {reason}
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
               {/* Name fields - only for sign up */}

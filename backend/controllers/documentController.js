@@ -13,7 +13,15 @@
 // Upload body (JSON): { type, data: <base64 or data: URI>, mimeType, fileName, number }
 import mongoose from "mongoose";
 import Staff from "../models/Staff.js";
-import StaffDocument, { DOCUMENT_LABELS, DOCUMENT_TYPES } from "../models/StaffDocument.js";
+import StaffDocument, { DOCUMENT_LABELS as BASE_LABELS, DOCUMENT_TYPES } from "../models/StaffDocument.js";
+import { staffDocDef } from "../config/countries.js";
+import { currentCompany } from "../utils/companyContext.js";
+
+// Labels follow the company's country (Aadhaar / PAN in India, Iqama /
+// Passport in Saudi Arabia, QID / Passport in Qatar).
+const DOCUMENT_LABELS = new Proxy(BASE_LABELS, {
+  get: (base, type) => staffDocDef(currentCompany()?.country, type)?.label || base[type],
+});
 import User from "../models/User.js";
 import UserPhoto from "../models/UserPhoto.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
@@ -114,11 +122,10 @@ const saveUpload = async (req, staff) => {
   if (buffer.length > MAX_BYTES) throw new ApiError(400, "File is too large (max 8 MB)");
 
   const cleanNumber = String(number || "").trim().slice(0, 40);
-  if (type === "pan" && cleanNumber && !/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(cleanNumber)) {
-    throw new ApiError(400, "PAN number should look like ABCDE1234F");
-  }
-  if (type === "aadhaar" && cleanNumber && !/^\d{12}$/.test(cleanNumber.replace(/\s+/g, ""))) {
-    throw new ApiError(400, "Aadhaar number should be 12 digits");
+  const def = staffDocDef(currentCompany()?.country, type);
+  const compact = cleanNumber.replace(/\s+/g, "").toUpperCase();
+  if (def?.pattern && compact && !new RegExp(def.pattern).test(compact)) {
+    throw new ApiError(400, `${def.numberLabel || def.label} should be ${def.hint || "valid"}`);
   }
 
   await StaffDocument.findOneAndUpdate(
@@ -126,7 +133,7 @@ const saveUpload = async (req, staff) => {
     {
       staff: staff._id,
       type,
-      number: type === "pan" ? cleanNumber.toUpperCase() : cleanNumber.replace(/\s+/g, ""),
+      number: compact,
       fileName: String(fileName || `${type}`).slice(0, 120),
       mimeType,
       size: buffer.length,

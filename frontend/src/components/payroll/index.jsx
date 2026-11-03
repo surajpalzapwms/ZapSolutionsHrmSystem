@@ -1,6 +1,7 @@
 // src/components/payroll/index.jsx
 
 import React, { useEffect, useMemo, useState } from "react";
+import { isCompanyViewOnly } from "../../utils/authUser";
 import { Download, DollarSign } from "lucide-react";
 
 import { usePayroll } from "./hooks/usePayroll";
@@ -258,9 +259,11 @@ const Payroll = () => {
       {/* SUMMARY */}
       <PayrollSummary summary={summary} />
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <Button variant="primary" size="sm" onClick={() => addModal.open()}>
-          Add Payroll
-        </Button>
+        {!isCompanyViewOnly() && (
+          <Button variant="primary" size="sm" onClick={() => addModal.open()}>
+            Add Payroll
+          </Button>
+        )}
 
         <Button
           variant="outline"

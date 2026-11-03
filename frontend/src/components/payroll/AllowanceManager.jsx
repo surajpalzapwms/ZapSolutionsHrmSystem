@@ -4,14 +4,17 @@ import { Trash2 } from "lucide-react";
 import Dropdown from "../common/Dropdown";
 import InputField from "../common/InputField";
 import Button from "../common/Button";
-import { ALLOWANCE_TYPES } from "../../utils/constants";
+import { payrollTypesFor } from "../../utils/constants";
+import { getBrand } from "../../utils/brand";
 import { formatCurrency } from "../../utils/numberUtils";
 
-const typeOptions = ALLOWANCE_TYPES.map((t) => ({ value: t, label: t }));
+// The company's country decides the usual lines (PF / ESI in India, GOSI in
+// Saudi Arabia, …). A type saved earlier that is not in the list still shows.
+const typesNow = () => payrollTypesFor(getBrand().country).allowances;
 
 const AllowanceManager = ({ allowances = [], onChange, total = 0 }) => {
   const addRow = () => {
-    onChange([...allowances, { type: ALLOWANCE_TYPES[0], amount: 0 }]);
+    onChange([...allowances, { type: typesNow()[0], amount: 0 }]);
   };
 
   const updateRow = (index, field, value) => {
@@ -46,7 +49,7 @@ const AllowanceManager = ({ allowances = [], onChange, total = 0 }) => {
               <Dropdown
                 value={a.type}
                 onChange={(val) => updateRow(idx, "type", val)}
-                options={typeOptions}
+                options={[...new Set([...typesNow(), a.type].filter(Boolean))].map((t) => ({ value: t, label: t }))}
               />
               <InputField
                 type="number"

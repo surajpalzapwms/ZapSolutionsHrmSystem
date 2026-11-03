@@ -1,5 +1,6 @@
 // src/components/staff-basic-payroll/index.jsx
 import React, { useState, lazy, Suspense } from "react";
+import { isCompanyViewOnly } from "../../utils/authUser";
 import { Upload, Wallet, Pencil, Trash2, MessageSquare } from "lucide-react";
 import { useStaffBasicPayroll } from "./hooks/useStaffBasicPayroll";
 import { useModal } from "../../hooks/useModal";
@@ -361,13 +362,17 @@ const StaffBasicPayroll = () => {
       {/* ACTIONS — buttons on the left, "Current staff only" toggle on the
           right, all in one row (same layout as the Payroll tab) */}
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <Button variant="primary" size="sm" onClick={addModal.open}>
-          Add Record
-        </Button>
-        <Button variant="success" size="sm" onClick={importModal.open}>
-          <Upload size={16} className="mr-1" /> Import
-        </Button>
-        {selected.length > 0 && (
+        {!isCompanyViewOnly() && (
+          <>
+            <Button variant="primary" size="sm" onClick={addModal.open}>
+              Add Record
+            </Button>
+            <Button variant="success" size="sm" onClick={importModal.open}>
+              <Upload size={16} className="mr-1" /> Import
+            </Button>
+          </>
+        )}
+        {!isCompanyViewOnly() && selected.length > 0 && (
           <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
             Delete ({selected.length})
           </Button>

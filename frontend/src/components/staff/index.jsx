@@ -14,7 +14,7 @@ import CurrentStaffToggle from "../common/CurrentStaffToggle";
 import { showToast } from "../../utils/toast";
 import { confirmStaffDelete } from "../../utils/confirmationDialog";
 import { staffService, clearStaffListCache } from "../../services/staffService";
-import { getCurrentUser, isSuperAdminUser, hasTabAccess } from "../../utils/authUser";
+import { getCurrentUser, isSuperAdminUser, hasTabAccess, isCompanyViewOnly } from "../../utils/authUser";
 
 const Staff = () => {
   const [isMobileView, setIsMobileView] = useState(false);
@@ -24,7 +24,9 @@ const Staff = () => {
   // the staff.add sub-tab — mirrors the backend's requireTabAccess check
   // on POST /api/staff, so the button never leads to a 403.
   const currentUser = getCurrentUser();
-  const canAddStaff = isSuperAdminUser(currentUser) || hasTabAccess("staff.add", currentUser);
+  const viewOnly = isCompanyViewOnly(currentUser);
+  const canAddStaff =
+    !viewOnly && (isSuperAdminUser(currentUser) || hasTabAccess("staff.add", currentUser));
 
   const {
     teams,
@@ -166,7 +168,7 @@ const Staff = () => {
             Add Staff
           </Button>
         )}
-        {selected.length > 0 && (
+        {!viewOnly && selected.length > 0 && (
           <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
             Delete ({selected.length})
           </Button>

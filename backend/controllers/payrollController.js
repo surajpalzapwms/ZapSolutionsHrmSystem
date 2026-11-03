@@ -1,4 +1,5 @@
 import Payroll from "../models/Payroll.js";
+import { isWeeklyOffDow, tzOffsetMs } from "../utils/companyContext.js";
 import Staff from "../models/Staff.js";
 import StaffBasicPayroll from "../models/StaffBasicPayroll.js";
 import StaffAdvance from "../models/StaffAdvance.js";
@@ -17,7 +18,7 @@ import { getRemainingForType } from "../services/leaveBalance.js";
 import { buildLateSummary, isLateDeductionEnabled, getShiftForUser } from "../services/lateDeduction.js";
 import mongoose from "mongoose";
 import PDFDocument from "pdfkit";
-import { getCompanyProfile, formatMoney } from "../services/companyProfile.js";
+import { getCompanyProfile, getCompanyAssets, formatMoney } from "../services/companyProfile.js";
 import { isAdminRole } from "../config/permissions.js";
 import { calculateReferralCommission } from "../utils/referral.js";
 import {
@@ -202,14 +203,13 @@ const SANDWICH_APPLIES_TO_COMPANY_HOLIDAYS = false;
 //   { occurrence: 2 } / { week: 2 } / { nth: 2 } / { date: ... }
 // No document, or an empty occurrences array → no Saturday holidays that
 // month (all Saturdays are working days).
-const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 
 // Any Date -> IST calendar day "YYYY-MM-DD" (handles dates saved at UTC
 // midnight AND dates saved at IST midnight, e.g. 2026-10-09T18:30Z).
 const toIstDayKey = (value) => {
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;
-  return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  return new Date(d.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
 };
 
 const parseSaturdayOccurrences = (occurrences) => {
@@ -351,7 +351,9 @@ const createDayOffChecker = (saturdayRule, calendarHolidayKeys = null) => {
   const cache = new Map();
   const compute = async (key) => {
     const utcMidnight = new Date(`${key}T00:00:00Z`);
-    const isSunday = utcMidnight.getUTCDay() === 0;
+    // Weekly off day of the company (Sunday in India, Friday / Saturday
+    // in Saudi Arabia and Qatar). The name stays "isSunday" for the callers.
+    const isSunday = isWeeklyOffDow(utcMidnight.getUTCDay());
 
     // Saturday holiday — as set by the admin for this month.
     const saturdayOff = isSaturdayOff(utcMidnight, saturdayRule);
@@ -511,7 +513,7 @@ const calculateSalary = async (
   // "29/30 days paid" and ₹29,000 instead of ₹30,000 even though every day
   // was present on the calendar.
   const istDayStart = (value) => {
-    const t = new Date(new Date(value).getTime() + IST_OFFSET_MS);
+    const t = new Date(new Date(value).getTime() + tzOffsetMs());
     return new Date(
       Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()),
     );
@@ -561,7 +563,7 @@ const calculateSalary = async (
   // the future; a month that has already fully elapsed is never affected,
   // since today will already be past its rangeEndUTC.
   if (payableDays > 0) {
-    const todayKeyStr = new Date(Date.now() + IST_OFFSET_MS)
+    const todayKeyStr = new Date(Date.now() + tzOffsetMs())
       .toISOString()
       .slice(0, 10);
     const todayEndUTC = new Date(`${todayKeyStr}T23:59:59.999Z`);
@@ -766,7 +768,7 @@ const calculateSalary = async (
     // treated as absent (unpaid). Sundays and company holidays stay paid,
     // and only days BEFORE today (in IST) on/after the joining date are
     // considered.
-    const todayKey = new Date(Date.now() + IST_OFFSET_MS)
+    const todayKey = new Date(Date.now() + tzOffsetMs())
       .toISOString()
       .slice(0, 10);
     const joinKey = employee.date ? dayKey(istDayStart(employee.date)) : startKey;
@@ -1644,6 +1646,7 @@ const formatPeriodLabel = (period) => {
 export const exportPayslipPdf = async (req, res) => {
   try {
     const company = await getCompanyProfile();
+    const assets = await getCompanyAssets();
     // Amounts on the payslip use the currency chosen on the Settings page.
     const formatCurrency = (value) => formatMoney(value, company);
     const payroll = await Payroll.findById(req.params.id).populate(
@@ -1691,8 +1694,9 @@ export const exportPayslipPdf = async (req, res) => {
     doc.pipe(res);
 
     // ── Palette (matches the "Employee Payslip" reference template) ────────
-    const NAVY = "#1B3A5C";
-    const GOLD = "#C9A24B";
+    // Company colours (white label); navy / gold when none are chosen.
+    const NAVY = company.sidebarColor || "#1B3A5C";
+    const GOLD = company.primaryColor || "#C9A24B";
     const CREAM = "#F5E9C8";
     const TEXT_DARK = "#1B1B1B";
 
@@ -1730,6 +1734,26 @@ export const exportPayslipPdf = async (req, res) => {
     };
 
     drawWaveBand(0, 78, NAVY);
+    // Company logo (white tile) + name in the header band.
+    let headerNameX = marginX;
+    if (assets.logo) {
+      try {
+        doc.roundedRect(marginX - 6, 10, 58, 50, 6).fill("#FFFFFF");
+        doc.image(assets.logo, marginX - 2, 13, { fit: [50, 44], align: "center", valign: "center" });
+        headerNameX = marginX + 62;
+      } catch {
+        /* unreadable logo: name only */
+      }
+    }
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(15)
+      .fillColor("#FFFFFF")
+      .text(company.name, headerNameX, 20, { width: contentWidth - (headerNameX - marginX), lineBreak: false, ellipsis: true });
+    const headerSub = [company.city, company.countryName].filter(Boolean).join(", ");
+    if (headerSub) {
+      doc.font("Helvetica").fontSize(8.5).fillColor("#DDE6F0").text(headerSub, headerNameX, 40, { lineBreak: false });
+    }
 
     // Title
     doc
@@ -1980,6 +2004,18 @@ export const exportPayslipPdf = async (req, res) => {
     // ── Footer wave band ─────────────────────────────────────────────────────
     const footerHeight = 60;
     drawWaveBand(doc.page.height - footerHeight, footerHeight, NAVY, true);
+    // Registration numbers printed for the company's country (GSTIN / CR / VAT ...).
+    const legalLine = (company.legalIdList || [])
+      .filter((x) => x.print)
+      .map((x) => `${x.label}: ${x.value}`)
+      .join("   ·   ");
+    if (legalLine) {
+      doc
+        .font("Helvetica")
+        .fontSize(7.5)
+        .fillColor("#FFFFFF")
+        .text(legalLine, marginX, doc.page.height - 22, { width: contentWidth, align: "center", lineBreak: false, ellipsis: true });
+    }
 
     doc.end();
   } catch (error) {

@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 // An office network address (Wi-Fi router's public IP / range).
 //

@@ -9,6 +9,7 @@ import {
   getPermissionTabs,
   listAdmins,
   updateAdminPermissions,
+  getLoginLink,
 } from "../controllers/authController.js";
 import { protect, allowSuperAdminOnly } from "../middleware/auth.js";
 import {
@@ -24,6 +25,8 @@ router.get("/admin-exists", generalAuthRateLimiter, checkAdminExists);
 // gets the same throttling as login rather than being left wide open.
 router.post("/register", loginRateLimiter, register);
 router.post("/login", loginRateLimiter, login);
+// Super admin's company login link -> fills the admin's e-mail + password.
+router.get("/login-link/:token", loginRateLimiter, getLoginLink);
 router.get("/me", protect, getMe);
 router.post("/logout", protect, logout);
 router.put("/change-password", protect, changePassword);

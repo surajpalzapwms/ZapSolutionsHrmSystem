@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import { CalendarOff } from "lucide-react";
 import { useForm } from "../../hooks/useForm";
 import InputField from "../common/InputField";
@@ -9,6 +9,7 @@ import Modal from "../common/Modal";
 import { ATTENDANCE_TYPES } from "../../utils/constants";
 import { validateRequired } from "../../utils/validation";
 import { getTodayDate, getBlockedDayReason } from "../../utils/dateUtils";
+import { companyShiftForDate, shiftLabel, weeklyOffLabel } from "../../utils/brand";
 
 const typeOptions = Object.values(ATTENDANCE_TYPES)
   .filter((t) => t !== ATTENDANCE_TYPES.SHORT)
@@ -28,16 +29,39 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
     return errors;
   };
 
-  const { form, errors, isSubmitting, setIsSubmitting, handleChange, setField, reset, validate: runValidate } =
-    useForm(
-      { userId: "", date: getTodayDate(), loginTime: "", logoutTime: "", attendanceType: ATTENDANCE_TYPES.FULL },
-      validate
-    );
+  // Login / Logout start filled with the company's working hours
+  // (Settings → Work week & hours; Saturday hours on a short Saturday).
+  const initial = useMemo(() => {
+    const today = getTodayDate();
+    const hours = companyShiftForDate(today);
+    return { userId: "", date: today, loginTime: hours.start, logoutTime: hours.end, attendanceType: ATTENDANCE_TYPES.FULL };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  const { form, errors, isSubmitting, setIsSubmitting, handleChange, setField, setFields, reset, validate: runValidate } =
+    useForm(initial, validate);
 
   useEffect(() => {
     if (isOpen) reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  }, [isOpen, initial]);
+
+  // A new date gets that day's company hours — unless the admin already typed
+  // their own times.
+  const lastDefaults = useRef(companyShiftForDate(initial.date));
+  useEffect(() => {
+    lastDefaults.current = companyShiftForDate(initial.date);
+  }, [initial]);
+  useEffect(() => {
+    const next = companyShiftForDate(form.date);
+    const prev = lastDefaults.current;
+    const patch = {};
+    if (!form.loginTime || form.loginTime === prev.start) patch.loginTime = next.start;
+    if (!form.logoutTime || form.logoutTime === prev.end) patch.logoutTime = next.end;
+    lastDefaults.current = next;
+    if (Object.keys(patch).length) setFields(patch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.date]);
 
   const blockedReason = useMemo(() => getBlockedDayReason(form.date, holidays), [form.date, holidays]);
 
@@ -78,7 +102,7 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
           <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
             <CalendarOff size={16} className="mt-0.5 flex-shrink-0" />
             <span>
-              This date is <strong>{blockedReason}</strong>. Attendance cannot be marked on a holiday or Sunday.
+              This date is <strong>{blockedReason}</strong>. Attendance cannot be marked on a holiday or weekly off ({weeklyOffLabel()}).
             </span>
           </div>
         )}
@@ -103,7 +127,8 @@ const AttendanceModal = ({ isOpen, onClose, onSubmit, staffOptions = [], holiday
           />
         </div>
         <p className="text-xs text-gray-500 -mt-2">
-          Leave a time blank to default it to the standard shift (10:00 AM–6:30 PM).
+          Filled with the company working hours for this day ({shiftLabel(form.date)}). Change them if needed; a time left
+          blank uses the same hours.
         </p>
         <Dropdown
           label="Attendance Type"

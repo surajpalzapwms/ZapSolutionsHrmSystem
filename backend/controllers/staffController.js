@@ -1,7 +1,9 @@
 // controllers/staffController.js
 import mongoose from "mongoose";
+import { currentCompany, companyTimeZone, tzOffsetMs } from "../utils/companyContext.js";
 import Staff from "../models/Staff.js";
 import User from "../models/User.js";
+import Branch from "../models/Branch.js";
 import { asyncHandler, ApiError } from "../utils/asyncHandler.js";
 import { decryptPassword, encryptPassword } from "../utils/passwordVault.js";
 import { computeFinalSettlement } from "../services/settlementService.js";
@@ -12,10 +14,32 @@ import { photoUrlFor, userPhotoUrlFor } from "../utils/fileSigning.js";
 import { isAdminRole } from "../config/permissions.js";
 import { getReferral, istPeriodOf } from "../utils/referral.js";
 import { refreshPendingPayrollForPeriod } from "./payrollController.js";
+import { staffIdPrefixFor } from "../utils/staffIdPrefix.js";
 
 // Truthy-string-or-boolean helper — checkboxes serialize as real booleans
 // from JSON but as "true"/"on" strings from some form submissions.
 const isTruthy = (v) => v === true || v === "true" || v === "on";
+
+// Admin logins are created ONLY from an invite link (super admin -> company
+// admin, company admin -> branch admin), so "Make Admin" on the staff form
+// is closed. One admin per company / per branch is enforced there.
+const ADMIN_BY_INVITE_MESSAGE =
+  "Admin logins are created with an invite link now. Ask the super admin for the company admin link, or use the Branches page for a branch admin.";
+
+// Which branch should this staff record belong to?
+//   - a BRANCH admin: always their own branch (whatever the form sent)
+//   - company admin / super admin: the branch chosen on the form ("" = none)
+// Returns undefined when the form did not send a branch (leave as is).
+const resolveStaffBranch = async (req, bodyBranch) => {
+  if (req.user?.branch) return String(req.user.branch);
+  if (bodyBranch === undefined) return undefined;
+  if (bodyBranch === null || bodyBranch === "") return null;
+  if (!mongoose.isValidObjectId(bodyBranch)) throw new ApiError(400, "Invalid branch");
+  // Branch queries are limited to the current company by the tenant plugin.
+  const branch = await Branch.findOne({ _id: bodyBranch }).select("isActive").lean();
+  if (!branch) throw new ApiError(400, "That branch does not exist in this company");
+  return String(branch._id);
+};
 
 const assertValidId = (id) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -152,6 +176,23 @@ const applyStatusEmploymentExclusivity = (data, explicitFields = new Set()) => {
   return data;
 };
 
+// ── Companies without Internship / Probation ─────────────────────────────
+// The super admin can switch Internship & Probation off for a company
+// (Companies → Plan, tabs & domain). Then every staff member is confirmed
+// straight away: status "Confirmation" and Confirmation Date = Joining Date.
+// Relieved staff are left as they are.
+const companySkipsProbation = () => currentCompany()?.probationEnabled === false;
+
+const NO_PROBATION_STATUSES = new Set(["Internship", "Probation", "", undefined, null]);
+
+/** Fields that turn a staff member into "confirmed from the joining date". */
+const confirmedFromJoining = (joiningDate) => ({
+  status: "Confirmation",
+  confirmationDate: joiningDate ? new Date(joiningDate) : null,
+  internshipEndDate: null,
+  probationEndDate: null,
+});
+
 // Once a staff member's probation period has actually elapsed, their
 // status should read "Confirmation" without an admin having to manually
 // open the record and re-save it. This checks a single staff doc and
@@ -186,6 +227,11 @@ const getAutoConfirmUpdate = (staff) => {
 // (e.g. an old record), it carries straight on to Confirmation in the same
 // step. Returns the fields to update, or null if nothing is due yet.
 const getAutoAdvanceUpdate = (staff) => {
+  // Company without probation: anyone still in Internship / Probation is
+  // confirmed from their joining date.
+  if (companySkipsProbation() && (staff.status === "Internship" || staff.status === "Probation")) {
+    return confirmedFromJoining(staff.date);
+  }
   let update = null;
   let current = staff;
 
@@ -317,6 +363,9 @@ export const getAllStaff = asyncHandler(async (req, res) => {
 
   if (team) filter.projectName = team;
   if (enabled !== undefined) filter.enabled = enabled === "true";
+  // Company admin: ?branch=<id> narrows the list (a branch admin is already
+  // limited to their own branch by the tenant layer).
+  if (req.query.branch && mongoose.isValidObjectId(req.query.branch)) filter.branch = req.query.branch;
   if (search) {
     filter.$or = [
       { staffName: { $regex: search, $options: "i" } },
@@ -475,22 +524,25 @@ export const getFinalSettlement = asyncHandler(async (req, res) => {
   }
 });
 
-// Auto-increments off the highest existing numeric suffix (e.g. 5 staff → next is ZAP0006),
-// rather than trusting createdAt order, so it stays correct even if an ID was ever
-// entered manually or out of sequence.
-// Auto-increments off the highest existing numeric suffix
+// Staff ID = company prefix + 4-digit number, e.g. HC0001 (see utils/staffIdPrefix.js:
+// two words -> first letter of each, one word -> first two letters).
+// Auto-increments off the highest existing numeric suffix of THIS company
+// (first staff = 0001), rather than trusting createdAt order, so it stays correct
+// even if an ID was ever entered manually or out of sequence.
+const STAFF_ID_START = 1; // first staff of a company -> HC0001 (use 0 for HC0000)
+const STAFF_ID_DIGITS = 4;
 export const generateStaffId = async () => {
+  const prefix = staffIdPrefixFor(currentCompany()?.name);
   const docs = await Staff.find(
-    { staffId: { $regex: /^ZS\d+$/ } },  // Changed from ZAP to ZS
+    { staffId: { $regex: new RegExp(`^${prefix}\\d+$`) } }, // limited to the current company
     { staffId: 1 },
   ).lean();
   const maxNum = docs.reduce((max, d) => {
-    const n = parseInt(d.staffId.replace("ZS", ""), 10) || 0;  // Changed from ZAP to ZS
+    const n = parseInt(d.staffId.slice(prefix.length), 10) || 0;
     return n > max ? n : max;
   }, 0);
-  // Start from 10 instead of 1
-  const nextNumber = Math.max(maxNum + 1, 10);
-  return `ZS${String(nextNumber).padStart(3, "0")}`;  // Changed to 3 digits (010, 011, etc.)
+  const nextNumber = Math.max(maxNum + 1, STAFF_ID_START);
+  return `${prefix}${String(nextNumber).padStart(STAFF_ID_DIGITS, "0")}`;
 };
 
 // "male" / "M" / "Mr" -> "Male", "female" / "F" / "Ms" / "Mrs" -> "Female".
@@ -502,8 +554,23 @@ const normalizeGender = (g) => {
 };
 
 /** POST /api/staff — create a staff member */
+// Plan limit set by the super admin on the company (null = unlimited).
+const assertStaffLimit = async (adding = 1) => {
+  const limit = currentCompany()?.maxStaff;
+  if (!limit) return;
+  const count = await Staff.countDocuments({});
+  if (count + adding > limit) {
+    throw new ApiError(
+      403,
+      `Your plan allows ${limit} staff members (you have ${count}). Contact the service provider to raise the limit.`,
+    );
+  }
+};
+
 export const createStaff = asyncHandler(async (req, res) => {
-  console.log("values of req.body", req.body);
+  if (isTruthy(req.body?.makeAdmin)) throw new ApiError(400, ADMIN_BY_INVITE_MESSAGE);
+  const branchId = await resolveStaffBranch(req, req.body?.branch);
+  await assertStaffLimit(1);
   let {
     firstName,
     lastName,
@@ -576,8 +643,7 @@ export const createStaff = asyncHandler(async (req, res) => {
   // staff member — an ordinary admin creating staff always creates a plain
   // ("user") login, even if a stray makeAdmin flag is sent, so an admin can
   // never quietly promote someone (including themselves) to admin.
-  const wantsAdmin =
-    wantsLogin && isTruthy(makeAdmin) && req.user?.role === "super-admin";
+  const wantsAdmin = false; // closed — see ADMIN_BY_INVITE_MESSAGE
 
   // Calculate dates based on status
   const joiningDate = date ? new Date(date) : new Date();
@@ -651,6 +717,12 @@ export const createStaff = asyncHandler(async (req, res) => {
     enabled,
   });
 
+  if (companySkipsProbation() && NO_PROBATION_STATUSES.has(staffData.status || "")) {
+    Object.assign(staffData, confirmedFromJoining(joiningDate));
+  } else if (companySkipsProbation() && staffData.status === "Confirmation") {
+    staffData.confirmationDate = joiningDate;
+  }
+
   // staffId / email must be unique. Checked here as well as by the database
   // index, so the message is clear on every database.
   if (await Staff.exists({ staffId: finalStaffId })) {
@@ -667,6 +739,7 @@ export const createStaff = asyncHandler(async (req, res) => {
       // Omit rather than store "" — with a sparse unique index, multiple
       // blank strings would still collide as duplicates.
       ...(trimmedEmail ? { email: trimmedEmail } : {}),
+      ...(branchId ? { branch: branchId } : {}),
       // Hashed automatically by the pre("save") hook on the model.
       ...(password ? { password } : {}),
     });
@@ -689,6 +762,7 @@ export const createStaff = asyncHandler(async (req, res) => {
         email: trimmedEmail,
         password, // hashed automatically by User's own pre("save") hook
         role: wantsAdmin ? "admin" : "user",
+        ...(branchId ? { branch: branchId } : {}),
         // New admins start with zero tabs granted — the super admin picks
         // which tabs/sub-tabs to expose from the Permissions screen right
         // after creating them. "Show All" is opt-in, never a default.
@@ -728,6 +802,8 @@ export const createStaff = asyncHandler(async (req, res) => {
 /** PUT /api/staff/:id — update a staff member */
 export const updateStaff = asyncHandler(async (req, res) => {
   assertValidId(req.params.id);
+  if (isTruthy(req.body?.makeAdmin)) throw new ApiError(400, ADMIN_BY_INVITE_MESSAGE);
+  const branchId = await resolveStaffBranch(req, req.body?.branch);
   const {
     firstName,
     lastName,
@@ -781,6 +857,8 @@ export const updateStaff = asyncHandler(async (req, res) => {
   const updateData = {};
 
   if (staffName !== undefined) updateData.staffName = staffName;
+  // Only the company admin / super admin can move a staff member between branches.
+  if (branchId !== undefined && !req.user?.branch) updateData.branch = branchId;
   if (staffId !== undefined) updateData.staffId = staffId.trim();
   if (projectName !== undefined) updateData.projectName = projectName.trim();
   if (contactNo !== undefined) updateData.contactNo = contactNo.trim();
@@ -979,6 +1057,17 @@ export const updateStaff = asyncHandler(async (req, res) => {
     }
   }
 
+  // Company without probation: never save Internship / Probation, and the
+  // Confirmation Date is the joining date.
+  if (companySkipsProbation()) {
+    const finalStatus = updateData.status !== undefined ? updateData.status : existingStaff.status;
+    if (NO_PROBATION_STATUSES.has(finalStatus)) {
+      Object.assign(updateData, confirmedFromJoining(joiningDate));
+    } else if (finalStatus === "Confirmation") {
+      updateData.confirmationDate = joiningDate ? new Date(joiningDate) : null;
+    }
+  }
+
   let updated;
   try {
     updated = await Staff.findByIdAndUpdate(req.params.id, updateData, {
@@ -1013,7 +1102,7 @@ export const updateStaff = asyncHandler(async (req, res) => {
   // Promoting an existing login to admin must be able to run on its own,
   // even when nothing else on the form changed — otherwise ticking only
   // "Make Admin" would be silently ignored.
-  const wantsAdmin = isTruthy(makeAdmin) && req.user?.role === "super-admin";
+  const wantsAdmin = false; // closed — see ADMIN_BY_INVITE_MESSAGE
   const wantsUserSync =
     Boolean(lookupEmail) &&
     (trimmedPassword ||
@@ -1059,6 +1148,7 @@ export const updateStaff = asyncHandler(async (req, res) => {
           email: trimmedEmail,
           password: trimmedPassword,
           role: wantsAdmin ? "admin" : "user",
+          ...(updated.branch ? { branch: updated.branch } : {}),
           ...(wantsAdmin ? { permissions: { allTabs: false, tabs: [] } } : {}),
         });
       } catch (err) {
@@ -1221,6 +1311,12 @@ export const importStaff = asyncHandler(async (req, res) => {
       enabled: row.enabled !== undefined ? row.enabled : true,
     });
 
+    // Company without probation: imported rows are confirmed from joining.
+    if (companySkipsProbation()) {
+      if (NO_PROBATION_STATUSES.has(doc.status || "")) Object.assign(doc, confirmedFromJoining(joiningDate));
+      else if (doc.status === "Confirmation") doc.confirmationDate = joiningDate;
+    }
+
     docs.push(doc);
   }
 
@@ -1228,6 +1324,7 @@ export const importStaff = asyncHandler(async (req, res) => {
     throw new ApiError(400, "No valid staff rows found in the import");
   }
 
+  await assertStaffLimit(docs.length);
   const inserted = await Staff.insertMany(docs, { ordered: false });
   res.status(201).json({
     success: true,
@@ -1237,9 +1334,9 @@ export const importStaff = asyncHandler(async (req, res) => {
 });
 // ── Birthdays ─────────────────────────────────────────────────────────────
 
-// "Today" in India, as a plain local calendar date (midnight).
+// "Today" in the company's time zone, as a plain local calendar date (midnight).
 const istToday = () => {
-  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: companyTimeZone() }));
   return new Date(ist.getFullYear(), ist.getMonth(), ist.getDate());
 };
 
@@ -1250,7 +1347,7 @@ const nextBirthday = (dateOfBirth, today) => {
   // Read the day/month in India time: a DOB saved as UTC midnight AND one
   // saved as India midnight (18:30 UTC the day before) both give the right
   // day, so the Wish button opens at 12:00 midnight on the real birthday.
-  const dob = new Date(raw.getTime() + 5.5 * 3600 * 1000);
+  const dob = new Date(raw.getTime() + tzOffsetMs());
   const m = dob.getUTCMonth();
   const d = dob.getUTCDate();
   let next = new Date(today.getFullYear(), m, d);

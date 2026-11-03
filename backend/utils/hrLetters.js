@@ -30,7 +30,9 @@ const asset = (name) => {
   return fs.existsSync(p) ? p : null;
 };
 
-const TZ = "Asia/Kolkata";
+import { tzOffsetMs, currentCompany } from "./companyContext.js";
+import { staffDocDef } from "../config/countries.js";
+import { findCurrency } from "../config/currencies.js";
 const BLUE = "#1F3A93"; // body text (navy blue as in the templates)
 const BRAND_BLUE = "#1565D8";
 const RED = "#E31B23";
@@ -39,9 +41,9 @@ const DARK = "#1B1B1B";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // ── Small helpers ────────────────────────────────────────────────────────
-/** Calendar parts of a date as seen in India. */
+/** Calendar parts of a date in the company's time zone. */
 const istParts = (d) => {
-  const t = new Date(new Date(d).getTime() + 5.5 * 3600 * 1000);
+  const t = new Date(new Date(d).getTime() + tzOffsetMs(d));
   return { y: t.getUTCFullYear(), m: t.getUTCMonth(), d: t.getUTCDate() };
 };
 const ordinal = (n) => {
@@ -61,9 +63,20 @@ export const dotDate = (d) => {
   const p = istParts(d);
   return `${String(p.d).padStart(2, "0")}.${String(p.m + 1).padStart(2, "0")}.${p.y}`;
 };
-/** "20,000" (Indian grouping, no decimals unless needed) */
-export const money = (v) =>
-  Number(v || 0).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 0 });
+/** "20,000" in the company's number format (no decimals unless needed). */
+export const money = (v) => {
+  const c = currentCompany();
+  const locale = c?.numberLocale || findCurrency(c?.currencyCode)?.locale || "en-IN";
+  try {
+    return Number(v || 0).toLocaleString(locale, { maximumFractionDigits: 2, minimumFractionDigits: 0 });
+  } catch {
+    return Number(v || 0).toFixed(0);
+  }
+};
+/** "Rs." / "SAR" / "QAR" — currency text PDFs can print. */
+const currencyText = () => findCurrency(currentCompany()?.currencyCode)?.pdf || "Rs.";
+/** Labels of the two staff ID numbers for the company's country. */
+const idLabel = (type) => staffDocDef(currentCompany()?.country, type)?.numberLabel || (type === "pan" ? "PAN" : "Aadhaar No.");
 
 /** Mr. / Ms. from the staff member's gender. */
 export const honorific = (gender) => {
@@ -160,7 +173,37 @@ const BAND_CONF_TOP_H = 200; // px — confirmation letter top band
 const BAND_BOTTOM_H = 137; // px — bottom band (flush to the bottom edge)
 const BLEED = 1; // pt drawn past the page edge so no hairline of white shows
 
-const drawTopBand = (doc, variant = "offer") => {
+// Companies other than ZAP get plain bands in their own brand colours
+// (the wave artwork above is ZAP Solutionz's own letterhead).
+const brandBand = (doc, company, where) => {
+  const W = doc.page.width;
+  const H = doc.page.height;
+  const main = company?.sidebarColor || "#1B3A5C";
+  const accent = company?.primaryColor || "#2563eb";
+  if (where === "top") {
+    doc.rect(0, 0, W, 14).fill(main);
+    doc.rect(0, 14, W, 4).fill(accent);
+    return;
+  }
+  doc.rect(0, H - 34, W, 4).fill(accent);
+  doc.rect(0, H - 30, W, 30).fill(main);
+  const line = [company?.address, company?.legalLine].filter(Boolean).join("   ·   ");
+  if (line) {
+    // Text inside the bottom margin would make pdfkit start a new page (and
+    // draw this band again, forever) — lift the margin while drawing.
+    const { x, y } = doc;
+    const bottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    doc.font("Body").fontSize(7.5).fillColor("#FFFFFF");
+    doc.text(line, 40, H - 20, { width: W - 80, align: "center", lineBreak: false, ellipsis: true });
+    doc.page.margins.bottom = bottom;
+    doc.x = x;
+    doc.y = y;
+  }
+};
+
+const drawTopBand = (doc, variant = "offer", company = null) => {
+  if (company && !isZap(company)) return brandBand(doc, company, "top");
   const W = doc.page.width;
   const file = variant === "confirmation" ? asset("band-top-conf.jpg") : asset("band-top-offer.jpg");
   const fallback = asset("band-top.jpg");
@@ -169,7 +212,8 @@ const drawTopBand = (doc, variant = "offer") => {
     doc.image(file, 0, -BLEED, { width: W, height: h + BLEED });
   } else if (fallback) doc.image(fallback, 0, 0, { width: W });
 };
-const drawBottomBand = (doc) => {
+const drawBottomBand = (doc, company = null) => {
+  if (company && !isZap(company)) return brandBand(doc, company, "bottom");
   const W = doc.page.width;
   const H = doc.page.height;
   const file = asset("band-bottom-offer.jpg");
@@ -198,8 +242,8 @@ const drawWatermark = (doc, company) => {
 const drawBands = (doc, { watermark = false, company, top = true, bottom = true, variant = "offer" } = {}) => {
   const { x, y } = doc;
   if (watermark) drawWatermark(doc, company);
-  if (top) drawTopBand(doc, variant);
-  if (bottom) drawBottomBand(doc);
+  if (top) drawTopBand(doc, variant, company);
+  if (bottom) drawBottomBand(doc, company);
   doc.x = x;
   doc.y = y;
 };
@@ -245,7 +289,13 @@ const signatureBlock = (doc, company, { team = "Admin & Accounts Team", signator
   doc.moveDown(1.2);
   para(doc, closing, { bold: true, color: BLUE, gap: 16 });
   doc.moveDown(0.6);
-  para(doc, team, { bold: true, color: RED, gap: 8 });
+  if (!isZap(company) && (company?.signatureImage || company?.stampImage)) {
+    const y0 = doc.y;
+    if (company.signatureImage) doc.image(company.signatureImage, ML, y0, { fit: [120, 34] });
+    if (company.stampImage) doc.image(company.stampImage, ML + 160, y0 - 14, { fit: [64, 64] });
+    doc.y = y0 + 40;
+  }
+  para(doc, team, { bold: true, color: isZap(company) ? RED : company?.primaryColor || RED, gap: 8 });
   if (signatory) para(doc, signatory, { bold: true, color: DARK, gap: 8 });
   brandName(doc, company, ML, doc.y + 4, 15);
 };
@@ -266,8 +316,8 @@ const detailsBox = (doc, staff, extra, { date, signatureBox = true } = {}) => {
   const leftW = signatureBox ? w * 0.56 : w;
   const labelW = 88;
   const rows = [
-    ["Aadhaar No.", extra.aadhaar || ""],
-    ["PAN", extra.pan || ""],
+    [idLabel("aadhaar"), extra.aadhaar || ""],
+    [idLabel("pan"), extra.pan || ""],
     ["Mobile", staff.contactNo || ""],
     ["Email", staff.email || ""],
     ["Address\n[Permanent]", staff.address || ""],
@@ -656,8 +706,8 @@ export const renderConfirmationLetter = (PDFDocument, data) => {
   doc.font("Times-Bold").fontSize(14).fillColor(DARK).text(nm, boxX + 6, 420, { width: boxW - 12, align: "center", underline: true });
   let by = Math.max(456, doc.y + 18);
   const rows = [
-    ["Aadhaar No.", extra.aadhaar || ""],
-    ["PAN", extra.pan || ""],
+    [idLabel("aadhaar"), extra.aadhaar || ""],
+    [idLabel("pan"), extra.pan || ""],
     ["Mobile", staff.contactNo || ""],
     ["Email", staff.email || ""],
     ["", ""],
@@ -752,7 +802,7 @@ export const renderJoiningLetter = (PDFDocument, data) => {
 
   heading("3. Compensation");
   const comp = data.salary != null
-    ? `Your compensation shall be Rs. ${money(data.salary)}/- per month, as communicated to you at the time of your interview. For the Assessment Period, you will be paid on a pro-rata basis for the days actually worked, irrespective of the outcome of the assessment.`
+    ? `Your compensation shall be ${currencyText()} ${money(data.salary)}/- per month, as communicated to you at the time of your interview. For the Assessment Period, you will be paid on a pro-rata basis for the days actually worked, irrespective of the outcome of the assessment.`
     : "Your compensation shall be as per the terms communicated to you at the time of your interview. For the Assessment Period, you will be paid on a pro-rata basis for the days actually worked, irrespective of the outcome of the assessment.";
   p(comp, { after: 0 });
 
@@ -767,8 +817,9 @@ export const renderJoiningLetter = (PDFDocument, data) => {
   p(`For ${company.name},`, { after: 0 });
 
   const sY = doc.y;
-  const sig = isZap(company) ? asset("signature.jpg") : null;
-  if (sig) doc.image(sig, left, sY + 2, { width: 59 });
+  const sig = isZap(company) ? asset("signature.jpg") : company.signatureImage || null;
+  if (sig) doc.image(sig, left, sY + 2, { fit: [90, 28] });
+  if (!isZap(company) && company.stampImage) doc.image(company.stampImage, left + 170, sY - 20, { fit: [70, 70] });
   doc.moveTo(left, sY + 31).lineTo(left + 134, sY + 31).lineWidth(0.6).strokeColor(DARK).stroke();
   doc.font("Times-Roman").fontSize(FS).fillColor(DARK)
     .text(data.signatory ? data.signatory : "[Authorized Signatory]", left, sY + 34, { width });

@@ -174,9 +174,13 @@ router.get(
   getFinalSettlement,
 );
 
+// Add staff: the company's admin (and the super admin inside the owner
+// company). `allowSuperAdminOnly` was here by mistake and blocked every admin
+// with "Access denied. Super admin only." The super admin still cannot add
+// staff to a CLIENT company — protect() makes those companies view-only for
+// the super admin, because that is the company admin's job.
 router.post(
   "/",
-  allowSuperAdminOnly,
   allowAdminOnly,
   requireTabAccess("staff.add"),
   writeOperationLimiter,

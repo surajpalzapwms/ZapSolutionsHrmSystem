@@ -1,4 +1,14 @@
 import mongoose from "mongoose";
+import {
+  isWeeklyOffDow,
+  weeklyOffName,
+  tzOffsetMs,
+  companyTimeZone,
+  tzOffsetString,
+  companyWorkHours,
+  companySaturdayRule,
+} from "../utils/companyContext.js";
+import { getCompanyId } from "../utils/tenant.js";
 import Attendance from "../models/Attendance.js";
 import Leave from "../models/Leave.js";
 import Holiday from "../models/holiday.js";
@@ -49,14 +59,23 @@ export const formatMinutesToTimeString = (minutes) => {
 // ever applies when `referenceDate` (the login time) falls on a Saturday
 // in IST **on or after SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM**. Before that
 // date Saturdays were normal full working days (same hours as a weekday).
-export const SATURDAY_SHIFT_START = "10:00";
+//
+// Since 3 Nov 2026 this is a COMPANY setting (Settings → Work week & hours):
+// the admin can switch the short Saturday off (Saturday = normal working day
+// with the company's hours) or change its hours. It never applies when
+// Saturday is one of the company's weekly off days. Unset = on, 10:00 – 16:00.
+export const SATURDAY_SHIFT_START = "10:00"; // default only — see companySaturdayRule()
 export const SATURDAY_SHIFT_END = "16:00";
-// Net minutes expected for a full Saturday: 10:00 AM – 4:00 PM (360 min)
-// minus the 1:30–2:15 PM lunch overlap (45 min) = 315 net minutes.
-const SATURDAY_SHIFT_MINUTES = 6 * 60 - 45; // 315
+// Net minutes expected for a full Saturday: Saturday hours minus the lunch
+// overlap (10:00 AM – 4:00 PM → 360 − 45 = 315 net minutes).
+const saturdayShiftMinutes = () => {
+  const { start, end } = companySaturdayRule();
+  return requiredWorkMinutes(start, end);
+};
 const SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM = new Date(Date.UTC(2026, 3, 1)); // Apr 1, 2026
 const isShortSaturday = (referenceDate) =>
   !!referenceDate &&
+  companySaturdayRule().enabled &&
   toIST(referenceDate).getUTCDay() === 6 &&
   toIST(referenceDate) >= SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM;
 
@@ -76,7 +95,7 @@ export const getAttendanceType = (totalMinutesWorked, referenceDate = null) => {
     // time) counts as a full day, no half/short tiers. Only time worked
     // beyond the real Saturday window (10:00 AM – 4:00 PM) is extra.
     if (totalMinutesWorked > 0) {
-      return { type: "full", expectedMinutes: SATURDAY_SHIFT_MINUTES };
+      return { type: "full", expectedMinutes: saturdayShiftMinutes() };
     }
   }
   if (totalMinutesWorked > FULL_DAY_THRESHOLD_MINUTES)
@@ -119,7 +138,7 @@ export const classifyWorkedMinutes = (
         bankMinutesUsed: 0,
         extraMinutesEarned: Math.max(
           0,
-          effectiveMinutes - SATURDAY_SHIFT_MINUTES,
+          effectiveMinutes - saturdayShiftMinutes(),
         ),
       };
     }
@@ -289,6 +308,7 @@ const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
 // Call after any Holiday or SaturdayHolidayRule create/update/delete so an
 // admin's change is reflected immediately instead of waiting out the TTL.
 export const invalidateHolidayCheckCache = () => holidayCheckCache.clear();
+const companyCacheKey = () => getCompanyId() || "_";
 
 // ─── Holiday-window preload ────────────────────────────────────────────────
 // The cache above only helps once a day has actually been looked up once.
@@ -340,15 +360,15 @@ export const warmHolidayWindow = async (fromDate, toDate) => {
     cursor = new Date(cursor.getTime() + 86400000)
   ) {
     const istDate = toIST(cursor);
-    const cacheKey = istDate.toISOString().slice(0, 10);
+    const cacheKey = `${companyCacheKey()}:${istDate.toISOString().slice(0, 10)}`;
     // Don't clobber a value someone else already cached for this exact day
     // (e.g. an overlapping in-flight request) — first one in wins, same as
     // before; this is purely a bulk pre-fill, not a source of truth change.
     if (holidayCheckCache.has(cacheKey)) continue;
 
     let result;
-    if (istDate.getUTCDay() === 0) {
-      result = { isHoliday: true, reason: "Sunday" };
+    if (isWeeklyOffDow(istDate.getUTCDay())) {
+      result = { isHoliday: true, weeklyOff: true, reason: weeklyOffName(istDate.getUTCDay()) };
     } else {
       const s = new Date(cursor);
       s.setUTCHours(0, 0, 0, 0);
@@ -385,7 +405,8 @@ export const isHolidayOrSunday = async (date) => {
   // would treat early Monday-IST hours as still Sunday and block sign-in).
   const istDate = toIST(checkDate);
 
-  const cacheKey = istDate.toISOString().slice(0, 10);
+  // Per company: holidays and weekly off days differ between companies.
+  const cacheKey = `${companyCacheKey()}:${istDate.toISOString().slice(0, 10)}`;
   const cached = holidayCheckCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.result;
@@ -397,7 +418,9 @@ export const isHolidayOrSunday = async (date) => {
 };
 
 const computeIsHolidayOrSunday = async (checkDate, istDate) => {
-  if (istDate.getUTCDay() === 0) return { isHoliday: true, reason: "Sunday" };
+  if (isWeeklyOffDow(istDate.getUTCDay())) {
+    return { isHoliday: true, weeklyOff: true, reason: weeklyOffName(istDate.getUTCDay()) };
+  }
   // BUGFIX: the day window must be the INDIA calendar day — the same day
   // the result is cached under (cacheKey above). It used to be the UTC day
   // of `checkDate`, so a check made between 00:00 and 05:30 IST (e.g. the
@@ -676,7 +699,6 @@ export const findExistingAttendance = async (
   // either of which could disagree with IST and match the wrong day.
   const { year, month, day } = parseDateString(dateStr);
   const { start, end } = getWideDayRange(dateStr);
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
   const candidates = await applySession(
     Attendance.find({
@@ -688,7 +710,7 @@ export const findExistingAttendance = async (
 
   for (const rec of candidates) {
     const login = new Date(rec.loginTime);
-    const ist = new Date(login.getTime() + IST_OFFSET_MS);
+    const ist = new Date(login.getTime() + tzOffsetMs());
     if (
       ist.getUTCFullYear() === year &&
       ist.getUTCMonth() + 1 === month &&
@@ -703,7 +725,6 @@ export const findExistingAttendance = async (
 // ─── Timezone-safe leave lookup by date string ────────────────────────────────
 export const findExistingLeave = async (userId, dateStr, session = null) => {
   const { year, month, day } = parseDateString(dateStr);
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
   const start = new Date(Date.UTC(year, month - 1, day - 1, 0, 0, 0, 0));
   const end = new Date(Date.UTC(year, month - 1, day + 1, 23, 59, 59, 999));
@@ -723,7 +744,7 @@ export const findExistingLeave = async (userId, dateStr, session = null) => {
     )
       return rec;
 
-    const ist = new Date(leaveDate.getTime() + IST_OFFSET_MS);
+    const ist = new Date(leaveDate.getTime() + tzOffsetMs());
     if (
       ist.getUTCFullYear() === year &&
       ist.getUTCMonth() + 1 === month &&
@@ -757,9 +778,9 @@ export const getAllAttendance = async ({ from, to } = {}) => {
   if (DAY_RE.test(from || "") || DAY_RE.test(to || "")) {
     filter.loginTime = {};
     if (DAY_RE.test(from || ""))
-      filter.loginTime.$gte = new Date(`${from}T00:00:00.000+05:30`);
+      filter.loginTime.$gte = new Date(`${from}T00:00:00.000${tzOffsetString()}`);
     if (DAY_RE.test(to || ""))
-      filter.loginTime.$lte = new Date(`${to}T23:59:59.999+05:30`);
+      filter.loginTime.$lte = new Date(`${to}T23:59:59.999${tzOffsetString()}`);
   }
   const records = await Attendance.find(filter).sort({ loginTime: -1 }).lean();
   if (records.length === 0) return records;
@@ -905,7 +926,7 @@ export const getProbationLeaveBlockMessage = (staff, checkDate) => {
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "Asia/Kolkata",
+    timeZone: companyTimeZone(),
   });
   return `Leave cannot be applied during internship or probation. This staff member becomes eligible for leave from ${formatted} onward (after confirmation).`;
 };
@@ -928,7 +949,7 @@ export const isBeforeConfirmation = (staff, checkDate) => {
 // A plain "YYYY-MM-DD" string is returned as-is.
 export const istDayKey = (value) => {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  const ist = new Date(new Date(value).getTime() + 5.5 * 60 * 60 * 1000);
+  const ist = new Date(new Date(value).getTime() + tzOffsetMs());
   return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(
     ist.getUTCDate(),
   ).padStart(2, "0")}`;
@@ -952,14 +973,19 @@ export const getUserAttendanceRange = (userId, startDate, endDate) => {
 };
 
 // ─── Self sign-in / sign-out (per-user shift window, IST) ────────────────────
-// Same IST_OFFSET_MS trick used in findExistingAttendance: shift the UTC
+// Same tzOffsetMs() trick used in findExistingAttendance: shift the UTC
 // timestamp by +5:30 so that its UTC getters read like IST wall-clock time.
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
-// Fallback shift if a user has no shiftStartTime/shiftEndTime set — matches
-// the general office timing (10:00 AM – 6:30 PM).
+// The OLD fixed office timing (10:00 AM – 6:30 PM). Every staff member used to
+// get it stored as their own shift, so a user shift equal to it means "no own
+// shift" — the company's working hours are used instead (see getUserShift).
 export const DEFAULT_SHIFT_START = "10:00";
 export const DEFAULT_SHIFT_END = "18:30";
+
+// The company's working hours (Settings → Work week & hours; 10:00 – 18:30
+// when the admin has not set them). Use these instead of the constants above.
+export const defaultShiftStart = () => companyWorkHours().start;
+export const defaultShiftEnd = () => companyWorkHours().end;
 
 // Lunch break, subtracted from worked time regardless of shift (1:30 PM –
 // 2:15 PM, 45 minutes).
@@ -969,9 +995,29 @@ export const LUNCH_END = "14:15";
 // Net working minutes required before self sign-out unlocks. Both the
 // 10:00–18:30 and 9:00–17:30 shifts span 8.5 hours, so after the 45-minute
 // lunch break is subtracted, either shift needs 7h 45m (465 min) of work.
-export const REQUIRED_WORK_MINUTES = 7 * 60 + 45; // 465
+export const REQUIRED_WORK_MINUTES = 7 * 60 + 45; // 465 (10:00 – 18:30)
 
-const toIST = (date) => new Date(new Date(date).getTime() + IST_OFFSET_MS);
+const hmMinutes = (hm, fallback) => {
+  const { hour, minute } = parseHM(hm, fallback);
+  return hour * 60 + minute;
+};
+
+/**
+ * Net minutes of a shift: its length minus the part of the lunch break inside
+ * it. 10:00–18:30 → 465, 09:00–18:00 → 495, 10:00–16:00 → 315.
+ * This is the work needed before self sign-out unlocks.
+ */
+export const requiredWorkMinutes = (shiftStartTime = defaultShiftStart(), shiftEndTime = defaultShiftEnd()) => {
+  const start = hmMinutes(shiftStartTime, defaultShiftStart());
+  const end = hmMinutes(shiftEndTime, defaultShiftEnd());
+  if (end <= start) return REQUIRED_WORK_MINUTES;
+  const lunchStart = hmMinutes(LUNCH_START, LUNCH_START);
+  const lunchEnd = hmMinutes(LUNCH_END, LUNCH_END);
+  const lunch = Math.max(0, Math.min(end, lunchEnd) - Math.max(start, lunchStart));
+  return Math.max(0, end - start - lunch);
+};
+
+const toIST = (date) => new Date(new Date(date).getTime() + tzOffsetMs());
 
 /** "HH:mm" → { hour, minute } */
 const parseHM = (hm, fallback) => {
@@ -1022,17 +1068,17 @@ const overlapMinutes = (aStart, aEnd, bStart, bEnd) => {
 export const getClampedWorkingMinutes = (
   loginTime,
   logoutTime,
-  shiftStartTime = DEFAULT_SHIFT_START,
-  shiftEndTime = DEFAULT_SHIFT_END,
+  shiftStartTime = defaultShiftStart(),
+  shiftEndTime = defaultShiftEnd(),
 ) => {
   const loginIST = toIST(loginTime);
   const logoutIST = toIST(logoutTime);
 
   const { hour: startH, minute: startM } = parseHM(
     shiftStartTime,
-    DEFAULT_SHIFT_START,
+    defaultShiftStart(),
   );
-  const { hour: endH, minute: endM } = parseHM(shiftEndTime, DEFAULT_SHIFT_END);
+  const { hour: endH, minute: endM } = parseHM(shiftEndTime, defaultShiftEnd());
   const { hour: lunchStartH, minute: lunchStartM } = parseHM(
     LUNCH_START,
     LUNCH_START,
@@ -1072,8 +1118,8 @@ export const getClampedWorkingMinutes = (
 export const getWorkedMinutesBreakdown = (
   loginTime,
   logoutTime,
-  shiftStartTime = DEFAULT_SHIFT_START,
-  shiftEndTime = DEFAULT_SHIFT_END,
+  shiftStartTime = defaultShiftStart(),
+  shiftEndTime = defaultShiftEnd(),
 ) => {
   const netMinutes = getClampedWorkingMinutes(
     loginTime,
@@ -1084,7 +1130,7 @@ export const getWorkedMinutesBreakdown = (
 
   const loginIST = toIST(loginTime);
   const logoutIST = toIST(logoutTime);
-  const { hour: endH, minute: endM } = parseHM(shiftEndTime, DEFAULT_SHIFT_END);
+  const { hour: endH, minute: endM } = parseHM(shiftEndTime, defaultShiftEnd());
   const windowEnd = istClockOn(loginIST, endH, endM);
 
   const overtimeStart = loginIST > windowEnd ? loginIST : windowEnd;
@@ -1096,11 +1142,39 @@ export const getWorkedMinutesBreakdown = (
   return { netMinutes, overtimeMinutes };
 };
 
-/** Resolves the shift window to use for a user, falling back to the office default. */
-export const getUserShift = (user) => ({
-  shiftStartTime: user?.shiftStartTime || DEFAULT_SHIFT_START,
-  shiftEndTime: user?.shiftEndTime || DEFAULT_SHIFT_END,
-});
+/**
+ * Shift window of a user: their OWN shift when an admin gave them one,
+ * otherwise the company's working hours (Settings → Work week & hours).
+ * Users created before company hours existed have the old 10:00 – 18:30
+ * stored; that pair counts as "no own shift".
+ */
+export const hasOwnShift = (user) => {
+  const s = user?.shiftStartTime;
+  const e = user?.shiftEndTime;
+  return !!((s && s !== DEFAULT_SHIFT_START) || (e && e !== DEFAULT_SHIFT_END));
+};
+export const getUserShift = (user) => {
+  const company = companyWorkHours();
+  if (!hasOwnShift(user)) return { shiftStartTime: company.start, shiftEndTime: company.end };
+  return {
+    shiftStartTime: user?.shiftStartTime || company.start,
+    shiftEndTime: user?.shiftEndTime || company.end,
+  };
+};
+
+/**
+ * Default Login / Logout ("HH:mm") for a calendar day "YYYY-MM-DD" when an
+ * admin marks or edits attendance without typing a time: the company's
+ * working hours, or its Saturday hours on a short Saturday.
+ */
+export const companyShiftForDate = (dateString) => {
+  const d = new Date(`${String(dateString).slice(0, 10)}T00:00:00Z`);
+  const sat = companySaturdayRule();
+  if (sat.enabled && d.getUTCDay() === 6 && d >= SATURDAY_SHORT_SHIFT_EFFECTIVE_FROM) {
+    return { start: sat.start, end: sat.end };
+  }
+  return companyWorkHours();
+};
 
 /**
  * Resolves the shift window to use for computing worked minutes on a given
@@ -1114,11 +1188,12 @@ export const getUserShift = (user) => ({
  */
 export const resolveEffectiveShift = (
   referenceDate,
-  shiftStartTime = DEFAULT_SHIFT_START,
-  shiftEndTime = DEFAULT_SHIFT_END,
+  shiftStartTime = defaultShiftStart(),
+  shiftEndTime = defaultShiftEnd(),
 ) => {
   if (isShortSaturday(referenceDate)) {
-    return { shiftStartTime: SATURDAY_SHIFT_START, shiftEndTime: SATURDAY_SHIFT_END };
+    const sat = companySaturdayRule();
+    return { shiftStartTime: sat.start, shiftEndTime: sat.end };
   }
   return { shiftStartTime, shiftEndTime };
 };

@@ -6,6 +6,7 @@
 // their notice period and still work here). "Relieved" with no relieving
 // date recorded counts as left.
 
+import { companyTimeZone } from "./brand";
 const startOfToday = () => {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -46,7 +47,7 @@ const istDayKey = (value) => {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;
-  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  return d.toLocaleDateString("en-CA", { timeZone: companyTimeZone() });
 };
 
 // Left the organization BEFORE the confirmation date (e.g. relieved during

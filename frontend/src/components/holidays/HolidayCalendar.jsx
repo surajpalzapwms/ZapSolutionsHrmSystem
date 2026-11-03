@@ -5,6 +5,7 @@ import { getDaysInMonth, getMonthName, getShortMonthName } from "../../utils/dat
 import { SHORT_DAYS } from "../../utils/constants";
 import { saturdayHolidayService } from "../../services/saturdayHolidayService";
 import { filterHolidaysFromJoiningDate } from "../../utils/holidayHelpers";
+import { isWeeklyOffDow, weeklyOffLabel } from "../../utils/brand";
 
 const isSameDay = (a, b) =>
   a.getFullYear() === b.getFullYear() &&
@@ -45,7 +46,7 @@ const Legend = () => (
       <span className="w-3.5 h-3.5 rounded bg-red-500 inline-block" /> Holiday
     </span>
     <span className="flex items-center gap-1.5">
-      <span className="w-3.5 h-3.5 rounded bg-gray-400 inline-block" /> Sunday
+      <span className="w-3.5 h-3.5 rounded bg-gray-400 inline-block" /> Weekly off ({weeklyOffLabel()})
     </span>
     <span className="flex items-center gap-1.5">
       <span className="w-3.5 h-3.5 rounded border border-gray-300 inline-block" /> Working Day
@@ -96,7 +97,7 @@ const MonthlyView = ({ current, setCurrent, holidayMap, today, onView, minMonth 
           const key = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
           const dayHolidays = holidayMap[key];
           const isHoliday = !!dayHolidays;
-          const isSunday = day.getDay() === 0;
+          const isSunday = isWeeklyOffDow(day.getDay()); // weekly off day
           const isToday = isSameDay(day, today);
 
           let cellClasses = "min-h-[64px] rounded-lg border p-2 text-sm font-medium text-center ";
@@ -163,7 +164,7 @@ const MiniMonth = ({ year, month, holidayMap, holidaysForMonth, today, isCurrent
           if (!day) return <div key={idx} className="h-6" />;
           const key = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
           const isHoliday = !!holidayMap[key];
-          const isSunday = day.getDay() === 0;
+          const isSunday = isWeeklyOffDow(day.getDay()); // weekly off day
           const isToday = isSameDay(day, today);
 
           let classes = "h-6 rounded flex items-center justify-center text-[11px] ";

@@ -1,5 +1,6 @@
 // models/StaffAdvance.js
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 const staffAdvanceSchema = new mongoose.Schema(
   {

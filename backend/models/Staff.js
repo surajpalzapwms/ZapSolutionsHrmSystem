@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 import bcrypt from "bcryptjs";
 import { encryptPassword } from "../utils/passwordVault.js";
 
@@ -225,6 +226,12 @@ staffSchema.methods.comparePassword = async function (candidatePassword) {
   if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
+
+// Branch of the company this staff member works in (null = head office / no
+// branch). A branch admin only sees and creates staff of their own branch.
+staffSchema.add({
+  branch: { type: mongoose.Schema.Types.ObjectId, ref: "Branch", default: null, index: true },
+});
 
 // staffId and email are unique. The partial filter ignores staff that have none.
 staffSchema.index({ staffId: 1 }, { unique: true, partialFilterExpression: { staffId: { $type: "string" } } });

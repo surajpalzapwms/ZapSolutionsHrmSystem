@@ -1,6 +1,6 @@
 // src/components/admin-permissions/AdminPermissions.jsx
 import React, { useEffect, useState } from "react";
-import { ShieldCheck, UserCog, ShieldPlus } from "lucide-react";
+import { ShieldCheck, UserCog } from "lucide-react";
 import Card from "../common/Card";
 import Button from "../common/Button";
 import Spinner from "../common/Spinner";
@@ -70,12 +70,6 @@ const AdminPermissions = () => {
     setEditingAccount(account);
     setEditMode("edit");
     setDraft(draftFromAccount(account));
-  };
-
-  const openPromote = (account) => {
-    setEditingAccount(account);
-    setEditMode("promote");
-    setDraft(emptyDraft());
   };
 
   const closeModal = () => {
@@ -214,17 +208,10 @@ const AdminPermissions = () => {
                           </button>
                         </>
                       )}
-                      {account.role === "user" && (
-                        <button
-                          type="button"
-                          onClick={() => openPromote(account)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 hover:underline disabled:opacity-50"
-                        >
-                          <ShieldPlus size={14} />
-                          Make Admin
-                        </button>
-                      )}
+                      {/* "Make Admin" is gone: admin logins are created only from a
+                          one-time invite link (Companies → Admins for the company
+                          admin, Branches for a branch admin). One admin per
+                          company / branch. */}
                     </div>
                   </td>
                 </tr>

@@ -15,7 +15,7 @@ export const requireTabAccess = (tabKey) => (req, res, next) => {
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
 
-  if (hasTabAccess(req.user, tabKey)) {
+  if (hasTabAccess(req.user, tabKey, req.company)) {
     return next();
   }
 

@@ -1,4 +1,5 @@
 // src/utils/dateUtils.js
+import { isWeeklyOffDow, DAY_NAMES } from "./brand";
 export const formatDateToReadable = (dateString) => {
   if (!dateString) return "";
   try {
@@ -68,10 +69,12 @@ export const isPastDate = (dateString) => {
   return input < today;
 };
 
+// White label: the company's weekly off day(s) — Sunday in India, Friday +
+// Saturday in Saudi Arabia / Qatar. (Name kept for the existing callers.)
 export const isSunday = (date) => {
   if (!date) return false;
   const d = new Date(date);
-  return d.getDay() === 0;
+  return isWeeklyOffDow(d.getDay());
 };
 
 export const isSaturday = (date) => {
@@ -101,7 +104,7 @@ export const findHolidayForDate = (dateString, holidays = []) => {
 
 export const getBlockedDayReason = (dateString, holidays = []) => {
   if (!dateString) return null;
-  if (isSunday(dateString)) return "Sunday";
+  if (isSunday(dateString)) return DAY_NAMES[new Date(dateString).getDay()];
   const holiday = findHolidayForDate(dateString, holidays);
   return holiday ? holiday.name : null;
 };

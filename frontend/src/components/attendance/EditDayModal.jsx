@@ -18,6 +18,7 @@ import Button from "../common/Button";
 import Modal from "../common/Modal";
 import { validateRequired } from "../../utils/validation";
 import { getBlockedDayReason } from "../../utils/dateUtils";
+import { tzOffsetMs, companyShiftForDate, shiftLabel } from "../../utils/brand";
 
 // New-status options shown in the dropdown. `kind` decides which extra
 // fields render below, and which endpoint the parent ends up calling.
@@ -68,7 +69,7 @@ const istDayKey = (value) => {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const t = new Date(value).getTime();
   if (!Number.isFinite(t)) return null;
-  return new Date(t + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return new Date(t + tzOffsetMs(t)).toISOString().slice(0, 10);
 };
 
 // Paid / Sick / Casual don't exist before the confirmation date — only
@@ -159,7 +160,20 @@ const EditDayModal = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  // Sunday or a holiday from the Holiday calendar (applies to everyone).
+  // Marking the day Present: empty Login / Logout start with the company's
+  // working hours for that day (Settings → Work week & hours). A day that
+  // already has times keeps them.
+  useEffect(() => {
+    if (!isOpen || !day || form.status !== "present") return;
+    const hours = companyShiftForDate(day.date);
+    const patch = {};
+    if (!form.loginTime) patch.loginTime = hours.start;
+    if (!form.logoutTime) patch.logoutTime = hours.end;
+    if (Object.keys(patch).length) setFields(patch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, day, form.status]);
+
+  // Weekly off day or a holiday from the Holiday calendar (applies to everyone).
   const naturalHoliday = useMemo(
     () => (day ? getBlockedDayReason(day.date, holidays) : null),
     [day, holidays]
@@ -358,7 +372,7 @@ const EditDayModal = ({
                 />
               </div>
               <p className="text-xs text-gray-500 -mt-2">
-                Leave a time blank to default it to the standard shift (10:00 AM–6:30 PM).
+                Company working hours for this day: {shiftLabel(day.date)}. A time left blank uses these hours.
               </p>
             </>
           )}

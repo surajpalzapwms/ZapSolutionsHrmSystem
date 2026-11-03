@@ -54,6 +54,12 @@ const LeaveAndAttendance = lazy(() => import("./components/attendance/index"));
 const MyAttendance = lazy(() => import("./components/attendance/MyAttendance"));
 const LeaveManagement = lazy(() => import("./components/leave/index"));
 const Settings = lazy(() => import("./components/settings/Settings"));
+// White label: super admin's list of client companies.
+const Companies = lazy(() => import("./components/companies/Companies"));
+// Company admin: branches + one-time links for branch admins.
+const Branches = lazy(() => import("./components/branches/Branches"));
+// Public: the page behind a one-time admin invite link.
+const AcceptInvite = lazy(() => import("./components/invite/AcceptInvite"));
 const AdminPermissions = lazy(() =>
   import("./components/admin-permissions/AdminPermissions"),
 );
@@ -161,6 +167,20 @@ function App() {
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* Public: a one-time link lets one person create their own admin login. */}
+          <Route path="/invite/:token" element={<AcceptInvite />} />
+
+          {/* ── Super admin: client companies (white label) ── */}
+          <Route
+            path="/companies"
+            element={
+              <ProtectedRoute>
+                <AdminRoute superAdminOnly>
+                  <Companies />
+                </AdminRoute>
+              </ProtectedRoute>
+            }
+          />
 
           {/* ── Main protected shell ── */}
           <Route
@@ -332,6 +352,14 @@ function App() {
                 element={
                   <AdminRoute requiredTab="settings">
                     <Settings />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="branches"
+                element={
+                  <AdminRoute companyLevelOnly>
+                    <Branches />
                   </AdminRoute>
                 }
               />

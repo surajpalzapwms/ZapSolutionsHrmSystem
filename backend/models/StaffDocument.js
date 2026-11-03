@@ -12,6 +12,7 @@
 // lists only return the metadata, the bytes are streamed by
 // GET /api/documents/file/:id (see controllers/documentController.js).
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 export const DOCUMENT_TYPES = ["photo", "aadhaar", "pan", "electricity_bill"];
 

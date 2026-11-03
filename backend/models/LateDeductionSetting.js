@@ -8,6 +8,7 @@
 // the attendance calendar — that flag lives on the Attendance record itself
 // (Attendance.lateDeductionWaived), see services/lateDeduction.js.
 import mongoose from "mongoose";
+import "../utils/tenant.js"; // registers the per-company plugin first
 
 const lateDeductionSettingSchema = new mongoose.Schema(
   {

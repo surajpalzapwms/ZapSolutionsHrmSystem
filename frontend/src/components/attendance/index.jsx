@@ -1,5 +1,6 @@
 // src/components/attendance/index.jsx
 import React, { useState, useMemo, lazy, Suspense } from "react";
+import { isCompanyViewOnly } from "../../utils/authUser";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Bell, Clock, Upload } from "lucide-react";
 import { useAttendance } from "./hooks/useAttendance";
@@ -158,20 +159,24 @@ const Attendance = () => {
               )}
             </button>
           )}
-          <button
-            onClick={() => setAttendanceImportOpen(true)}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
-          >
-            <Upload size={16} />
-            Import Attendance
-          </button>
-          <button
-            onClick={() => setLeaveImportOpen(true)}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
-          >
-            <Upload size={16} />
-            Import Leaves
-          </button>
+          {!isCompanyViewOnly() && (
+            <>
+              <button
+                onClick={() => setAttendanceImportOpen(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
+              >
+                <Upload size={16} />
+                Import Attendance
+              </button>
+              <button
+                onClick={() => setLeaveImportOpen(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium text-gray-700"
+              >
+                <Upload size={16} />
+                Import Leaves
+              </button>
+            </>
+          )}
 
           {!selectedStaff && (
             <CurrentStaffToggle

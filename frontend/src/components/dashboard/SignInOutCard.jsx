@@ -6,13 +6,15 @@ import Card from "../common/Card";
 import Spinner from "../common/Spinner";
 import { attendanceService } from "../../services/attendanceService";
 import { showToast } from "../../utils/toast";
+import { workHours } from "../../utils/brand";
 import { refreshSidebarCounts } from "../../hooks/useSidebarCounts";
 
 // Fallbacks — only used until the backend tells us this user's actual
 // values via `meta` (shiftStartTime/shiftEndTime can differ per user, e.g.
 // 10:00–18:30 for most staff, 9:00–17:30 for some).
-const DEFAULT_SHIFT_START = "10:00";
-const DEFAULT_SHIFT_END = "18:30";
+// Company working hours (Settings → Work week & hours).
+const DEFAULT_SHIFT_START = workHours().start;
+const DEFAULT_SHIFT_END = workHours().end;
 const DEFAULT_LUNCH_START = "13:30";
 const DEFAULT_LUNCH_END = "14:15";
 const DEFAULT_REQUIRED_MINUTES = 7 * 60 + 45; // 7h 45m net of lunch

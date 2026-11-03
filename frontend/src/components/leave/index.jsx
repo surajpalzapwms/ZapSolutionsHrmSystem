@@ -15,6 +15,7 @@ import LeaveRequestsPanel from "../attendance/LeaveRequestsPanel";
 import { leavePolicyService } from "../../services/leavePolicyService";
 import { showToast } from "../../utils/toast";
 import { isAdminUser } from "../../utils/authUser";
+import { companyTimeZone } from "../../utils/brand";
 
 // One numeric field in the policy editor.
 const PolicyField = ({ label, hint, value, onChange, disabled }) => (
@@ -58,7 +59,7 @@ const ConfirmationCell = ({ row, year }) => {
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "Asia/Kolkata",
+    timeZone: companyTimeZone(),
   });
   const months = Number(row.monthsAccrued) || 0;
   return (

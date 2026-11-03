@@ -10,6 +10,7 @@ import Button from "../common/Button";
 import Modal from "../common/Modal";
 import { validateRequired } from "../../utils/validation";
 import { getMonthName, getTodayDate, formatDateISO } from "../../utils/dateUtils";
+import { workHours, shiftLabel, weeklyOffLabel, getBrand, formatHM } from "../../utils/brand";
 
 // Same status list EditDayModal uses — `kind` decides which extra fields
 // render below, and which endpoint the parent ends up calling.
@@ -24,18 +25,16 @@ const STATUS_OPTIONS = [
 ];
 const findOption = (value) => STATUS_OPTIONS.find((o) => o.value === value);
 
-// Standard office shift — same constant the backend falls back to
-// (DEFAULT_SHIFT_START / DEFAULT_SHIFT_END) when a time is left blank.
-const DEFAULT_START_TIME = "10:00";
-const DEFAULT_END_TIME = "18:30";
-
+// Login / Logout start with the COMPANY's working hours (Settings → Work
+// week & hours). Left at those hours, every day gets its own company hours
+// (e.g. the shorter Saturday hours on a short Saturday).
 const emptyForm = {
   startDate: "",
   endDate: "",
   status: "present",
   reason: "",
-  loginTime: DEFAULT_START_TIME,
-  logoutTime: DEFAULT_END_TIME,
+  loginTime: "",
+  logoutTime: "",
 };
 
 /**
@@ -119,8 +118,8 @@ const BulkMarkMonthModal = ({
       endDate: formatDateISO(bounds.hi),
       status: canMarkAttendance ? "present" : "paid",
       reason: "",
-      loginTime: DEFAULT_START_TIME,
-      logoutTime: DEFAULT_END_TIME,
+      loginTime: workHours().start,
+      logoutTime: workHours().end,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, month, year]);
@@ -152,8 +151,9 @@ const BulkMarkMonthModal = ({
         leaveType: opt?.leaveType,
         startDate: form.startDate,
         endDate: form.endDate,
-        loginTime: form.loginTime || DEFAULT_START_TIME,
-        logoutTime: form.logoutTime || DEFAULT_END_TIME,
+        // Unchanged company hours -> "" = each day's own company hours.
+        loginTime: form.loginTime === workHours().start ? "" : form.loginTime,
+        logoutTime: form.logoutTime === workHours().end ? "" : form.logoutTime,
         reason: form.reason,
       });
       if (success) onClose();
@@ -169,7 +169,7 @@ const BulkMarkMonthModal = ({
           <CalendarRange size={16} className="mt-0.5 flex-shrink-0" />
           <span>
             This fills in every day that has <strong>no attendance marked yet</strong> between
-            the dates below. Sundays, holidays, and days that already have attendance or leave
+            the dates below. Weekly off days ({weeklyOffLabel()}), holidays, and days that already have attendance or leave
             recorded are left untouched.
           </span>
         </div>
@@ -236,8 +236,11 @@ const BulkMarkMonthModal = ({
               />
             </div>
             <p className="text-xs text-gray-500 -mt-2">
-              Used for every unmarked day in the range. Defaults to the standard shift
-              (10:00 AM–6:30 PM).
+              Company working hours: {shiftLabel()}
+              {getBrand().shortSaturdayActive
+                ? ` (Saturday ${formatHM(getBrand().saturdayStartTime)}–${formatHM(getBrand().saturdayEndTime)})`
+                : ""}. Change them to use
+              other times for every unmarked day in the range.
             </p>
           </>
         )}

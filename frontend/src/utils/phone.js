@@ -13,8 +13,20 @@ import {
   parsePhoneNumberFromString,
   isValidPhoneNumber,
 } from "libphonenumber-js";
+import { getBrand } from "./brand";
 
 export const DEFAULT_COUNTRY = "IN";
+
+// Country of the company in use (Dubai company -> "AE", Saudi -> "SA" ...).
+// A NEW phone number starts with this country's code. Falls back to India.
+export const companyPhoneCountry = () => {
+  try {
+    const iso = String(getBrand()?.country || "").toUpperCase();
+    return iso && iso !== "OTHER" && getCountries().includes(iso) ? iso : DEFAULT_COUNTRY;
+  } catch {
+    return DEFAULT_COUNTRY;
+  }
+};
 
 // Several countries share one calling code (+1, +7, +44 ...). When a stored
 // number only tells us the code, this is the country we show for it.
@@ -88,7 +100,7 @@ const countryFromDigits = (digits) => {
 // Stored string -> { country: "IN", national: "9876543210" }
 export const parsePhone = (value) => {
   const raw = String(value ?? "").trim();
-  if (!raw) return { country: DEFAULT_COUNTRY, national: "" };
+  if (!raw) return { country: companyPhoneCountry(), national: "" };
 
   if (raw.startsWith("+")) {
     const parsed = parsePhoneNumberFromString(raw);

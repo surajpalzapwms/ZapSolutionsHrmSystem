@@ -27,6 +27,8 @@
 // server.js) so req.ip is the real client IP rather than the proxy's.
 
 import os from "os";
+import { getCompanyId, runUnscoped } from "./tenant.js";
+import { listRegisteredCompanies } from "./companyContext.js";
 import OfficeNetwork from "../models/OfficeNetwork.js";
 import OfficeWifi from "../models/OfficeWifi.js";
 
@@ -198,32 +200,46 @@ export const parseOfficeEntries = (input) => {
   return { entries };
 };
 
-// ── In-memory cache of the DB entries ────────────────────────────────────
-let dbEntries = []; // ["1.2.3.4", "2401:...::/64", ...]
-let dbWifis = []; // [{ ssidKey: "zap-office", bssids: ["aa:bb:..."] }]
+// ── In-memory cache of the DB entries, PER COMPANY ──────────────────────
+// Every company has its own office Wi-Fi list. All lists are small, so all
+// companies are read in one go and kept in memory.
+let byCompany = new Map(); // companyId -> { entries: [...], wifis: [...] }
 let lastLoad = 0;
 let loading = null;
 const CACHE_MS = 60 * 1000;
+const EMPTY = Object.freeze({ entries: [], wifis: [] });
+const companyKey = () => String(getCompanyId() || "_");
 
 export const reloadOfficeNetworks = async () => {
   try {
     const now = new Date();
-    const [rows, wifis] = await Promise.all([
-      OfficeNetwork.find({
-        enabled: { $ne: false },
-        $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: now } }],
-      })
-        .select("ip")
-        .lean(),
-      OfficeWifi.find({ enabled: { $ne: false } }).select("ssidKey bssids").lean(),
-    ]);
-    dbEntries = rows.map((r) => r.ip).filter(Boolean);
-    dbWifis = wifis.map((w) => ({ ssidKey: w.ssidKey, bssids: (w.bssids || []).filter(Boolean) }));
+    const [rows, wifis] = await runUnscoped(() =>
+      Promise.all([
+        OfficeNetwork.find({
+          enabled: { $ne: false },
+          $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: now } }],
+        })
+          .select("ip company")
+          .lean(),
+        OfficeWifi.find({ enabled: { $ne: false } }).select("ssidKey bssids company").lean(),
+      ]),
+    );
+    const next = new Map();
+    const slot = (c) => {
+      const k = String(c || "_");
+      if (!next.has(k)) next.set(k, { entries: [], wifis: [] });
+      return next.get(k);
+    };
+    for (const r of rows) if (r.ip) slot(r.company).entries.push(r.ip);
+    for (const w of wifis) {
+      slot(w.company).wifis.push({ ssidKey: w.ssidKey, bssids: (w.bssids || []).filter(Boolean) });
+    }
+    byCompany = next;
     lastLoad = Date.now();
   } catch {
-    // keep the last known list
+    // keep the last known lists
   }
-  return dbEntries;
+  return (byCompany.get(companyKey()) || EMPTY).entries;
 };
 
 const refreshInBackground = () => {
@@ -233,25 +249,35 @@ const refreshInBackground = () => {
   });
 };
 
+// The .env office settings are not per company: they only apply while there
+// is ONE company (or when OFFICE_ENV_FOR_ALL_COMPANIES=true on purpose).
+const envApplies = () =>
+  process.env.OFFICE_ENV_FOR_ALL_COMPANIES === "true" || listRegisteredCompanies().length <= 1;
+
 export const getEnvOfficeEntries = () =>
-  (process.env.OFFICE_ALLOWED_IPS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  envApplies()
+    ? (process.env.OFFICE_ALLOWED_IPS || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
 
 /** Wi-Fi names from .env, e.g. OFFICE_WIFI_NAMES=ZAP-Office,ZAP-Office-5G */
 export const getEnvOfficeWifiNames = () =>
-  (process.env.OFFICE_WIFI_NAMES || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  envApplies()
+    ? (process.env.OFFICE_WIFI_NAMES || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
 
-export const privateLanAllowed = () => process.env.OFFICE_ALLOW_PRIVATE_LAN === "true";
+export const privateLanAllowed = () => envApplies() && process.env.OFFICE_ALLOW_PRIVATE_LAN === "true";
 
-export const getOfficeEntries = () => [...getEnvOfficeEntries(), ...dbEntries];
+const mine = () => byCompany.get(companyKey()) || EMPTY;
+export const getOfficeEntries = () => [...getEnvOfficeEntries(), ...mine().entries];
 export const getOfficeWifis = () => [
   ...getEnvOfficeWifiNames().map((n) => ({ ssidKey: n.toLowerCase(), bssids: [] })),
-  ...dbWifis,
+  ...mine().wifis,
 ];
 export const isOfficeNetworkConfigured = () =>
   getOfficeEntries().length > 0 || getOfficeWifis().length > 0 || privateLanAllowed();
@@ -321,9 +347,11 @@ export const learnOfficeIp = async (rawIp, ssid) => {
   // A private address only says "same LAN as the server"; nothing to learn.
   if (isPrivateIp(ip)) return;
   const entry = officeEntryForIp(ip);
-  const last = learnThrottle.get(entry) || 0;
+  const throttleKey = `${companyKey()}|${entry}`;
+  const last = learnThrottle.get(throttleKey) || 0;
   if (Date.now() - last < 10 * 60 * 1000) return; // at most every 10 min per IP
-  learnThrottle.set(entry, Date.now());
+  if (learnThrottle.size > 5000) learnThrottle.clear();
+  learnThrottle.set(throttleKey, Date.now());
   try {
     const existing = await OfficeNetwork.findOne({ ip: entry });
     if (existing && !existing.learned) return; // saved by an admin — keep as is

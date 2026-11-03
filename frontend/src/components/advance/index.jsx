@@ -1,5 +1,6 @@
 // src/components/advance/index.jsx
 import React, { useState } from "react";
+import { isCompanyViewOnly } from "../../utils/authUser";
 import { Wallet } from "lucide-react";
 import { useAdvance } from "./hooks/useAdvance";
 import AdvanceList from "./AdvanceList";
@@ -104,10 +105,12 @@ const Advance = () => {
       </div>
 
       <div className="flex flex-wrap gap-3 mb-4">
-        <Button variant="primary" size="sm" onClick={addModal.open}>
-          Add Advance
-        </Button>
-        {selected.length > 0 && (
+        {!isCompanyViewOnly() && (
+          <Button variant="primary" size="sm" onClick={addModal.open}>
+            Add Advance
+          </Button>
+        )}
+        {!isCompanyViewOnly() && selected.length > 0 && (
           <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
             Delete ({selected.length})
           </Button>

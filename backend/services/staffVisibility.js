@@ -23,12 +23,12 @@
 // (see server.js), so flipping the toggle takes effect immediately.
 
 import Staff from "../models/Staff.js";
+import { tzOffsetMs } from "../utils/companyContext.js";
 import User from "../models/User.js";
 import { getCompanyId } from "../utils/tenant.js";
 import { isAdminRole } from "../config/permissions.js";
 
 const TTL_MS = 15 * 1000;
-const IST_OFFSET_MS = 330 * 60 * 1000;
 const cache = new Map(); // companyKey -> { at, value }
 const inFlight = new Map(); // companyKey -> Promise
 
@@ -43,7 +43,7 @@ export const istDayKey = (value) => {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
   const d = value instanceof Date ? value : new Date(value);
   if (isNaN(d.getTime())) return null;
-  return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  return new Date(d.getTime() + tzOffsetMs()).toISOString().slice(0, 10);
 };
 
 // Relieving dates are saved as midnight of the chosen day (UTC or IST

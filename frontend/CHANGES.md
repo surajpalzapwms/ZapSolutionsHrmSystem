@@ -1,3 +1,39 @@
+# Work week & hours + attendance times filled from the company hours (3 Nov 2026)
+
+- **Settings → Work week & hours** (new section): weekly off days (with quick picks: Sunday only,
+  Saturday + Sunday, Friday + Saturday, Friday only), office start / end time (shows the net hours after
+  lunch), and "Short Saturday" with its own hours (greyed out when Saturday is a weekly off). Weekly off
+  days moved here from Country & payroll. Needs the matching backend.
+- **Record Attendance**: Login / Logout start filled with the company working hours (Saturday hours on a
+  short Saturday). Picking another date updates them unless the admin already typed other times.
+- **Edit Day**: switching a day to Present fills empty Login / Logout with that day's company hours.
+- **Bulk Mark**: starts with the company hours; left unchanged, every day gets its own company hours.
+- Excel import: a row without TIME OUT uses the company end time. Sign-in card fallbacks use company hours.
+- "Sunday" texts now say "weekly off" with the company's days (Record Attendance, Leave, Bulk Mark,
+  Holiday calendar legend, Excel import). The staff leave form now skips the company's weekly off days
+  when counting days (it skipped only Sunday before - wrong for Saudi / Qatar).
+- `utils/brand.js`: `workHours()`, `companyShiftForDate(day)`, `shiftLabel()`, `formatHM()`.
+
+# White label: multi-company for India, Saudi Arabia and Qatar (27 Oct 2026)
+
+See WHITE_LABEL.md. In short:
+- New **Companies** page for the super admin (`/companies`): add a company
+  with name + country (+ first admin login), open / switch, edit tabs, staff
+  limit, own domain, office Wi-Fi, manage admin logins, activate / deactivate.
+- **Company Profile** replaces Settings: branding, Arabic name, address,
+  registration & tax numbers per country (GSTIN / PAN, CR / VAT, CR / TIN),
+  currency, time zone, weekly off days, signatory, signature, stamp — with a
+  live preview. Editable by the super admin or the company's admin.
+- Login page per company: `/login?company=<link name>` (logo, colours, Arabic
+  name, Staff ID login inside that company). Lock-out messages for inactive
+  companies.
+- `X-Company-Id` sent for the super admin's open company; sidebar shows the
+  open company with a switch button; tabs the company lacks are hidden.
+- Calendars, leave and attendance use the company's weekly off days and time
+  zone instead of Sunday / India time.
+- Payroll allowance / deduction lists follow the company's country.
+- Removed the unused `components/branding/CompanyBranding.jsx`.
+
 # Staff profile photos on the website (14 Oct 2026)
 
 - New `components/common/StaffAvatar.jsx`: round photo with initials as fallback.

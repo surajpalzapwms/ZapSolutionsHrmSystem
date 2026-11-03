@@ -8,6 +8,7 @@ import Button from "../common/Button";
 import { attendanceService } from "../../services/attendanceService";
 import { parseAttendanceSheet } from "../../utils/parseAttendanceSheet";
 import { showToast } from "../../utils/toast";
+import { shiftLabel } from "../../utils/brand";
 
 // Header-only template — matches the columns parseAttendanceSheet.js looks
 // for (DATE(S) / TIME IN / TIME OUT). The whole file is imported for
@@ -185,8 +186,8 @@ const AttendanceExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }
           <FileSpreadsheet className="mx-auto text-gray-400 mb-2" size={32} />
           <p className="text-sm text-gray-600 mb-3">
             Upload the monthly attendance workbook (DATE(S) / TIME IN / TIME OUT, with
-            absent / sunday / half-day marked in the TIME IN column). A row with TIME IN but no TIME OUT
-            defaults to the standard shift end (6:30 PM). Pick the staff member below — the whole file is
+            absent / sunday (weekly off) / half-day marked in the TIME IN column). A row with TIME IN but no TIME OUT
+            defaults to the end of the company working hours ({shiftLabel()}). Pick the staff member below — the whole file is
             imported for that one person.
           </p>
           <label className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer text-sm font-medium text-gray-700">
@@ -219,7 +220,7 @@ const AttendanceExcelImport = ({ isOpen, onClose, staffOptions = [], onSuccess }
               <span>Present: <b>{counts.present}</b></span>
               <span>Absent: <b>{counts.absent}</b></span>
               <span>Half day: <b>{counts.halfDay}</b></span>
-              <span className="text-gray-400">Skipped (Sunday/holiday): {counts.skipped}</span>
+              <span className="text-gray-400">Skipped (weekly off/holiday): {counts.skipped}</span>
               {counts.needsReview > 0 && (
                 <span className="text-amber-600 font-medium">Needs review: {counts.needsReview}</span>
               )}
